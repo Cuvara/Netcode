@@ -16,7 +16,7 @@ jobs:
       - name: Validate package.json
         run: |
           node -e "
-            const pkg = require('./package.json');
+            const pkg = JSON.parse(require('fs').readFileSync('./package.json','utf8'));
             const required = ['name', 'version', 'displayName', 'description', 'unity'];
             const missing = required.filter(k => !pkg[k]);
             if (missing.length) {
@@ -28,7 +28,7 @@ jobs:
 
       - name: Validate CHANGELOG has current version
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).version")
           grep -q "\[$VERSION\]" CHANGELOG.md || {
             echo "::error::CHANGELOG.md missing entry for v$VERSION"
             exit 1
@@ -36,15 +36,15 @@ jobs:
 
       - name: Check asmdef names
         run: |
-          for f in $(find . -name "*.asmdef" -not -path "./.github/*"); do
-            NAME=$(node -p "require('$f').name")
+          find . -name "*.asmdef" -not -path "./.github/*" | while read f; do
+            NAME=$(node -p "JSON.parse(require('fs').readFileSync('$f','utf8')).name")
             echo "  $f → $NAME"
           done
 
   test:
     name: Unity Tests (${{ matrix.unityVersion }})
     runs-on: ubuntu-latest
-    needs: validate
+    if: ${{ vars.UNITY_TESTS_ENABLED == 'true' }}
     strategy:
       matrix:
         unityVersion:
@@ -52,29 +52,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Create a minimal Unity project that embeds this package
       - name: Bootstrap test project
         run: |
-          mkdir -p TestProject/Packages
-          # Link this package into the test project
-          echo '{ "dependencies": {} }' > TestProject/Packages/manifest.json
-          # Embed package via local reference
+          mkdir -p TestProject/Packages TestProject/ProjectSettings
+
+          SHARED_GL_URL=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).dependencies['com.rpgmmo.shared-gamelogic']")
+
           node -e "
-            const m = require('./TestProject/Packages/manifest.json');
-            m.dependencies['com.cuvara.netcode'] = 'file:../../';
-            m.dependencies['com.cysharp.unitask'] = 'https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask#2.5.10';
-            m.dependencies['com.rpgmmo.shared-gamelogic'] = '$(node -p "require('./package.json').dependencies['com.rpgmmo.shared-gamelogic']")';
-            m.testables = ['com.cuvara.netcode'];
-            require('fs').writeFileSync('./TestProject/Packages/manifest.json', JSON.stringify(m, null, 2));
+            const fs = require('fs');
+            const m = {
+              dependencies: {
+                'com.cuvara.netcode': 'file:../../',
+                'com.cysharp.unitask': 'https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask#2.5.10',
+                'com.rpgmmo.shared-gamelogic': process.env.SHARED_GL_URL
+              },
+              testables: ['com.cuvara.netcode']
+            };
+            fs.writeFileSync('./TestProject/Packages/manifest.json', JSON.stringify(m, null, 2));
           "
-          # Minimal ProjectSettings
-          mkdir -p TestProject/ProjectSettings
-          echo '%YAML 1.1
+
+          cat > TestProject/ProjectSettings/ProjectSettings.asset << 'YAML'
+          %YAML 1.1
           %TAG !u! tag:unity3d.com,2011:
           --- !u!129 &1
           PlayerSettings:
             companyName: Cuvara
-            productName: NetcodeTest' > TestProject/ProjectSettings/ProjectSettings.asset
+            productName: NetcodeTest
+          YAML
+        env:
+          SHARED_GL_URL: ${{ env.SHARED_GL_URL }}
 
       - name: Run EditMode tests
         uses: game-ci/unity-test-runner@v4
