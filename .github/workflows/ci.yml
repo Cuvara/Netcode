@@ -44,7 +44,6 @@ jobs:
   test:
     name: Unity Tests (${{ matrix.unityVersion }})
     runs-on: ubuntu-latest
-    if: ${{ vars.UNITY_TESTS_ENABLED == 'true' }}
     strategy:
       matrix:
         unityVersion:
