@@ -21,7 +21,7 @@ Already embedded in `Packages/com.cuvara.netcode/`.
 ### Git URL
 
 ```json
-"com.cuvara.netcode": "https://github.com/Cuvara/IndieRPGMMOAdventure.git?path=Packages/com.cuvara.netcode"
+"com.cuvara.netcode": "https://github.com/Cuvara/Netcode.git#v0.1.0"
 ```
 
 ## Dependencies
