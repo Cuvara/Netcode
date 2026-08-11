@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Diagnostics;
@@ -35,16 +36,19 @@ namespace Cuvara.Netcode.Client
         private readonly ITransportFactory _transports;
         private readonly IWireCodec _codec;
         private readonly INetLog _log;
+        private readonly IAuthProvider _auth;
 
         private GatewayClient _gateway;
         private GameSessionClient _session;
 
-        public NetworkClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log)
+        public NetworkClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log,
+            IAuthProvider auth = null)
         {
             _settings = settings;
             _transports = transports;
             _codec = codec;
             _log = log;
+            _auth = auth;
         }
 
         /// <summary>Every snapshot that resolved, in arrival order.</summary>
@@ -96,6 +100,23 @@ namespace Cuvara.Netcode.Client
         public WorldState World { get; } = new WorldState();
 
         public string UserId => _session?.UserId ?? _gateway?.UserId ?? string.Empty;
+
+        /// <summary>
+        /// Connects using the <see cref="IAuthProvider"/> registered via DI.
+        /// Throws <see cref="InvalidOperationException"/> if no provider was injected.
+        /// </summary>
+        public async UniTask ConnectAsync(string mapId, CancellationToken cancellationToken)
+        {
+            if (_auth == null)
+            {
+                throw new InvalidOperationException(
+                    "No IAuthProvider registered. Either register one in the container " +
+                    "or use the ConnectAsync(jwt, mapId, ct) overload.");
+            }
+
+            var jwt = await _auth.GetJwtAsync(cancellationToken);
+            await ConnectAsync(jwt, mapId, cancellationToken);
+        }
 
         /// <summary>
         /// Runs both hops. Throws <see cref="NetworkException"/> if either server
