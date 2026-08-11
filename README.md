@@ -34,7 +34,7 @@ Must be added manually to your project's `Packages/manifest.json`:
 - **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared with server
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.5",
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",
 "jp.hadashikick.vcontainer": "1.16.8"
 ```
 
