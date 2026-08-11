@@ -63,8 +63,19 @@ jobs:
               dependencies: {
                 'com.cuvara.netcode': 'file:../../',
                 'com.cysharp.unitask': 'https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask#2.5.10',
-                'com.rpgmmo.shared-gamelogic': process.env.SHARED_GL_URL
+                'com.rpgmmo.shared-gamelogic': process.env.SHARED_GL_URL,
+                'jp.hadashikick.vcontainer': '1.16.8'
               },
+              scopedRegistries: [
+                {
+                  name: 'OpenUPM',
+                  url: 'https://package.openupm.com',
+                  scopes: [
+                    'com.cysharp',
+                    'jp.hadashikick'
+                  ]
+                }
+              ],
               testables: ['com.cuvara.netcode']
             };
             fs.writeFileSync('./TestProject/Packages/manifest.json', JSON.stringify(m, null, 2));
@@ -78,8 +89,6 @@ jobs:
             companyName: Cuvara
             productName: NetcodeTest
           YAML
-        env:
-          SHARED_GL_URL: ${{ env.SHARED_GL_URL }}
 
       - name: Run EditMode tests
         uses: game-ci/unity-test-runner@v4
