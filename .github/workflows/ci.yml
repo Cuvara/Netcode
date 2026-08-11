@@ -50,16 +50,18 @@ jobs:
           - 6000.3.9f1
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: package
 
-      # packageMode generates a minimal project but doesn't support git deps
-      # in package.json. Inject shared-gamelogic into the generated manifest.
-      - name: Prepare git dependencies
+      # Build a Unity project at repo root that references the package
+      - name: Bootstrap test project
         run: |
-          mkdir -p TestProject/Packages
-          cat > TestProject/Packages/manifest.json << 'JSON'
+          mkdir -p Assets ProjectSettings Packages
+
+          cat > Packages/manifest.json << 'JSON'
           {
             "dependencies": {
-              "com.cuvara.netcode": "file:../../",
+              "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
               "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.5"
@@ -75,8 +77,7 @@ jobs:
           }
           JSON
 
-          mkdir -p TestProject/ProjectSettings
-          cat > TestProject/ProjectSettings/ProjectSettings.asset << 'YAML'
+          cat > ProjectSettings/ProjectSettings.asset << 'YAML'
           %YAML 1.1
           %TAG !u! tag:unity3d.com,2011:
           --- !u!129 &1
@@ -93,7 +94,6 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           unityVersion: ${{ matrix.unityVersion }}
-          projectPath: TestProject
           testMode: EditMode
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: EditMode Test Results
