@@ -18,7 +18,9 @@
         "email": "common@archergame.mobi"
     },
     "dependencies": {
-        "com.cysharp.unitask": "2.5.10",
+        "com.cysharp.unitask": "2.5.10"
+    },
+    "gitDependencies": {
         "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.5"
     },
     "samples": [

@@ -26,9 +26,17 @@ Already embedded in `Packages/com.cuvara.netcode/`.
 
 ## Dependencies
 
-- **UniTask** (`com.cysharp.unitask`)
-- **VContainer** — DI container (referenced by asmdef, not in package.json to avoid version conflicts)
+Resolved automatically via `package.json`:
+- **UniTask** (`com.cysharp.unitask`) — requires OpenUPM scoped registry
+
+Must be added manually to your project's `Packages/manifest.json`:
+- **VContainer** (`jp.hadashikick.vcontainer`) — DI container (OpenUPM scoped registry)
 - **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared with server
+
+```json
+"com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.5",
+"jp.hadashikick.vcontainer": "1.16.8"
+```
 
 ## Demo
 
