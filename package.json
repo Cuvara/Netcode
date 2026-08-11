@@ -1,0 +1,34 @@
+{
+    "name": "com.cuvara.netcode",
+    "version": "0.1.0",
+    "displayName": "Cuvara Netcode",
+    "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
+    "unity": "6000.3",
+    "documentationUrl": "",
+    "license": "MIT",
+    "keywords": [
+        "netcode",
+        "networking",
+        "transport",
+        "mmo",
+        "rpg"
+    ],
+    "author": {
+        "name": "Cuvara",
+        "email": "common@archergame.mobi"
+    },
+    "dependencies": {
+        "com.cysharp.unitask": "2.5.10",
+        "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.5"
+    },
+    "samples": [
+        {
+            "displayName": "Demo Bootstrap",
+            "description": "Dev harness scene that runs the full gateway → game server → enter world → input/snapshot loop against a local backend.",
+            "path": "Samples~/DemoBootstrap"
+        }
+    ],
+    "testables": [
+        "com.cuvara.netcode"
+    ]
+}
