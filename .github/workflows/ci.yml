@@ -51,45 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Bootstrap test project
-        run: |
-          mkdir -p TestProject/Packages TestProject/ProjectSettings
-
-          SHARED_GL_URL=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).dependencies['com.rpgmmo.shared-gamelogic']")
-
-          node -e "
-            const fs = require('fs');
-            const m = {
-              dependencies: {
-                'com.cuvara.netcode': 'file:../../',
-                'com.cysharp.unitask': 'https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask#2.5.10',
-                'com.rpgmmo.shared-gamelogic': process.env.SHARED_GL_URL,
-                'jp.hadashikick.vcontainer': '1.16.8'
-              },
-              scopedRegistries: [
-                {
-                  name: 'OpenUPM',
-                  url: 'https://package.openupm.com',
-                  scopes: [
-                    'com.cysharp',
-                    'jp.hadashikick'
-                  ]
-                }
-              ],
-              testables: ['com.cuvara.netcode']
-            };
-            fs.writeFileSync('./TestProject/Packages/manifest.json', JSON.stringify(m, null, 2));
-          "
-
-          cat > TestProject/ProjectSettings/ProjectSettings.asset << 'YAML'
-          %YAML 1.1
-          %TAG !u! tag:unity3d.com,2011:
-          --- !u!129 &1
-          PlayerSettings:
-            companyName: Cuvara
-            productName: NetcodeTest
-          YAML
-
       - name: Run EditMode tests
         uses: game-ci/unity-test-runner@v4
         env:
@@ -98,10 +59,12 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           unityVersion: ${{ matrix.unityVersion }}
-          projectPath: TestProject
           testMode: EditMode
+          packageMode: true
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: EditMode Test Results
+          scopedRegistryUrl: https://package.openupm.com
+          registryScopes: 'com.cysharp, jp.hadashikick'
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
