@@ -5,7 +5,12 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] - 2026-08-12
+## [0.3.0] - 2026-08-12
+
+Minor rather than patch: `Runtime/View/` is new public API, there is a new sample, and a
+new package dependency. It also carries the fix that would otherwise have been 0.2.1 —
+folded in rather than released separately, because shipping new public API inside a patch
+tarball would have put `Runtime/View/` in consumers' hands undocumented.
 
 ### Fixed
 
@@ -25,8 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy this; it is a sample's shortcut, not a pattern.
 - Declared `com.unity.modules.unitywebrequest` as a package dependency, which the new
   sample auth needs and which a consumer project may have stripped.
-
-## [Unreleased]
 
 ### Added
 
