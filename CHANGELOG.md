@@ -5,6 +5,78 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Two-client visibility harness** in the E2E Certification sample
+  (`Samples~/E2ECertification/Scripts/TwoClientVisibilityHarness.cs` +
+  `Scenes/TwoClientVisibility.unity`). Runs two independent `NetworkClient` instances
+  with two distinct Nakama identities in one play session and asserts that each one's
+  `WorldState` contains the other. Every prior certification here was single-client, so
+  the client had never actually resolved a remote entity — a world of one proves nothing
+  about the multiplayer claim.
+  The harness documents and guards three false-negative traps, each of which makes a
+  working server look broken: the 50-unit area of interest (two clients driven with
+  merely *similar* headings separate linearly and fall out of range — they are driven
+  with identical vectors and distance is logged as evidence rather than assumed);
+  per-user persisted positions (device ids are tagged per run so both users spawn
+  fresh); and `NakamaSessionService`'s single PlayerPrefs session key, which would make
+  both clients restore the *same* session and silently test one user against itself —
+  a false pass, which is worse than a false failure.
+  It also reports peak world count alongside the final one, because a run that holds two
+  entities for 20 s and then drifts apart ends at one and hides its own success.
+
+- **Two-process visibility probe** (`Samples~/E2ECertification/Scripts/SoloVisibilityProbe.cs`
+  + `Scenes/SoloVisibility.unity`). One client per process, so running it in a player
+  build alongside the Editor tests remote visibility across two OS processes with two
+  Unity runtimes and no shared memory — the authoritative shape, where the in-process
+  harness is only a proxy. Writes its findings to a file in the temp directory as well
+  as the log, because a player build's console cannot be read from outside.
+  Two properties of it are load-bearing, and both exist because two processes cannot be
+  started at the same instant — a gap of 29 s was measured, and 78 s in an earlier
+  attempt:
+  - It **holds position until a peer is actually in view**, then starts moving. Any
+    client that moves during the join gap is already displaced when the second arrives;
+    at ~5 units/s a 29-second gap is ~145 units, well past the 50-unit AOI, and the pair
+    never sees each other while both are behaving correctly.
+  - It then drives a **bounded oscillation** rather than a constant heading, so each
+    client stays within a few units of spawn indefinitely while its position still
+    changes — keeping "the peer is being updated" observable without letting the two
+    drift apart. With a constant heading a 78-second offset put one client at x=353
+    while the other was still at x=0.
+  Together these remove launch timing from the experiment entirely, which is a property
+  the in-process harness gets for free (both clients start in the same frame) and so
+  could never have surfaced.
+
+### Verified
+
+- **Mutual visibility across two OS processes, on Protobuf.** A StandaloneWindows64
+  player build and the Editor, each its own Unity runtime, two distinct Nakama users in
+  `map_01`: both reported `WorldCount = 2` for the entire overlap window, each world
+  containing the other's user id, and each peer's position updating at every 5-second
+  sample. This is the authoritative result; the in-process harness agrees with it.
+  A confirmation that fell out of it: when the Editor client exited, the player kept
+  reporting the departed entity at a frozen position for the remainder of its run — the
+  30-second hold seen from the outside. A held entity is indistinguishable from a live
+  one that has stopped moving, which matters to whoever renders remote players.
+- No static mutable state exists on the client path (`Client/`, `Connection/`,
+  `Snapshot/`, `World/`, `Codec/`, `Transport/`) — every `static` is a pure method, a
+  `static readonly` immutable, or a stateless helper class. That is what rules out an
+  in-process test passing through shared memory rather than over the wire.
+- **Mutual visibility, in-process, on Protobuf.** Two distinct users in
+  `map_01`: `WorldCount == 2` on both sides, each world containing the other's user id.
+  The remote entity is genuinely tracked, not merely spawned once — A's view of B
+  matched B's own reported position at all six samples across 24 s. Snapshots carried
+  two entities, so entity-id interning was exercised with more than one binding for the
+  first time.
+- **Area of interest measured at 50 units.** An earlier run separated the two clients;
+  the remote entity was last visible at 50.5 units apart and absent at 62.2, matching
+  the documented radius to within half a unit.
+- **Entity hold measured at 30 s.** After a deliberate disconnect, the removal reached
+  the other client at **30.1 s** — the documented hold, to within 0.15 s. World count
+  went 2 → 1 and the departed entity left by id.
+
 ## [0.2.0] - 2026-08-12
 
 Minor rather than patch: this adds a wire encoding, a public option, a generated-code
