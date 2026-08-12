@@ -20,9 +20,23 @@ namespace Cuvara.Netcode.Transport
             Host + ":" + Port.ToString(CultureInfo.InvariantCulture);
 
         /// <summary>
-        /// Host substituted for a <c>server_addr</c> that carries only a port.
+        /// Last-resort host for a listen-style <c>server_addr</c> when the caller
+        /// supplies no better fallback. Prefer the overload that takes the gateway
+        /// host — see <see cref="Parse(string, string, out bool)"/>.
         /// </summary>
         public const string DefaultHost = "127.0.0.1";
+
+        /// <summary>
+        /// True for the listen-style hosts a server may advertise but no client can
+        /// dial. Mirrors <c>NormalizeDialAddr</c> in
+        /// <c>backend/smoketest/smoke/helpers.go</c> so both ends agree on the set.
+        /// </summary>
+        /// <remarks>
+        /// <c>"[::]"</c> is absent deliberately: <see cref="Parse(string)"/> strips
+        /// the brackets before this is consulted, so it arrives as <c>"::"</c>.
+        /// </remarks>
+        public static bool IsListenStyleHost(string host) =>
+            string.IsNullOrEmpty(host) || host == "0.0.0.0" || host == "::";
 
         /// <summary>
         /// Parses <c>host:port</c>. Splits on the last colon so a bracketed IPv6
@@ -30,26 +44,42 @@ namespace Cuvara.Netcode.Transport
         /// because <see cref="System.Net.Sockets.TcpClient"/> wants the bare address.
         /// </summary>
         /// <remarks>
-        /// A host-less <c>server_addr</c> such as <c>":9200"</c> is normalised to
-        /// <see cref="DefaultHost"/> rather than rejected. This is the documented
-        /// contract, not leniency for its own sake: the game server advertises
-        /// <c>GAMESERVER_PUBLIC_ADDR</c> and the gateway hands it back verbatim, and
-        /// `backend/deploy/docker-compose.yml` states that a bare <c>":9200"</c> is
-        /// normalised by the client to <c>127.0.0.1:9200</c> — correct for a local
-        /// stack, where the published port is on the same machine as the client. Go's
-        /// <c>net.Dial</c> does the same thing, so the Go tooling never noticed the
-        /// gap this client fell into.
+        /// A listen-style <c>server_addr</c> such as <c>":9200"</c> or
+        /// <c>"0.0.0.0:9200"</c> is normalised rather than rejected — see
+        /// <see cref="Parse(string, string, out bool)"/>. This is <b>hardening, not
+        /// the contract</b>. The contract is the server's: <c>GameServer</c> requires
+        /// the address it advertises through <c>GAMESERVER_PUBLIC_ADDR</c> to be
+        /// dialable by the client, and the wire protocol specifies no format for
+        /// <c>server_addr</c> at all. A server that advertises a listen-style address
+        /// is misconfigured; this only keeps a local stack usable instead of failing
+        /// on something a human can trivially misread. Go's <c>net.Dial</c> resolves
+        /// such addresses implicitly, which is why the Go tooling never surfaced the
+        /// difference.
         /// <para>
-        /// It is only ever correct locally. A real deployment must set
-        /// <c>GAMESERVER_PUBLIC_ADDR=&lt;public-host&gt;:&lt;published-port&gt;</c>; a
-        /// host-less address reaching a player's device would send it to its own
-        /// loopback. Hence the deliberate choice of loopback over "reuse the gateway
-        /// host", which would silently paper over that misconfiguration in production
-        /// by connecting to something plausible but unintended.
+        /// Because it masks a server-side misconfiguration, every rewrite is reported
+        /// through the <c>normalised</c> out-parameter so the caller can warn.
         /// </para>
         /// </remarks>
-        public static NetworkEndpoint Parse(string address)
+        public static NetworkEndpoint Parse(string address) =>
+            Parse(address, DefaultHost, out _);
+
+        /// <summary>
+        /// Parses <c>host:port</c>, substituting <paramref name="fallbackHost"/> when
+        /// the address carries a listen-style host no client can dial.
+        /// </summary>
+        /// <param name="address">The <c>server_addr</c> as received.</param>
+        /// <param name="fallbackHost">
+        /// Host to substitute. Callers should pass the gateway host they already
+        /// reached, not a loopback literal: a device talking to a LAN or remote
+        /// gateway must fall back to that gateway's host, never to its own loopback.
+        /// </param>
+        /// <param name="normalised">
+        /// True when the host was rewritten, so the caller can log a warning — a
+        /// rewrite always means the server advertised something undialable.
+        /// </param>
+        public static NetworkEndpoint Parse(string address, string fallbackHost, out bool normalised)
         {
+            normalised = false;
             if (string.IsNullOrEmpty(address))
             {
                 throw new TransportException("server address is empty");
@@ -69,9 +99,10 @@ namespace Cuvara.Netcode.Transport
                 host = host.Substring(1, host.Length - 2);
             }
 
-            if (host.Length == 0)
+            if (IsListenStyleHost(host))
             {
-                host = DefaultHost;
+                host = string.IsNullOrEmpty(fallbackHost) ? DefaultHost : fallbackHost;
+                normalised = true;
             }
 
             if (!int.TryParse(portText, NumberStyles.None, CultureInfo.InvariantCulture, out var port) ||

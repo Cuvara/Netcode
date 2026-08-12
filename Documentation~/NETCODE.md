@@ -100,6 +100,46 @@ public sealed class Connector
 }
 ```
 
+## Where the JWT comes from
+
+Two paths, and it matters which one is live.
+
+| | Host app | The samples |
+|---|---|---|
+| Source | an `IAuthProvider` registered in the container | `DevJwt.Sign` in `NetworkBootstrap` |
+| Call | `ConnectAsync(mapId, ct)` — resolves the token itself | `ConnectAsync(jwt, mapId, ct)` |
+| Secret client-side? | **no** | yes, `jwtSecret` in the config asset |
+| For | shipping | local development only |
+
+A host app implements `IAuthProvider` (`Runtime/Auth/IAuthProvider.cs`) and registers
+it; `NetworkClient` picks it up and `ConnectAsync(mapId, ct)` resolves the token
+through it. This project's implementation is `Scripts.Nakama.Auth.NakamaAuthProvider`,
+registered by `RegisterNakama()`:
+
+```csharp
+// GameLifetimeScope.Configure
+builder.RegisterNetworking();
+builder.RegisterNakama();   // binds NakamaAuthProvider as IAuthProvider
+```
+
+`NetworkBootstrap` prefers the provider whenever one is present
+(`NetworkClient.HasAuthProvider`) and falls back to `DevJwt` only when none is, so a
+host app that has wired up real auth is never quietly authenticated by the sample's
+minting. Which path ran is logged at step 1/5 — check that line before debugging an
+identity problem.
+
+> **A `[SerializeField]` secret is a development affordance, not a design.** `DevJwt`
+> exists so the samples run against a local backend with one process instead of two.
+> Anything shipping must use a provider: with one, no signing secret is on the client
+> at all, because the token is minted server-side.
+
+> **Injection is opt-in.** VContainer only injects components it is told about, so a
+> `LifetimeScope` in the scene is not by itself enough — the scope must register the
+> component (e.g. `RegisterComponentInHierarchy<NetworkBootstrap>()`) for `[Inject]`
+> to run. Without that, `NetworkBootstrap` reports "no container found", builds its
+> own `NetworkClient`, and falls back to `DevJwt` even though a provider is
+> registered.
+
 ## Framing
 
 `[4-byte big-endian length][body]`, body at most 1 MiB. A length of zero, a
@@ -122,24 +162,50 @@ Where the latch lives, and why there are two halves of it:
   gateway builds them off the victim connection's goroutine and may not read its
   latched encoding from there. A per-frame sniff makes that a non-event.
 
-### Protobuf is not implemented
+### Choosing the encoding
 
-Only `JsonWireCodec` exists. Both servers still accept JSON, so the client works
-end to end today, but this is the legacy path and it costs bandwidth: Protobuf
-plus the entity-type enum plus id interning is **81% smaller** on the wire.
+Both codecs exist. JSON is the **default** so an existing caller does not change
+behaviour on upgrade; Protobuf is the backend's default and is what production
+should use.
 
-To add it:
+```csharp
+builder.RegisterNetworking(settings, WireEncoding.Protobuf);
+```
 
-1. Add a Protobuf runtime for Unity (`Google.Protobuf`, via NuGetForUnity or a
-   vendored DLL) and generate C# from `backend/shared/proto/wire.proto` — do not
-   hand-write the types, and do not add a third definition of the schema.
-2. Implement `IWireCodec` over the generated `Envelope`, mapping the
-   `EntityType` enum to the same names `GameServer/Net/EntityTypes.cs` uses
-   (`player`, `mob`, `npc`, `item`, `projectile`), preferring `type` and falling
-   back to `type_name`.
-3. Register it in place of `JsonWireCodec` in `NetworkingRegistration`. Nothing
-   else changes: `WireConnection` already sniffs inbound frames, and
-   `SnapshotResolver` already implements interning.
+Nothing on the server changes: both servers mirror the encoding of the first frame
+they receive, per connection, so a JSON and a Protobuf client can share one server.
+
+|  | JSON | Protobuf |
+|---|---|---|
+| First body byte | `0x7B` (`{`) | `0x08` |
+| Entity id on a delta | always sent | interned away after first mention |
+| Entity kind | plain string | `type` enum, `type_name` fallback |
+| Measured keyframe / delta | — | 64 B / 24 B for one entity |
+
+Two behaviours ride along with Protobuf that JSON never exercises, and **both
+present as gameplay bugs rather than codec bugs**: entity-id interning and the
+entity-type enum. A green JSON certification says nothing about either. See
+"Snapshots and entity-handle interning" below.
+
+#### Regenerating the schema types
+
+`Runtime/Protocol/Generated/Wire.cs` is generated, committed, and must never be
+hand-edited. `wire.proto` in the backend repo stays the single source of truth:
+
+```bash
+protoc --proto_path=backend/shared/proto \
+       --csharp_out=Runtime/Protocol/Generated wire.proto     # libprotoc 29.3
+```
+
+Use **libprotoc 29.3** so the output is reproducible; it pairs with the vendored
+`Google.Protobuf` 3.29.3, which is the version the backend's `GameServer.csproj`
+pins. It is committed because Unity cannot run protoc at import time.
+
+`Google.Protobuf.dll` is vendored at `Runtime/Plugins/` — the package's only
+third-party binary. The generated code carries 322 references to that runtime and
+does not stand alone, so the dependency is unavoidable rather than a preference. It
+lives inside the package so the package remains importable on its own, and
+`Runtime/link.xml` preserves it from IL2CPP stripping.
 
 ## Heartbeat — implemented once
 
@@ -409,11 +475,11 @@ the scene it constructs one itself and logs that it did.
 ### What running it actually proved
 
 Observed end to end against the local Docker stack on 2026-08-11, gateway on
-`127.0.0.1:8100`:
+`127.0.0.1:8000`:
 
 ```
 [bootstrap] step 1/5 — minting a development JWT for 'dev-player'
-[bootstrap] step 2/5 — connecting to gateway 127.0.0.1:8100, map 'map_01'
+[bootstrap] step 2/5 — connecting to gateway 127.0.0.1:8000, map 'map_01'
 [bootstrap]   → auth: sending the JWT to the gateway
 [Net] authenticated with the gateway as 'dev-player'
 [bootstrap] step 3/5 — enter_world 'map_01': asking the gateway which game server to dial
@@ -434,16 +500,29 @@ position walking the synthetic circle.
 
 Two client bugs had to be fixed to get here, both found by running it.
 
-**1. A host-less `server_addr` was rejected.** The stack advertises
-`GAMESERVER_PUBLIC_ADDR=":9200"` and the gateway returns it verbatim;
+**1. A host-less `server_addr` was rejected.** The stack advertised
+`GAMESERVER_PUBLIC_ADDR=":9200"` and the gateway returned it verbatim;
 `NetworkEndpoint.Parse` required a host and threw
-`server address ':9200' is not host:port`, one step after `enter_world`. The
-compose file states the contract — a bare `":9200"` is normalised **by the
-client** to `127.0.0.1:9200` — and Go's `net.Dial` does this natively, which is
-why no Go-side test ever covered it. Now normalised, with tests. Deliberately to
-loopback and not to "the gateway's host": a host-less address reaching a real
-device is a server misconfiguration, and quietly connecting to something
-plausible would hide it.
+`server address ':9200' is not host:port`, one step after `enter_world`. Go's
+`net.Dial` resolves such an address natively, which is why no Go-side test ever
+covered it.
+
+Where the contract actually lives was settled afterwards, and it is **not** in
+the client: `GameServer/Program.cs` requires the address advertised through
+`GAMESERVER_PUBLIC_ADDR` to be dialable *by the client*, and the wire protocol
+specifies no format for `server_addr` at all. A server advertising a
+listen-style address is therefore misconfigured, and the deploy was fixed to
+advertise `127.0.0.1:9200`.
+
+The client still normalises, as **hardening** rather than as the fix — it keeps
+a misconfigured local stack usable. `NetworkEndpoint.IsListenStyleHost` covers
+`""`, `"0.0.0.0"` and `"::"` (`"[::]"` arrives as `"::"` once the brackets are
+stripped), matching `NormalizeDialAddr` in
+`backend/smoketest/smoke/helpers.go` so both ends agree on the set. The
+substitute is **the gateway host the client already reached**, not a loopback
+literal: a device talking to a LAN or remote gateway must not be redirected to
+its own loopback. Every rewrite logs a warning naming the misconfiguration, so
+the fallback cannot hide the server-side problem it is compensating for.
 
 **2. Input and heartbeat stalled after exactly one frame when unfocused.** The
 symptom was `sent 1 ack 1 rtt 0ms` forever while snapshots kept arriving, which
