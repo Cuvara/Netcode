@@ -32,7 +32,7 @@ namespace Samples.WorldView
         [SerializeField] private string mapId = "map_01";
 
         [Header("Run")]
-        [SerializeField] private float runSeconds = 75f;
+        [SerializeField] private float runSeconds = 300f;
         [SerializeField] private int inputRateHz = 15;
 
         [Tooltip("Seconds after the peer appears before the screenshot is taken, so both " +
@@ -46,13 +46,19 @@ namespace Samples.WorldView
         private string _role;
         private string _reportPath;
         private DateTime? _peerSeenAt;
+        private int _instance = 1;
         private bool _shotTaken;
 
         private void Start()
         {
             Application.runInBackground = true;
 
-            _role = Application.isEditor ? "editor" : "player";
+            // Several standalone players can run at once, so identity comes from an
+            // `-instance N` command-line argument. Without it every standalone build would
+            // pick the same role, overwrite the same report file, and use the same motion
+            // phase — three windows that are impossible to tell apart.
+            _instance = ReadInstanceArg();
+            _role = Application.isEditor ? "editor" : ("p" + _instance);
             _reportPath = Path.Combine(Path.GetTempPath(), $"netcode-view-{_role}.txt");
 
             SetUpCamera();
@@ -157,7 +163,10 @@ namespace Samples.WorldView
                     // they visibly separate and re-converge — relative motion is the thing
                     // worth being able to see, and identical phase left them overlapping.
                     // Phase, unlike a heading difference, cannot accumulate into distance.
-                    var phase = Application.isEditor ? 0f : Mathf.PI;
+                    // Evenly spaced phases keep every client visually distinct: with three
+                    // instances they sit 120 degrees apart and never all bunch together.
+                    // Phase, unlike a heading difference, cannot accumulate into distance.
+                    var phase = Application.isEditor ? 0f : (_instance - 1) * (2f * Mathf.PI / 3f);
                     var moveX = _peerSeenAt.HasValue
                         ? Mathf.Sin((float)(DateTime.UtcNow - _peerSeenAt.Value).TotalSeconds * 1.5f + phase)
                         : 0f;
@@ -248,6 +257,21 @@ namespace Samples.WorldView
                 if (tex != null) Destroy(tex);
                 if (rt != null) { rt.Release(); Destroy(rt); }
             }
+        }
+
+        /// <summary>Reads <c>-instance N</c>; defaults to 1 when absent.</summary>
+        private static int ReadInstanceArg()
+        {
+            var args = Environment.GetCommandLineArgs();
+            for (var i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "-instance" && int.TryParse(args[i + 1], out var n) && n > 0)
+                {
+                    return n;
+                }
+            }
+
+            return 1;
         }
 
         private void OnDestroy()
