@@ -65,6 +65,22 @@ untouched and JSON stays the default — but none of that is a patch.
   number belongs to a different entity, so a successful lookup is the dangerous
   outcome, not the safe one.
 
+### Verified
+
+- Certified against a live Nakama + gateway + game server stack on **both encodings**,
+  70 s per run so the server's 10 s ping / 30 s pong-timeout heartbeat is actually
+  exercised — every earlier run sat inside that window and proved nothing about it.
+  Protobuf: 881 snapshots, 851 deltas. JSON: 1029 snapshots, 995 deltas. Both forced a
+  keyframe on resync, reconnected inside the 30 s entity hold with position preserved,
+  and finished with zero errors. The 851 Protobuf deltas are the interning coverage JSON
+  structurally cannot provide.
+- **IL2CPP with managed stripping at High**, Android, arm64: `Google.Protobuf.dll`
+  survives the stripping pass and reaches IL2CPP conversion; 2137 objects compiled and
+  the build succeeded. This is what `link.xml` exists to guarantee and the one thing an
+  Editor (Mono) run can never show. Note the project's Android default is stripping
+  *Minimal*, the least aggressive level, so the test was run at High deliberately —
+  a green build at Minimal would be weaker evidence than it looks.
+
 ## [0.1.2] - 2026-08-12
 
 ### Added
