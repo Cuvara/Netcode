@@ -9,8 +9,6 @@ using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Json;
 using Cuvara.Netcode.Transport;
-using Nakama;
-using Scripts.Nakama;
 using UnityEngine;
 
 namespace Samples.NetcodeE2E
@@ -85,16 +83,11 @@ namespace Samples.NetcodeE2E
                 var device = $"solo-{_role}-{DateTime.UtcNow.Ticks}";
                 Line($"deviceId={device}");
 
-                var nakama = new NakamaSessionService(new NakamaSettings());
-                var session = await nakama.AuthenticateDeviceAsync(device, ct);
-                Line($"USER_ID={session.UserId}");
-
-                var rpc = await nakama.Client.RpcAsync(session, "gateway_token", "{}");
-                var jwt = JsonParser.Parse(rpc.Payload ?? "{}").GetString("token");
-                if (string.IsNullOrEmpty(jwt))
-                {
-                    throw new InvalidOperationException("gateway_token returned no token");
-                }
+                // Package-local auth over plain HTTP: no Nakama SDK, nothing outside
+                // this package, so the sample compiles for an external consumer.
+                var auth = new SampleNakamaAuth();
+                var jwt = await auth.GetGatewayTokenAsync(device, ct);
+                Line($"USER_ID={auth.UserId}");
 
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
@@ -163,6 +156,26 @@ namespace Samples.NetcodeE2E
                     }
                 }
 
+                // Durations must be measured from the SECOND join, not the local one.
+                // The two processes join ~17-29 s apart; holding position removes the
+                // DISTANCE that skew causes but not the skew itself, so a local in-world
+                // figure overstates the two-player window by exactly that gap. This
+                // clock starts when the peer actually appeared.
+                var overlap = _peerSeenAt.HasValue
+                    ? (DateTime.UtcNow - _peerSeenAt.Value).TotalSeconds
+                    : 0d;
+                // UPPER BOUND, not the overlap. Measuring from peer appearance fixes the
+                // join-skew inflation at the START, but the END cannot be seen locally:
+                // a departed peer's entity is HELD for 30 s and keeps appearing, so a
+                // client that outlives its peer goes on counting a co-presence that has
+                // already ended. Measured: the client that left first reported 62.8 s
+                // against a true 63.0 s, while the one that outlived it by 12 s reported
+                // 74.9 s — inflated by exactly that tail. The real figure is the MINIMUM
+                // across both clients, i.e. second join to first exit, which needs both
+                // clients' data. This is the held-entity ghost showing up in a metric.
+                Line($"LOCAL_PEER_PRESENT_FOR={overlap:F1}s (upper bound on the two-player " +
+                     $"overlap: clocked from peer appearance so join skew is excluded, but a " +
+                     $"held entity hides the peer's departure — take the MIN across both clients)");
                 Line($"FINAL count={_client.World.Count} peak={peak} world={DumpWorld()}");
                 Line($"SELF={_client.UserId}");
                 Line("DONE");
