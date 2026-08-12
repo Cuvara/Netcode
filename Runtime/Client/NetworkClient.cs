@@ -102,6 +102,17 @@ namespace Cuvara.Netcode.Client
         public string UserId => _session?.UserId ?? _gateway?.UserId ?? string.Empty;
 
         /// <summary>
+        /// True when an <see cref="IAuthProvider"/> was supplied, so
+        /// <see cref="ConnectAsync(string, CancellationToken)"/> can be used.
+        /// </summary>
+        /// <remarks>
+        /// Lets a caller choose the real auth path when one is wired up and fall back to
+        /// a development credential when it is not, without provoking an exception to
+        /// find out which it is.
+        /// </remarks>
+        public bool HasAuthProvider => _auth != null;
+
+        /// <summary>
         /// Connects using the <see cref="IAuthProvider"/> registered via DI.
         /// Throws <see cref="InvalidOperationException"/> if no provider was injected.
         /// </summary>

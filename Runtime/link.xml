@@ -1,0 +1,20 @@
+<!--
+  IL2CPP managed-code stripping preservation.
+
+  Protobuf's generated code registers each message type through a static
+  MessageParser and reaches its properties reflectively during parsing, so the
+  stripper cannot see those uses and will happily remove members that are only
+  ever touched that way. The symptom is not a compile error: it is a runtime
+  failure in the player only — typically a null parser or an empty message — while
+  the Editor, which does not strip, stays perfectly green. That asymmetry is the
+  reason this file exists.
+
+  Scope is deliberately narrow: the Protobuf runtime and the generated schema
+  types. Nothing else in the package relies on reflection.
+-->
+<linker>
+  <assembly fullname="Google.Protobuf" preserve="all" />
+  <assembly fullname="Cuvara.Netcode.Runtime">
+    <namespace fullname="RpgMmo.Wire.V1" preserve="all" />
+  </assembly>
+</linker>

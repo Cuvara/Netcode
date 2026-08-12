@@ -38,27 +38,22 @@ namespace Cuvara.Netcode.Snapshot
         }
 
         /// <summary>
-        /// Resolves one snapshot. Returns false when a handle has no binding; the
-        /// caller must then send <c>resync</c> and apply the keyframe instead. No
-        /// new binding is recorded on a failed resolve, so a retry sees the same
-        /// table — except on a keyframe, which clears it up front and is in any case
-        /// about to be replaced by the keyframe the resync asks for.
+        /// Resolves one snapshot. Returns false when a handle cannot be resolved; the
+        /// caller must then send <c>resync</c> and apply the keyframe instead.
         /// </summary>
+        /// <remarks>
+        /// Nothing is mutated until every entity has resolved — not the handle table,
+        /// not a single binding — so a rejected snapshot leaves the client exactly as it
+        /// was rather than partially updated or newly empty. Two ways to fail: a delta
+        /// naming a handle with no binding, and a keyframe carrying a bare handle, which
+        /// is malformed because a keyframe introduces every binding it uses.
+        /// </remarks>
         public bool TryResolve(SnapshotMessage snapshot, out ResolvedSnapshot resolved)
         {
             resolved = default;
             if (snapshot == null)
             {
                 return false;
-            }
-
-            // A keyframe re-introduces every binding, so the previous interval's
-            // table is cleared BEFORE resolving rather than after. Resolving a
-            // keyframe against stale bindings is the one way a handle can resolve to
-            // the wrong entity, and the wrong entity is worse than no entity.
-            if (snapshot.Full)
-            {
-                _handles.Clear();
             }
 
             var entities = new List<ResolvedEntity>(snapshot.Entities.Count);
@@ -72,6 +67,19 @@ namespace Cuvara.Netcode.Snapshot
                 {
                     if (string.IsNullOrEmpty(id))
                     {
+                        // A keyframe must introduce every binding it uses: the sender
+                        // resets its handle space and re-sends each entity with both id
+                        // and handle. A bare handle here is therefore malformed, and it
+                        // is rejected WITHOUT consulting the table — the previous
+                        // interval's binding for this number belongs to a different
+                        // entity, so a successful lookup would be the dangerous outcome,
+                        // not the safe one.
+                        if (snapshot.Full)
+                        {
+                            UnresolvedCount++;
+                            return false;
+                        }
+
                         if (!_handles.TryResolve(e.Handle, out id))
                         {
                             UnresolvedCount++;
@@ -97,6 +105,16 @@ namespace Cuvara.Netcode.Snapshot
                 }
 
                 entities.Add(new ResolvedEntity(id, e.Type, e.X, e.Y, e.Hp, e.MaxHp));
+            }
+
+            // Every entity resolved, so state may now be mutated. The clear happens
+            // here — after validation, before the new bindings land — so an aborted
+            // snapshot leaves the table exactly as it was. Clearing up front would
+            // wipe the table and then abort, leaving the client with no bindings and
+            // an empty world until a resync completed.
+            if (snapshot.Full)
+            {
+                _handles.Clear();
             }
 
             foreach (var binding in pending)

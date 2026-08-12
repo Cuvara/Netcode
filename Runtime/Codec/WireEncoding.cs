@@ -14,7 +14,8 @@ namespace Cuvara.Netcode.Codec
 
         /// <summary>
         /// Protobuf, generated from <c>shared/proto/wire.proto</c>. First body byte
-        /// <c>0x08</c>. Not implemented in this client yet.
+        /// <c>0x08</c>. The backend's default encoding, and the one that carries
+        /// entity-id interning and the entity-type enum.
         /// </summary>
         Protobuf = 2
     }

@@ -43,6 +43,7 @@ namespace Cuvara.Netcode.Connection
         private readonly ITransport _transport;
         private readonly IWireCodec _outbound;
         private readonly IWireCodec _jsonInbound;
+        private readonly IWireCodec _protobufInbound;
         private readonly NetworkSettings _settings;
         private readonly INetLog _log;
         private readonly string _name;
@@ -74,12 +75,18 @@ namespace Cuvara.Netcode.Connection
             _settings = settings;
             _log = log;
 
-            // Inbound JSON is always decodable regardless of what we send: the
-            // gateway builds eviction frames off the victim connection's goroutine
-            // and cannot read its latched encoding, so it writes JSON.
+            // Inbound is decoded per frame by sniffing, never by assuming the peer
+            // mirrored us, so BOTH codecs are kept ready regardless of what we send.
+            // JSON must always be decodable because the gateway builds eviction frames
+            // off the victim connection's goroutine and cannot read its latched
+            // encoding, so it writes JSON whatever the connection negotiated.
             _jsonInbound = outboundCodec.Encoding == WireEncoding.Json
                 ? outboundCodec
                 : new JsonWireCodec();
+
+            _protobufInbound = outboundCodec.Encoding == WireEncoding.Protobuf
+                ? outboundCodec
+                : new ProtobufWireCodec();
 
             _lastPongMs = NowMs();
         }
@@ -341,12 +348,7 @@ namespace Cuvara.Netcode.Connection
                     return _jsonInbound.DecodeBody(body);
 
                 case WireEncoding.Protobuf:
-                    // Reachable only if a server ever initiates in Protobuf. Neither
-                    // does today — both answer in the encoding they were addressed
-                    // in — so this is a loud "wire the Protobuf codec up", not a
-                    // condition to paper over.
-                    throw new WireCodecException(
-                        "received a Protobuf frame, which this client cannot decode yet");
+                    return _protobufInbound.DecodeBody(body);
 
                 default:
                     throw new WireCodecException(
