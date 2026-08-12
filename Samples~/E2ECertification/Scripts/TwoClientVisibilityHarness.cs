@@ -10,8 +10,6 @@ using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Json;
 using Cuvara.Netcode.Snapshot;
 using Cuvara.Netcode.Transport;
-using Nakama;
-using Scripts.Nakama;
 using UnityEngine;
 
 namespace Samples.NetcodeE2E
@@ -38,10 +36,12 @@ namespace Samples.NetcodeE2E
     /// with near-identical movement and the run is kept short.</item>
     /// <item>Positions are persisted per user, so a reused device id respawns at a
     /// saved position that may be far away. Every run mints BRAND NEW device ids.</item>
-    /// <item><see cref="NakamaSessionService"/> caches its session in PlayerPrefs under
-    /// one shared key, so going through the auth provider would restore the SAME
-    /// session for both clients and silently test one user against itself. Each client
-    /// authenticates with an explicit device id instead.</item>
+    /// <item>A shared session cache would make both clients the SAME user and silently
+    /// test one user against itself — a false PASS, which is worse than a false failure.
+    /// The original version of this hit exactly that, because the project's Nakama
+    /// wrapper cached its session in PlayerPrefs under one key. Now structurally
+    /// impossible: each client owns a <c>SampleNakamaAuth</c> that caches nothing and
+    /// authenticates an explicit per-run device id.</item>
     /// </list>
     /// </remarks>
     public sealed class TwoClientVisibilityHarness : MonoBehaviour
@@ -136,15 +136,16 @@ namespace Samples.NetcodeE2E
             var deviceB = "two-client-B-" + tag;
             Debug.Log($"[2C] encoding={encoding} deviceA={deviceA} deviceB={deviceB}");
 
-            var settings = new NakamaSettings();
+            // Two independent auth clients over plain HTTP — no Nakama SDK and nothing
+            // outside this package, so the sample compiles for an external consumer.
+            // Separate instances also mean neither can inherit the other's session.
+            var authA = new SampleNakamaAuth();
+            var authB = new SampleNakamaAuth();
 
-            var nakamaA = new NakamaSessionService(settings);
-            var nakamaB = new NakamaSessionService(settings);
-
-            var sessionA = await nakamaA.AuthenticateDeviceAsync(deviceA, ct);
-            var sessionB = await nakamaB.AuthenticateDeviceAsync(deviceB, ct);
-            UserA = sessionA.UserId;
-            UserB = sessionB.UserId;
+            var jwtA = await authA.GetGatewayTokenAsync(deviceA, ct);
+            var jwtB = await authB.GetGatewayTokenAsync(deviceB, ct);
+            UserA = authA.UserId;
+            UserB = authB.UserId;
             DistinctIdentities = UserA != UserB && !string.IsNullOrEmpty(UserA);
             Debug.Log($"[2C] A={UserA}\n[2C] B={UserB}\n[2C] distinct={DistinctIdentities}");
 
@@ -154,9 +155,6 @@ namespace Samples.NetcodeE2E
                     "both clients authenticated as the same Nakama user; the visibility " +
                     "result would be meaningless");
             }
-
-            var jwtA = await GatewayTokenAsync(nakamaA, sessionA, ct);
-            var jwtB = await GatewayTokenAsync(nakamaB, sessionB, ct);
 
             _a = NewClient("A");
             _b = NewClient("B");
@@ -328,21 +326,6 @@ namespace Samples.NetcodeE2E
             }
 
             return sb.Length == 0 ? "(empty)" : sb.ToString();
-        }
-
-        private static async UniTask<string> GatewayTokenAsync(
-            NakamaSessionService nakama, ISession session, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var rpc = await nakama.Client.RpcAsync(session, "gateway_token", "{}");
-            var token = JsonParser.Parse(rpc.Payload ?? "{}").GetString("token");
-            if (string.IsNullOrEmpty(token))
-            {
-                throw new InvalidOperationException(
-                    "gateway_token RPC returned no token; payload: " + rpc.Payload);
-            }
-
-            return token;
         }
 
         private void OnDestroy()
