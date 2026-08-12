@@ -6,8 +6,6 @@ using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Snapshot;
 using Cuvara.Netcode.Transport;
-using Nakama;
-using Scripts.Nakama;
 using UnityEngine;
 
 namespace Samples.NetcodeE2E
@@ -127,35 +125,35 @@ namespace Samples.NetcodeE2E
         private async UniTask RunFlowAsync(CancellationToken ct)
         {
             // ---------- A3: Nakama device auth, from the client ----------
-            var settings = new NakamaSettings();
-            Debug.Log($"[E2E] A3 — Nakama at {settings.Scheme}://{settings.Host}:{settings.Port} " +
-                      $"serverKey='{settings.ServerKey}', deviceId='{deviceId}'");
+            // Package-local auth over plain HTTP: no Nakama SDK, nothing outside this
+            // package, so the sample compiles for an external consumer.
+            Debug.Log($"[E2E] A3 — Nakama at http://127.0.0.1:7350 serverKey='defaultkey', " +
+                      $"deviceId='{deviceId}'");
 
-            var nakama = new NakamaSessionService(settings);
-            var session1 = await nakama.AuthenticateDeviceAsync(deviceId, ct);
-            NakamaUserId1 = session1.UserId;
-            Debug.Log($"[E2E] A3.1 first device auth OK — user_id={session1.UserId} " +
-                      $"username={session1.Username} created={session1.Created}");
+            var auth1 = new SampleNakamaAuth();
+            var gatewayJwt1 = await auth1.GetGatewayTokenAsync(deviceId, ct);
+            NakamaUserId1 = auth1.UserId;
+            Debug.Log($"[E2E] A3.1 first device auth OK — user_id={auth1.UserId}");
 
             // Re-auth with the SAME device id must return the SAME user id.
-            var nakama2 = new NakamaSessionService(settings);
-            var session2 = await nakama2.AuthenticateDeviceAsync(deviceId, ct);
-            NakamaUserId2 = session2.UserId;
-            SameUserOnReAuth = session1.UserId == session2.UserId;
-            Debug.Log($"[E2E] A3.2 re-auth same deviceId — user_id={session2.UserId} " +
-                      $"created={session2.Created} SAME_USER={SameUserOnReAuth}");
+            var auth2 = new SampleNakamaAuth();
+            await auth2.GetGatewayTokenAsync(deviceId, ct);
+            NakamaUserId2 = auth2.UserId;
+            SameUserOnReAuth = auth1.UserId == auth2.UserId;
+            Debug.Log($"[E2E] A3.2 re-auth same deviceId — user_id={auth2.UserId} " +
+                      $"SAME_USER={SameUserOnReAuth}");
 
             // ---------- A2: does the raw Nakama session token work as a gateway JWT? ----------
             // NakamaAuthProvider returns Session.AuthToken. Test that claim directly.
             Debug.Log("[E2E] A2 — testing whether the RAW Nakama session token is accepted " +
                       "by the gateway (this is what NakamaAuthProvider.GetJwtAsync returns)");
-            RawSessionTokenResult = await TryGatewayAuthAsync(session1.AuthToken, ct);
+            RawSessionTokenResult = await TryGatewayAuthAsync(auth1.SessionToken, ct);
             Debug.Log($"[E2E] A2 RESULT raw-session-token → {RawSessionTokenResult}");
 
             // ---------- A1: the gateway_token RPC, the documented correct path ----------
             Debug.Log("[E2E] A1 — calling Nakama RPC 'gateway_token' for a gateway-signed JWT");
-            var gatewayJwt = await FetchGatewayTokenAsync(nakama, session1, ct);
-            GatewayJwtSource = "nakama rpc gateway_token";
+            var gatewayJwt = gatewayJwt1;
+            GatewayJwtSource = "nakama rpc gateway_token (raw HTTP)";
             Debug.Log($"[E2E] A1 got gateway JWT via RPC, length={gatewayJwt.Length}, " +
                       $"prefix={gatewayJwt.Substring(0, Math.Min(24, gatewayJwt.Length))}...");
 
@@ -218,7 +216,8 @@ namespace Samples.NetcodeE2E
             _client.SnapshotReceived += OnReconnectSnapshot;
 
             // A fresh gateway token, exactly as a real client would on resume.
-            var jwt2 = await FetchGatewayTokenAsync(nakama, session1, ct);
+            // A fresh token, exactly as a real client would mint on resume.
+            var jwt2 = await auth1.GetGatewayTokenAsync(deviceId, ct);
             await _client.ConnectAsync(jwt2, mapId, ct);
             ReconnectGapSeconds = (float)gap;
             ReconnectJoined = true;
@@ -305,62 +304,8 @@ namespace Samples.NetcodeE2E
             }
         }
 
-        /// <summary>
-        /// Nakama wraps RPC payloads as a JSON-encoded string, so the result has to
-        /// be unwrapped twice: once out of the envelope, once out of the string.
-        /// </summary>
-        private async UniTask<string> FetchGatewayTokenAsync(
-            NakamaSessionService nakama, ISession session, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var rpc = await nakama.Client.RpcAsync(session, "gateway_token", "{}");
-            var payload = rpc.Payload ?? string.Empty;
-            Debug.Log($"[E2E] A1 raw RPC payload: {payload}");
 
-            // Payload may itself be a quoted JSON string literal.
-            if (payload.Length > 1 && payload[0] == '"')
-            {
-                payload = UnquoteJson(payload);
-            }
 
-            var token = ExtractJsonString(payload, "token");
-            if (string.IsNullOrEmpty(token))
-            {
-                throw new InvalidOperationException(
-                    "gateway_token RPC returned no 'token' field. Payload: " + payload);
-            }
-
-            return token;
-        }
-
-        private static string UnquoteJson(string quoted)
-        {
-            var inner = quoted.Substring(1, quoted.Length - 2);
-            return inner.Replace("\\\"", "\"").Replace("\\\\", "\\");
-        }
-
-        private static string ExtractJsonString(string json, string key)
-        {
-            var needle = "\"" + key + "\"";
-            var at = json.IndexOf(needle, StringComparison.Ordinal);
-            if (at < 0) return null;
-
-            var colon = json.IndexOf(':', at + needle.Length);
-            if (colon < 0) return null;
-
-            var open = json.IndexOf('"', colon + 1);
-            if (open < 0) return null;
-
-            var sb = new System.Text.StringBuilder();
-            for (var i = open + 1; i < json.Length; i++)
-            {
-                if (json[i] == '\\' && i + 1 < json.Length) { sb.Append(json[i + 1]); i++; continue; }
-                if (json[i] == '"') break;
-                sb.Append(json[i]);
-            }
-
-            return sb.ToString();
-        }
 
         private async UniTask InputLoopAsync(CancellationToken ct)
         {

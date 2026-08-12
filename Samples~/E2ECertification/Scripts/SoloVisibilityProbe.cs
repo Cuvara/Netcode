@@ -9,8 +9,6 @@ using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Json;
 using Cuvara.Netcode.Transport;
-using Nakama;
-using Scripts.Nakama;
 using UnityEngine;
 
 namespace Samples.NetcodeE2E
@@ -85,16 +83,11 @@ namespace Samples.NetcodeE2E
                 var device = $"solo-{_role}-{DateTime.UtcNow.Ticks}";
                 Line($"deviceId={device}");
 
-                var nakama = new NakamaSessionService(new NakamaSettings());
-                var session = await nakama.AuthenticateDeviceAsync(device, ct);
-                Line($"USER_ID={session.UserId}");
-
-                var rpc = await nakama.Client.RpcAsync(session, "gateway_token", "{}");
-                var jwt = JsonParser.Parse(rpc.Payload ?? "{}").GetString("token");
-                if (string.IsNullOrEmpty(jwt))
-                {
-                    throw new InvalidOperationException("gateway_token returned no token");
-                }
+                // Package-local auth over plain HTTP: no Nakama SDK, nothing outside
+                // this package, so the sample compiles for an external consumer.
+                var auth = new SampleNakamaAuth();
+                var jwt = await auth.GetGatewayTokenAsync(device, ct);
+                Line($"USER_ID={auth.UserId}");
 
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
