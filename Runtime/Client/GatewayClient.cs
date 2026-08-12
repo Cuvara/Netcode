@@ -139,8 +139,22 @@ namespace Cuvara.Netcode.Client
                     throw new NetworkException("gateway returned no join token");
                 }
 
-                var endpoint = NetworkEndpoint.Parse(response.ServerAddr);
+                // Fall back to the gateway host rather than a loopback literal: a
+                // device talking to a LAN or remote gateway must not be sent to its
+                // own loopback when the server advertises a listen-style address.
+                var endpoint = NetworkEndpoint.Parse(
+                    response.ServerAddr, _settings.GatewayHost, out var normalised);
                 var transport = TransportKinds.Parse(response.Transport);
+
+                if (normalised)
+                {
+                    _log.Warn(
+                        $"game server advertised '{response.ServerAddr}', which carries no dialable " +
+                        $"host; falling back to the gateway host and dialing {endpoint}. The server " +
+                        "is misconfigured — set GAMESERVER_PUBLIC_ADDR to a host:port the client can " +
+                        "reach. This fallback is only correct while the game server and the gateway " +
+                        "share a host.");
+                }
 
                 _log.Info($"map '{mapId}' assigned to {endpoint} over {transport}");
                 return new MapAssignment(endpoint, response.JoinToken, transport);

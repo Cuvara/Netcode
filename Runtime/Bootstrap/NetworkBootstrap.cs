@@ -44,6 +44,8 @@ namespace Cuvara.Netcode.Bootstrap
         private CancellationTokenSource _lifetime;
         private long _inputTick;
         private int _snapshotsSeen;
+        private bool _runInBackgroundToRestore;
+        private bool _runInBackgroundOverridden;
 
         /// <summary>Optional. Present when a VContainer scope registered the networking layer.</summary>
         [Inject]
@@ -66,6 +68,15 @@ namespace Cuvara.Netcode.Bootstrap
             // reasonable default for a single-player game and the wrong one for this.
             // Set here rather than flipped project-wide, because that decision belongs
             // to whoever owns the shipping player settings.
+            //
+            // SAVED AND RESTORED, NOT JUST SET. In the Editor this setter writes
+            // through to PlayerSettings and the change PERSISTS after play mode ends,
+            // so a bare assignment means merely running this sample permanently
+            // rewrites a project-wide setting of whatever host project imported it —
+            // it showed up as an unexplained ProjectSettings.asset diff. Restored in
+            // OnDestroy. Do not collapse this back into a one-line assignment.
+            _runInBackgroundToRestore = Application.runInBackground;
+            _runInBackgroundOverridden = true;
             Application.runInBackground = true;
 
             if (config == null)
@@ -120,24 +131,47 @@ namespace Cuvara.Netcode.Bootstrap
             _client.SessionClosed += OnSessionClosed;
             _client.GatewayClosed += OnGatewayClosed;
 
-            Debug.Log($"[bootstrap] step 1/5 — minting a development JWT for '{config.UserId}' " +
-                      "(HS256, shared secret; in production Nakama issues this)");
-            string jwt;
-            try
+            // Prefer a real auth provider whenever the container supplied one, so a
+            // host app that has wired up Nakama is never silently authenticated by the
+            // sample's development minting. With no provider the local mint is the
+            // point: the sample must run with zero DI setup.
+            var useAuthProvider = _client.HasAuthProvider;
+            string jwt = null;
+
+            if (useAuthProvider)
             {
-                jwt = DevJwt.Sign(config.UserId, config.JwtSecret, TimeSpan.FromSeconds(config.JwtLifetimeSeconds));
+                Debug.Log("[bootstrap] step 1/5 — requesting a token from the registered " +
+                          "IAuthProvider (the real auth path; DevJwt is not used)");
             }
-            catch (Exception ex)
+            else
             {
-                Debug.LogError($"[bootstrap] could not mint a token: {ex.Message}");
-                return;
+                Debug.Log($"[bootstrap] step 1/5 — no IAuthProvider registered, minting a " +
+                          $"development JWT for '{config.UserId}' (HS256, shared secret). " +
+                          "Register one — e.g. RegisterNakama() — for the real auth path.");
+                try
+                {
+                    jwt = DevJwt.Sign(
+                        config.UserId, config.JwtSecret, TimeSpan.FromSeconds(config.JwtLifetimeSeconds));
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[bootstrap] could not mint a token: {ex.Message}");
+                    return;
+                }
             }
 
             Debug.Log($"[bootstrap] step 2/5 — connecting to gateway {config.GatewayHost}:{config.GatewayPort}, " +
                       $"map '{config.MapId}'");
             try
             {
-                await _client.ConnectAsync(jwt, config.MapId, cancellationToken);
+                if (useAuthProvider)
+                {
+                    await _client.ConnectAsync(config.MapId, cancellationToken);
+                }
+                else
+                {
+                    await _client.ConnectAsync(jwt, config.MapId, cancellationToken);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -145,9 +179,15 @@ namespace Cuvara.Netcode.Bootstrap
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[bootstrap] connect failed: {ex.Message}. " +
-                               $"Is the gateway listening on {config.GatewayHost}:{config.GatewayPort} " +
-                               "and is its JWT_SECRET the same as the one in the config asset?");
+                var hint = useAuthProvider
+                    ? "Is the gateway listening on " +
+                      $"{config.GatewayHost}:{config.GatewayPort}, and does the token the " +
+                      "IAuthProvider returned carry a 'sub' the gateway can resolve?"
+                    : "Is the gateway listening on " +
+                      $"{config.GatewayHost}:{config.GatewayPort} and is its JWT_SECRET the " +
+                      "same as the one in the config asset?";
+
+                Debug.LogError($"[bootstrap] connect failed: {ex.Message}. {hint}");
                 return;
             }
 
@@ -294,6 +334,30 @@ namespace Cuvara.Netcode.Bootstrap
             _owned?.Dispose();
             _owned = null;
             _client = null;
+
+            RestoreRunInBackground();
+        }
+
+        /// <summary>
+        /// Puts <see cref="Application.runInBackground"/> back as it was found.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately here and not in <c>OnDisable</c>: disabling this component does
+        /// not end the session, and restoring the flag while the socket is still live
+        /// would stop the input loop and the heartbeat in an unfocused Editor — the
+        /// exact failure the override exists to prevent. <c>OnDestroy</c> is where the
+        /// session is actually torn down, and it also runs on play-mode exit, which is
+        /// the case that was leaking into PlayerSettings.
+        /// </remarks>
+        private void RestoreRunInBackground()
+        {
+            if (!_runInBackgroundOverridden)
+            {
+                return;
+            }
+
+            _runInBackgroundOverridden = false;
+            Application.runInBackground = _runInBackgroundToRestore;
         }
     }
 }

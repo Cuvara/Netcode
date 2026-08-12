@@ -64,5 +64,50 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             Assert.AreEqual("127.0.0.1:9200", NetworkEndpoint.Parse(":9200").ToString());
         }
+
+        // --- listen-style hosts: advertisable by a server, dialable by nobody ---
+
+        [TestCase("", true)]
+        [TestCase("0.0.0.0", true)]
+        [TestCase("::", true)]
+        [TestCase("127.0.0.1", false)]
+        [TestCase("gameserver", false)]
+        [TestCase("::1", false)]
+        public void ClassifiesListenStyleHosts(string host, bool expected)
+        {
+            Assert.AreEqual(expected, NetworkEndpoint.IsListenStyleHost(host));
+        }
+
+        [TestCase(":9200", 9200)]
+        [TestCase("0.0.0.0:9200", 9200)]
+        [TestCase("[::]:9200", 9200)]
+        public void ListenStyleAddressFallsBackToTheGivenHost(string address, int port)
+        {
+            var endpoint = NetworkEndpoint.Parse(address, "gateway.example.com", out var normalised);
+
+            Assert.IsTrue(normalised, "a rewrite must be reported so the caller can warn");
+            Assert.AreEqual("gateway.example.com", endpoint.Host);
+            Assert.AreEqual(port, endpoint.Port);
+        }
+
+        [TestCase("127.0.0.1:9200", "127.0.0.1")]
+        [TestCase("gameserver:9200", "gameserver")]
+        [TestCase("[fe80::1]:9200", "fe80::1")]
+        public void RealHostsPassThroughUntouched(string address, string host)
+        {
+            var endpoint = NetworkEndpoint.Parse(address, "gateway.example.com", out var normalised);
+
+            Assert.IsFalse(normalised, "a dialable host must not be rewritten");
+            Assert.AreEqual(host, endpoint.Host);
+        }
+
+        [Test]
+        public void FallsBackToDefaultHostWhenNoFallbackSupplied()
+        {
+            var endpoint = NetworkEndpoint.Parse(":9200", null, out var normalised);
+
+            Assert.IsTrue(normalised);
+            Assert.AreEqual(NetworkEndpoint.DefaultHost, endpoint.Host);
+        }
     }
 }
