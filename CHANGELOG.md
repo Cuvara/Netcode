@@ -5,9 +5,65 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-12
+
+### Fixed
+
+- **0.2.0's samples could not compile outside this repository.** Every sample referenced
+  `Scripts.Nakama` — `NakamaSessionService` / `NakamaSettings` — which lives in the host
+  project's `Assets/`, not in the package. The package's `Runtime/` was and is clean, so
+  installing 0.2.0 worked; it broke only on sample import, which is exactly when a new
+  consumer first touches it. Affected `NetcodeE2EHarness`, `SoloVisibilityProbe`,
+  `TwoClientVisibilityHarness` and `WorldViewDemo`.
+  Each sample now carries a `SampleNakamaAuth` that talks to Nakama over plain HTTP with
+  `UnityWebRequest` and the package's own `JsonParser` — no Nakama SDK, no new dependency,
+  and nothing outside the package. It is duplicated per sample on purpose: Package Manager
+  imports samples independently, so a single shared copy outside the sample folders would
+  not be imported, and two copies in one namespace would collide for anyone importing
+  both. Each copy sits in its own sample's namespace.
+  A real application should still implement `Cuvara.Netcode.Auth.IAuthProvider` rather than
+  copy this; it is a sample's shortcut, not a pattern.
+- Declared `com.unity.modules.unitywebrequest` as a package dependency, which the new
+  sample auth needs and which a consumer project may have stripped.
+
 ## [Unreleased]
 
 ### Added
+
+- **Entity view layer** (`Runtime/View/`) — the world is now renderable.
+  - `IEntityView` — three methods: `Spawn(id, isLocal)`, `Despawn(id)`,
+    `SetState(id, x, y, hp, maxHp)`. Deliberately narrow, because the point of the seam
+    is that a DOTS implementation can replace the GameObject one later without the
+    netcode noticing, and a wide interface makes that swap expensive.
+  - `GameObjectEntityView` — primitive capsules, green and larger for the local player,
+    red for remotes. **No interpolation and no prediction, on purpose**: positions are
+    applied exactly as the server sent them, so remote entities visibly step at the tick
+    rate. Smoothing here would hide the tick rate and hide dropped snapshots, which are
+    the two things this exists to make observable. HP shows as a vertical squash — one
+    line, no UI, readable in a screenshot.
+  - `WorldViewBinder` — reconciles the view against `WorldState`: present-and-unknown →
+    spawn, known-and-absent → despawn, otherwise update. **Polls rather than subscribing
+    to snapshots**, because GameObject APIs are main-thread only and a poll driven from
+    `Update` is main-thread by construction, `WorldState` is already the merged result so
+    a poll loses nothing, and reconciling against the whole world makes despawn fall out
+    of absence — which is correct, since the wire does not distinguish an AOI exit from a
+    true despawn. `NoteRemovedIds` optionally records ids named in `removed` so the two
+    causes can be told apart in diagnostics; it is not load-bearing for the reconcile.
+  - The local player is identified by comparing the entity key with `NetworkClient.UserId`
+    — the key IS the Nakama user id, so this needs no extra wire field.
+  - Chose GameObjects over DOTS deliberately: the project ships the DOTS packages and has
+    no ECS code, and the first ECS in the codebase should not be the thing being used to
+    debug netcode. If it broke, you could not tell which half broke.
+
+- **World View sample** (`Samples~/WorldView`, displayName "World View"). One client that
+  renders what it sees, plus a top-down camera built in code so the scene needs nothing
+  configured by hand. Run one in a player build and one in the Editor to watch two
+  clients move around each other.
+  It captures its own PNG by rendering the camera to a `RenderTexture` rather than calling
+  `ScreenCapture.CaptureScreenshot` — that call depends on a presenting surface, so in the
+  Editor it silently wrote nothing while the log line still claimed success, from code
+  identical to the player build's. Rendering explicitly behaves the same in both processes
+  and fails loudly, which is what test evidence has to do.
 
 - **Two-client visibility harness** in the E2E Certification sample
   (`Samples~/E2ECertification/Scripts/TwoClientVisibilityHarness.cs` +

@@ -1,6 +1,6 @@
 {
     "name": "com.cuvara.netcode",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "displayName": "Cuvara Netcode",
     "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
     "unity": "6000.3",
@@ -18,7 +18,8 @@
         "email": "duycuong2k3@gmail.com"
     },
     "dependencies": {
-        "com.cysharp.unitask": "2.5.10"
+        "com.cysharp.unitask": "2.5.10",
+        "com.unity.modules.unitywebrequest": "1.0.0"
     },
     "gitDependencies": {
         "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6"
@@ -28,6 +29,11 @@
             "displayName": "Demo Bootstrap",
             "description": "Dev harness scene that runs the full gateway → game server → enter world → input/snapshot loop against a local backend.",
             "path": "Samples~/DemoBootstrap"
+        },
+        {
+            "displayName": "World View",
+            "description": "Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. No interpolation and no prediction, on purpose.",
+            "path": "Samples~/WorldView"
         },
         {
             "displayName": "E2E Certification",
