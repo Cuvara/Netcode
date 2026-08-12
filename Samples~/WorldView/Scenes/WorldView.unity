@@ -151,7 +151,7 @@ MonoBehaviour:
   gatewayHost: 127.0.0.1
   gatewayPort: 8000
   mapId: map_01
-  runSeconds: 75
+  runSeconds: 300
   inputRateHz: 15
   screenshotAfterPeerSeconds: 6
 --- !u!4 &10083096

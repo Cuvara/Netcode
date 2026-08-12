@@ -5,6 +5,52 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-12
+
+Documents multi-instance support that **0.3.0 shipped without documenting**, and settles
+the World View sample's run length. Anyone diffing 0.3.0's tarball against its changelog
+would have found `-instance N` present and unexplained; this is that explanation, not a
+new feature.
+
+### Added
+
+- **`-instance N` command-line argument** for the World View sample. Present in 0.3.0's
+  tarball but undocumented there.
+  It is required rather than cosmetic: every standalone build reports
+  `Application.isEditor == false`, so without an explicit instance number several copies
+  all choose the same role, write over each other's report file, and share one motion
+  phase — producing windows that cannot be told apart. The argument is what makes running
+  more than one player build at a time meaningful. Absent, it defaults to 1.
+- **Evenly spaced motion phases** across instances, `(instance - 1) × 2π/3`, so three
+  clients sit 120° apart instead of bunching together. Also present in 0.3.0 and
+  undocumented.
+  Still phase rather than heading, for the reason that matters: **phase cannot accumulate
+  into distance**, while two different headings diverge linearly and will eventually cross
+  the server's 50-unit area of interest, at which point the clients stop seeing each other
+  and a correct system looks broken.
+
+### Changed
+
+- World View sample `runSeconds` 75 → **300**, in both the code default and the serialized
+  scene. This sample exists to be watched by a person, and 75 seconds is short for that.
+  Both had to change: a modified `[SerializeField]` initializer does **not** update a value
+  already serialized into a scene, so changing only the default silently keeps the old
+  behaviour. 0.3.0's published scene still read 75.
+
+### Verified
+
+- **Three clients, three Nakama users, one map — every client saw all three.** Three
+  separate Standalone player processes on Protobuf, each holding all three entities for the
+  full 110 s observed, `views` tracking `world` at every sample, and
+  `despawn(removed)=0 despawn(absent)=0` throughout — no spurious despawns across three
+  clients for nearly two minutes:
+  `CLIENT 1/2/3  t=110s  world=3 views=3 live=3 despawn(removed)=0 despawn(absent)=0`
+  This is the first run with more than two clients, so it is also the first time the view
+  layer rendered multiple remotes and the first time entity-id interning resolved more than
+  two entities. Each client renders itself green and larger with its peers red, so a
+  screenshot from any one of them shows one green and two red — the picture that
+  distinguishes genuine multiplayer from a working pair.
+
 ## [0.3.0] - 2026-08-12
 
 Minor rather than patch: `Runtime/View/` is new public API, there is a new sample, and a
