@@ -39,6 +39,11 @@
             "displayName": "E2E Certification",
             "description": "Client-driven certification rig: Nakama device auth and the gateway_token RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Needs a running backend and no signing secret.",
             "path": "Samples~/E2ECertification"
+        },
+        {
+            "displayName": "DOTS Sample",
+            "description": "Spawns 5 ECS entities with 3D meshes that move and spin using pure DOTS/ECS systems (Burst-compiled ISystem). Demonstrates runtime entity creation with RenderMeshUtility, IComponentData, and SystemAPI.Query.",
+            "path": "Samples~/DOTSSample"
         }
     ],
     "testables": [
