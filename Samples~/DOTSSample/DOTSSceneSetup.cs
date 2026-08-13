@@ -35,17 +35,22 @@ namespace DOTSSample
             ground.name = "Ground";
             ground.transform.position = Vector3.zero;
             ground.transform.localScale = new Vector3(2.5f, 1f, 2.5f);
-            var groundMat = new Material(Shader.Find("Universal Render Pipeline/Lit") ??
-                                         Shader.Find("Standard"));
-            groundMat.color = new Color(0.15f, 0.18f, 0.22f);
-            ground.GetComponent<Renderer>().material = groundMat;
+            var groundMat = Resources.Load<Material>("DOTSGroundMaterial");
+            if (groundMat != null)
+                ground.GetComponent<Renderer>().material = groundMat;
 
-            // DOTS Spawner
-            var spawner = gameObject.GetComponent<DOTSSpawner>();
-            if (spawner == null)
-                gameObject.AddComponent<DOTSSpawner>();
+            // Combat — enemies, bullets, auto-attack
+            var combat = gameObject.GetComponent<CombatBootstrap>();
+            if (combat == null)
+                gameObject.AddComponent<CombatBootstrap>();
 
-            Debug.Log("[DOTSSceneSetup] Scene ready — 5 ECS entities will spawn on Start");
+            // Network bridge — connects to gateway → game server and renders
+            // replicated entities as ECS entities alongside the local demo ones.
+            var bridge = gameObject.GetComponent<DOTSNetworkBridge>();
+            if (bridge == null)
+                gameObject.AddComponent<DOTSNetworkBridge>();
+
+            Debug.Log("[DOTSSceneSetup] Scene ready — DOTS entities + combat + network bridge");
         }
     }
 }
