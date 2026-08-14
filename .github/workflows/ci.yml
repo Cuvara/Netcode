@@ -179,6 +179,14 @@ jobs:
           - name: openupm-registry-only
             registries: true
             handDeps: false
+          # The package plus exactly what the README tells a consumer to add: the OpenUPM
+          # scoped registry and the Shared.GameLogic git entry. Nothing else. This is the
+          # documented install, so this row is the one that must pass.
+          - name: documented-prereqs
+            registries: true
+            handDeps: false
+            sharedGameLogic: true
+            required: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -193,9 +201,15 @@ jobs:
             REGISTRIES='"scopedRegistries": [{"name":"OpenUPM","url":"https://package.openupm.com","scopes":["com.cysharp","jp.hadashikick","org.nuget"]}],'
           fi
 
+          SGL=""
+          if [ "${{ matrix.probe.sharedGameLogic }}" = "true" ]; then
+            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",'
+          fi
+
           cat > Packages/manifest.json << JSON
           {
             "dependencies": {
+              $SGL
               "com.cuvara.netcode": "file:../package"
             },
             $REGISTRIES
@@ -228,6 +242,17 @@ jobs:
           testMode: EditMode
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: Install probe ${{ matrix.probe.name }}
+
+      # Only the documented-install row gates. The other two exist to record what a
+      # consumer sees when a prerequisite is missing, and both are expected to fail —
+      # gating them would mean asserting the package installs with no registry at all,
+      # which it has never claimed to do.
+      - name: Required row must compile
+        if: matrix.probe.required && steps.compile.outcome != 'success'
+        run: |
+          echo "::error::The documented install failed. A consumer following the README" \
+               "cannot compile this package."
+          exit 1
 
       - name: Report what Unity said
         if: always()
