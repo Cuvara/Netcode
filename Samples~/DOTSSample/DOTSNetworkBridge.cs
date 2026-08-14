@@ -5,8 +5,10 @@ using Cysharp.Threading.Tasks;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
+using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.Transport;
 using Cuvara.Netcode.View;
+using Shared.GameLogic.Components;
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
@@ -32,7 +34,21 @@ namespace DOTSSample
         [SerializeField] private string mapId = "map_01";
 
         [Header("Input")]
+        [Tooltip("Inputs sent per second. Must equal the server's simulation tick rate: " +
+                 "the server integrates one step per accepted input at 1/tickRate, and " +
+                 "applies only the newest when several land in one tick.")]
         [SerializeField] private int inputRateHz = 15;
+
+        [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
+                 "sine-wave walk, which is what this sample did before and is still what " +
+                 "you want for an unattended soak run.")]
+        [SerializeField] private bool useKeyboardInput = true;
+
+        [Header("Prediction")]
+        [Tooltip("Local player's movement speed. MUST match the server's " +
+                 "ServerDefaults.DefaultPlayerSpeed — no wire message carries it, so this " +
+                 "is a hand-kept copy. Zero disables prediction rather than guessing.")]
+        [SerializeField] private float playerSpeed = 5f;
 
         [Header("Run")]
         [SerializeField] private float runSeconds = 300f;
@@ -40,9 +56,16 @@ namespace DOTSSample
         private NetworkClient _client;
         private WorldViewBinder _binder;
         private DOTSEntityView _view;
+        private LocalMovePredictor _predictor;
         private CancellationTokenSource _cts;
         private long _inputTick;
         private string _pendingAttackTarget = "";
+
+        // Movement sampled on the main thread each frame, consumed by the input loop.
+        // Input.GetAxisRaw is main-thread only and the send loop is a UniTask on its own
+        // cadence, so the two are deliberately decoupled through these fields.
+        private float _moveX;
+        private float _moveY;
 
         // --- Status for OnGUI ---
         private string _status = "Initializing...";
@@ -211,7 +234,25 @@ namespace DOTSSample
             Application.runInBackground = true;
 
             _view = new DOTSEntityView();
-            _binder = new WorldViewBinder(_view);
+
+            // Prediction settings are stated, never defaulted. inputRateHz doubles as the
+            // server tick rate because the two must match anyway — the server integrates
+            // one step per accepted input at 1/tickRate, so a client sending at a
+            // different rate predicts a different distance. playerSpeed has to be the
+            // server's spawn default (ServerDefaults.DefaultPlayerSpeed); nothing on the
+            // wire carries it, which is the weakest joint in this setup and is why the
+            // predictor refuses rather than guesses when it is left at zero.
+            _predictor = new LocalMovePredictor(
+                new PredictionSettings(inputRateHz, playerSpeed, MapBounds.Default));
+
+            // A predictor that refused is passed anyway: the binder treats a disabled one
+            // as no predictor at all, so the fallback is 0.4.0's behaviour rather than a
+            // special case anyone has to remember to write.
+            _binder = new WorldViewBinder(_view, _predictor);
+
+            Debug.Log(_binder.IsPredicting
+                ? $"[DOTSNet] Prediction ON — {inputRateHz}Hz, speed {playerSpeed}"
+                : "[DOTSNet] Prediction OFF — settings unusable; rendering server positions");
 
             _cts = new CancellationTokenSource();
             // Connection starts when a map is selected (see the OnGUI map selector).
@@ -338,8 +379,44 @@ namespace DOTSSample
             PollServerStatusAsync(_cts.Token).Forget();
         }
 
+        /// <summary>
+        /// Reads this frame's movement direction into <see cref="_moveX"/> /
+        /// <see cref="_moveY"/> for the input loop to pick up.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why this sample now has real input at all.</b> It used to send
+        /// <c>sin(Time.time * 1.5)</c> / <c>cos(Time.time * 0.8)</c> — an autopilot. That
+        /// is the right thing for an unattended soak run and it is kept behind
+        /// <see cref="useKeyboardInput"/>, but it makes the question this sample exists to
+        /// answer unanswerable: "does moving feel responsive?" has no meaning when nothing
+        /// is pressing anything, and keypress-to-visible latency cannot be measured
+        /// without a keypress to measure from.
+        /// </para>
+        /// <para>
+        /// Raw axes, not smoothed ones. <c>GetAxis</c> applies its own acceleration curve,
+        /// which would put a second, client-only easing in front of a change whose entire
+        /// purpose is removing delay — and it would make the vector the client predicts
+        /// with differ from the one a player would say they pressed.
+        /// </para>
+        /// </remarks>
+        private void SampleMovementInput()
+        {
+            if (!useKeyboardInput)
+            {
+                _moveX = Mathf.Sin(Time.time * 1.5f);
+                _moveY = Mathf.Cos(Time.time * 0.8f);
+                return;
+            }
+
+            _moveX = Input.GetAxisRaw("Horizontal");
+            _moveY = Input.GetAxisRaw("Vertical");
+        }
+
         private void Update()
         {
+            SampleMovementInput();
+
             // FPS sampling
             float dt = Time.unscaledDeltaTime;
             _frameTimes[_frameIndex] = dt;
@@ -509,13 +586,20 @@ namespace DOTSSample
 
                     _inputTick++;
 
-                    var moveX = Mathf.Sin(Time.time * 1.5f);
-                    var moveY = Mathf.Cos(Time.time * 0.8f);
+                    var moveX = _moveX;
+                    var moveY = _moveY;
                     var attackTarget = _pendingAttackTarget;
                     _pendingAttackTarget = "";
                     if (!string.IsNullOrEmpty(attackTarget))
                         Debug.Log($"[Attack] Sending attack on {attackTarget} (tick {_inputTick})");
+
                     _client.Session?.SendInput(_inputTick, moveX, moveY, attackTarget);
+
+                    // Recorded immediately after the send, with the same tick and the same
+                    // vector — the predictor's whole contract is that it saw exactly what
+                    // the server will see. Only the movement half is predicted;
+                    // attackTarget is not passed and combat stays server-authoritative.
+                    _predictor?.RecordInput(_inputTick, moveX, moveY);
 
                     await UniTask.Delay(TimeSpan.FromSeconds(dt), DelayType.Realtime,
                         PlayerLoopTiming.Update, ct);
@@ -923,6 +1007,31 @@ namespace DOTSSample
                     _cachedRttText = "RTT: " + rttMs + "ms  Tick: " + tick;
                 }
                 GUI.Label(new Rect(10, y, w, h), _cachedRttText);
+            }
+
+            // --- Prediction (below RTT) ---
+            // Deliberately shown even when prediction is OFF. A silently-absent predictor
+            // looks exactly like a working one that is doing nothing, and this sample
+            // exists so behaviour can be looked at instead of assumed.
+            if (_predictor != null)
+            {
+                y += h;
+                if (_binder != null && _binder.IsPredicting)
+                {
+                    // Snaps is the number worth watching: a steady climb means the client
+                    // and the server disagree about speed, tick rate or bounds.
+                    GUI.color = _predictor.Snaps > 0 ? new Color(1f, 0.8f, 0.2f) : new Color(0.4f, 1f, 0.6f);
+                    GUI.Label(new Rect(10, y, w, h),
+                        "Predict: " + _predictor.PendingCount + " pending  err "
+                        + _predictor.LastCorrection.ToString("F3") + "  snaps "
+                        + _predictor.Snaps);
+                }
+                else
+                {
+                    GUI.color = new Color(1f, 0.5f, 0.5f);
+                    GUI.Label(new Rect(10, y, w, h), "Predict: OFF (settings unusable)");
+                }
+                GUI.color = Color.white;
             }
 
             // --- Combat stats + gold (below network HUD) ---

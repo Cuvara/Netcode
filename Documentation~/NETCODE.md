@@ -286,17 +286,120 @@ is `Shared.GameLogic.Systems.SnapshotMerger`'s job — the same code the server 
 diffed against. A second copy in the client is the divergence ADR-10 exists to
 prevent.
 
+## Prediction and reconciliation (0.5.0)
+
+Local player **movement** is predicted. Nothing else is.
+
+### The loop
+
+```
+on input:     tick it, send it, buffer it, apply it to the predicted position NOW
+on snapshot:  drop inputs with tick <= AckTick
+              rewind to the server's authoritative local position
+              replay every buffered input that remains
+```
+
+`AckTick` is "the newest input tick the server accepted for this player". It has been
+on the wire and surfaced on `WorldState` since 0.3.0; **the server needed no change for
+any of this.**
+
+### Wiring it up
+
+```csharp
+var predictor = new LocalMovePredictor(
+    new PredictionSettings(tickRate: 15, speed: 5f, MapBounds.Default));
+
+var binder = new WorldViewBinder(view, predictor);
+
+// per input, immediately after sending it, same tick and same vector
+session.SendInput(tick, moveX, moveY, attackTarget);
+predictor.RecordInput(tick, moveX, moveY);
+```
+
+The binder calls `Reconcile` and `Advance` itself. Pass no predictor and the local
+entity renders at the newest received position, which is 0.4.0's behaviour.
+
+### Replay runs the server's code, not a copy of it
+
+`MovementSystem.TryMove` — the exact entry point the server's `InputHandler` calls.
+It runs `ResolveDirection` then `Integrate` internally, and **skipping either is a
+silent bug**:
+
+- `Integrate` splits its multiply-add into separate float locals to deny the JIT an FMA
+  contraction, which rounds once instead of twice. A hand-written
+  `pos += dir * speed * dt` re-introduces exactly the divergence that split prevents,
+  in the last place — it drifts rather than fails.
+- `ResolveDirection` normalizes magnitudes above 1, so raw diagonal `(1,1)` moves at
+  unit speed. Calling `Integrate` directly with it predicts **41% too fast**.
+
+`LocalMovePredictorTests` asserts **exact** float equality against a reference walk
+built from the same `TryMove`. A tolerance would hide the bug being guarded against.
+
+### Refusing is a feature
+
+`PredictionSettings` defaults nothing. Tick rate, speed and bounds must all be stated,
+and unusable values produce a predictor whose `IsEnabled` is false — it predicts
+nothing and the binder falls back to rendering server positions.
+
+Prediction against a wrong speed does not fail. It produces a position wrong by a
+little every tick, corrected by every snapshot, which a player reads as rubber-banding
+and a developer reads as a network problem. An absence is diagnosable; an approximation
+is not.
+
+**Speed is the weak joint.** Tick rate and bounds are per-map constants a caller can
+know. Speed is a per-entity server stat (`Locomotion.Speed`) that **no wire message
+carries**, so the client keeps a hand-maintained copy of the server's spawn default.
+Anything that changes a player's speed at runtime — a buff, a mount, a slow — desyncs
+prediction until the next snapshot, and neither side reports an error. A `speed` field
+on the snapshot would close this properly.
+
+### Corrections: smoothed small, snapped large
+
+Threshold is **0.5 world units**, derived from the movement model rather than taste:
+one tick at 5 u/s and 15 Hz is 0.33 units, so this is 1.5 ticks' worth. Below it the
+error becomes a render offset decaying as `pow(base, dt)` (frame-rate independent, and
+settling at exactly zero); above it the offset is dropped and the avatar snaps —
+gliding in from a place the server has already ruled out is worse than one honest jump.
+
+`LocalMovePredictor.Snaps` climbing steadily is the signal that client and server
+disagree about speed, tick rate or bounds.
+
+### Movement only, and why
+
+Combat is **not** predicted, including in the sample, which has an HP-prediction path
+that this does not touch. Cooldowns are counted in server ticks, range is checked
+against positions the client only has a stale copy of, and validation can reject
+outright. A predicted hit the server refuses shows damage that never happened and then
+takes it back — worse than showing it late. Movement is predictable because it is a
+pure function of `(position, direction, speed, dt)` computed by the same code on both
+sides.
+
+### Known divergence: superseded inputs
+
+When two inputs reach the server inside one simulation tick, **only the newest moves
+the entity** — the server refuses to let packet rate buy speed (`applyMovement: false`
+for the rest). The client predicted both, so it runs one step ahead until the next
+snapshot pulls it back. Bounded, self-correcting, and the reason a client's input rate
+should **match** the server tick rate rather than exceed it.
+
 ## Not implemented
 
 | | Status |
 |---|---|
-| Protobuf codec | interface and sniff in place; no implementation (see above) |
 | KCP transport | `DefaultTransportFactory` throws rather than silently downgrading to TCP — a KCP server is not listening on TCP at all, so a fallback would surface as an unexplained connection refusal |
 | WebGL | `System.Net.Sockets` is unavailable there; needs a WebSocket `ITransport`, which the gateway does not speak today either |
 | Map transfer (13/14) | `transfer_map` is not sent; an inbound `transfer_map_resp` decodes to a null payload and is logged |
 | Reconnect / resume | none. A closed session is reported, not retried; the server holds the entity 30 s (60 s in a dungeon) |
-| Prediction, reconciliation | out of scope by design — `AckTick` is surfaced for whoever builds it |
-| Protobuf-side world merge | `WorldState` merges, but only what the JSON codec decodes |
+| Prediction of anything but movement | deliberate — see below |
+
+Three rows were removed from this table because they had stopped being true and nothing
+failed when they stopped: **"Protobuf codec — interface and sniff in place, no
+implementation"** (`Runtime/Codec/ProtobufWireCodec.cs` has existed since 0.2.0 and the
+DOTS sample constructs it), **"Protobuf-side world merge — only what the JSON codec
+decodes"** (`WorldState.Apply` takes a `ResolvedSnapshot`, codec-agnostic by
+construction), and **"Prediction, reconciliation — out of scope by design"** (0.5.0).
+A "not implemented" row describing a shipped feature is the row a reader trusts, and it
+costs them the feature.
 
 ## `Shared.GameLogic` — wired up
 

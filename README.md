@@ -10,6 +10,7 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 - **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
+- **Prediction** — Local player movement predicted on input and reconciled against the server's `AckTick`, replaying through `Shared.GameLogic` so client and server agree bit-for-bit. Refuses to run rather than approximate when it cannot match the server. Movement only — combat stays server-authoritative
 - **VContainer DI** — One-line registration via `NetworkingRegistration.RegisterNetworking()`
 - **Two wire encodings** — Protobuf (the backend default, with entity-id interning and the entity-type enum) and legacy JSON. JSON is the registration default so upgrades do not change behaviour; pass `WireEncoding.Protobuf` to opt in. Ships one vendored third-party binary, `Google.Protobuf` — see `Documentation~/NETCODE.md` for why it is unavoidable.
 
@@ -66,11 +67,13 @@ read like a declaration Unity would honour and is not.
 
 ## Samples
 
-Both are imported from the Package Manager and both need a running backend.
+All four are imported from the Package Manager and all four need a running backend.
 
 | Sample | What it is |
 |---|---|
 | **Demo Bootstrap** | Minimal dev harness scene: press Play and the full connection flow runs against a local backend, logging every step. Mints its own development JWT from a shared secret in the config asset. |
+| **World View** | Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. |
+| **DOTS Sample** | The full client presented with DOTS/ECS: auth, both handshake hops, replicated entities, combat, economy, a map selector and a HUD. **WASD moves the local player**, with prediction on by default — this is the one to press Play on to judge how movement feels. |
 | **E2E Certification** | Certification rig that drives the whole flow from the client with **no signing secret**: Nakama device auth, the `gateway_token` RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Exposes its results as static fields so they can be asserted on rather than read off the console. |
 
 ## Documentation

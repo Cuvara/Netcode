@@ -1,6 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.World;
+using Shared.GameLogic.Components;
 
 namespace Cuvara.Netcode.View
 {
@@ -50,11 +53,20 @@ namespace Cuvara.Netcode.View
     /// correction is somebody else's avatar drifting slightly, not the player's own.
     /// </para>
     /// <para>
-    /// <b>This is not prediction.</b> It removes the render buffer, not the round trip.
-    /// Keypress-to-visible remains input-send quantisation plus RTT plus server tick;
-    /// closing that needs a prediction layer reconciling against
-    /// <c>WorldState.AckTick</c>, which is surfaced for exactly that purpose and which
-    /// nothing currently consumes.
+    /// <b>Excluding the local entity from interpolation is not prediction.</b> On its own
+    /// it removes the render buffer, not the round trip: keypress-to-visible is still
+    /// input-send quantisation plus RTT plus server tick. Closing the rest needs a
+    /// prediction layer reconciling against <c>WorldState.AckTick</c> — which is what the
+    /// optional <see cref="LocalMovePredictor"/> constructor overload supplies.
+    /// </para>
+    /// <para>
+    /// <b>With a predictor, the local entity is driven by prediction instead</b>: the
+    /// snapshot becomes the anchor that prediction rewinds to rather than the thing
+    /// rendered, and <see cref="IsPredicting"/> reports which of the two is live. Without
+    /// one, everything above stands unchanged — passing no predictor is not a degraded
+    /// mode, it is 0.4.0's behaviour, and it is what a client must fall back to when it
+    /// cannot state the server's tick rate, speed and bounds. Only <b>movement</b> is
+    /// predicted; HP always comes from the snapshot.
     /// </para>
     /// </remarks>
     public sealed class WorldViewBinder
@@ -69,21 +81,50 @@ namespace Cuvara.Netcode.View
         }
 
         private readonly IEntityView _view;
+        private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
         private readonly List<string> _gone = new List<string>();
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
         private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private string _localId = string.Empty;
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
+        private double _lastRenderMs;
         private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
         private bool _firstSnapshot = true;
 
-        public WorldViewBinder(IEntityView view)
+        /// <summary>
+        /// Binds a view with no prediction: the local entity renders at the newest
+        /// received position.
+        /// </summary>
+        public WorldViewBinder(IEntityView view) : this(view, null)
+        {
+        }
+
+        /// <summary>
+        /// Binds a view, optionally driving the local entity from a
+        /// <see cref="LocalMovePredictor"/> instead of from the newest snapshot.
+        /// </summary>
+        /// <param name="predictor">
+        /// Prediction for the local player's movement, or null for none. A predictor
+        /// reporting <see cref="LocalMovePredictor.IsEnabled"/> false is treated exactly
+        /// like null: it is the predictor's job to refuse when it cannot reproduce the
+        /// server's arithmetic, and the binder's job to believe it rather than to
+        /// second-guess it with an approximation.
+        /// </param>
+        public WorldViewBinder(IEntityView view, LocalMovePredictor predictor)
         {
             _view = view;
+            _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
         }
+
+        /// <summary>
+        /// Whether the local entity is driven by prediction rather than by the newest
+        /// snapshot. False when no predictor was supplied or the one supplied refused.
+        /// </summary>
+        public bool IsPredicting => _predictor != null;
 
         /// <summary>Entities currently presented.</summary>
         public int LiveCount => _live.Count;
@@ -93,6 +134,12 @@ namespace Cuvara.Netcode.View
 
         /// <summary>Despawns where the entity simply stopped being listed.</summary>
         public int DespawnsFromAbsence { get; private set; }
+
+        /// <summary>
+        /// Entities re-spawned because the local player's id changed under them. Nonzero
+        /// means a session boundary was crossed without <see cref="Reset"/>.
+        /// </summary>
+        public int Relocalizations { get; private set; }
 
         /// <summary>
         /// Records ids a snapshot named in <c>removed</c>, so the next reconcile can
@@ -128,6 +175,8 @@ namespace Cuvara.Netcode.View
             {
                 return;
             }
+
+            RelocalizeIfLocalIdChanged(localId);
 
             double nowMs = _clock.Elapsed.TotalMilliseconds;
             bool newSnapshot = world.Tick > _lastWorldTick;
@@ -169,6 +218,7 @@ namespace Cuvara.Netcode.View
                 }
 
                 var e = kv.Value;
+                bool isLocal = id == localId;
 
                 if (_live.Add(id))
                 {
@@ -176,7 +226,28 @@ namespace Cuvara.Netcode.View
                     // and delta alike, so it is already correct on the pass that first
                     // sees the id. Null-coalesced because the merger stores whatever the
                     // wire sent and a view should never have to null-check this.
-                    _view.Spawn(id, id == localId, e.Type ?? string.Empty);
+                    _view.Spawn(id, isLocal, e.Type ?? string.Empty);
+                }
+
+                if (isLocal && _predictor != null)
+                {
+                    // Prediction owns the local entity's position outright. The snapshot
+                    // is still the authority — it is what Reconcile rewinds to — but what
+                    // gets rendered is the predicted result, which is the whole point:
+                    // the server's answer is by definition a round trip old.
+                    if (newSnapshot)
+                    {
+                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
+                    }
+
+                    _predictor.Advance((float)((nowMs - _lastRenderMs) / 1000.0));
+
+                    var predicted = _predictor.Position;
+                    _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+
+                    // HP is deliberately still the server's. Only movement is predicted;
+                    // see LocalMovePredictor for why combat is not.
+                    continue;
                 }
 
                 if (newSnapshot)
@@ -213,7 +284,7 @@ namespace Cuvara.Netcode.View
                     // position, never behind it. See the class remarks — this is a render
                     // delay removal, not prediction, and a late snapshot holds rather
                     // than extrapolates.
-                    if (entry.HasFrom && id != localId)
+                    if (entry.HasFrom && !isLocal)
                     {
                         ix = entry.FromX + (entry.ToX - entry.FromX) * t;
                         iy = entry.FromY + (entry.ToY - entry.FromY) * t;
@@ -230,6 +301,8 @@ namespace Cuvara.Netcode.View
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
                 }
             }
+
+            _lastRenderMs = nowMs;
 
             // Anything we hold that the world no longer lists is gone. Collected first
             // because the view mutates the set.
@@ -271,10 +344,80 @@ namespace Cuvara.Netcode.View
             _live.Clear();
             _interp.Clear();
             _explicitlyRemoved.Clear();
+            _predictor?.Reset();
+            _localId = string.Empty;
             _firstSnapshot = true;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
+            Relocalizations = 0;
+        }
+
+        /// <summary>
+        /// Drops the presentation of any entity whose locality changed because
+        /// <c>localId</c> did, so the next pass re-spawns it with the right flag.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A backstop, not the mechanism.</b> The DOTS sample's rejoin path resets this
+        /// binder on a session boundary, which is the correct fix and makes this path
+        /// unreachable from there. This exists because the failure it prevents is silent
+        /// and expensive: <c>isLocal</c> is handed to a view once at
+        /// <see cref="IEntityView.Spawn"/> and the view is entitled to keep it — locality
+        /// does not change over an entity's lifetime — but <i>which id is local</i> is a
+        /// session fact, and a client that rejoins as a different user while the server
+        /// still holds the previous session's entity (30 s, 60 s in a dungeon) would leave
+        /// the old avatar presenting itself as the local player forever. Any caller that
+        /// forgets to reset gets a wrong screen with no error.
+        /// </para>
+        /// <para>
+        /// Despawn-then-respawn rather than a fourth <see cref="IEntityView"/> method:
+        /// 0.4.0 already broke every implementation of that interface over one parameter,
+        /// and this needs no new vocabulary — it is the same pair of calls a despawn and
+        /// respawn across the boundary would have produced. At most two entities can flip.
+        /// </para>
+        /// <para>
+        /// Counted in <see cref="Relocalizations"/>, deliberately not in
+        /// <see cref="DespawnsFromAbsence"/>: the entity did not leave, and folding these
+        /// into that counter would make an AOI-churn diagnostic lie in exactly the
+        /// situation someone would be reading it.
+        /// </para>
+        /// </remarks>
+        private void RelocalizeIfLocalIdChanged(string localId)
+        {
+            var incoming = localId ?? string.Empty;
+            if (string.Equals(incoming, _localId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // Only two ids can have changed locality: the one that used to be local and
+            // the one that now is. Every other entity's answer is unchanged, so
+            // re-spawning them would be churn for nothing.
+            Forget(_localId);
+            Forget(incoming);
+
+            // The predicted position belonged to the previous player. Replaying this
+            // player's inputs from that anchor would be prediction about the wrong avatar.
+            _predictor?.Reset();
+
+            _localId = incoming;
+        }
+
+        /// <summary>
+        /// Drops one id from the presentation so the next pass treats it as new. No-op for
+        /// an id that is not currently presented.
+        /// </summary>
+        private void Forget(string id)
+        {
+            if (string.IsNullOrEmpty(id) || !_live.Remove(id))
+            {
+                return;
+            }
+
+            _interp.Remove(id);
+            _view.Despawn(id);
+            Relocalizations++;
         }
     }
 }
