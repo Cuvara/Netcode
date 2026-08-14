@@ -5,6 +5,41 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-08-14
+
+### Fixed
+
+- **`Samples~/DOTSSample` was a stale mirror in three files, and importing it would
+  have regressed the sample rather than reproduced it.** The sync in
+  `9bbe634 chore(netcode): sync DOTSSample to Samples~ upstream mirror` copied the
+  file *set* but left three files at their pre-combat content, so the mirror carried
+  `CombatBootstrap.cs` and `DOTSNetworkBridge.cs` while nothing referenced or compiled
+  them:
+  - `DOTSSceneSetup.cs` did not add `CombatBootstrap` or `DOTSNetworkBridge` to the
+    scene, and built the ground material with `Shader.Find` instead of
+    `Resources.Load<Material>("DOTSGroundMaterial")`.
+  - `DOTSSample.asmdef` was missing the `Cuvara.Netcode.Runtime` and `UniTask`
+    references — without them `DOTSNetworkBridge.cs` and `SampleNakamaAuth.cs` do not
+    compile, so a fresh import of the sample was a broken import.
+  - `DOTSSpawner.cs` was missing the null guards on `World.DefaultGameObjectInjectionWorld`
+    and on the material.
+
+  All three are now synced from the imported copy, which is the version two later
+  commits (`df2f15a` combat, `ba2882d` economy/leaderboard) developed against.
+
+### Changed
+
+- **Imported samples now live under one root, in Package Manager's own layout.**
+  The DOTS sample sat at `Assets/Samples/com.cuvara.netcode/0.3.1/DOTSSample` — keyed
+  by package *name* with an undisplayed folder name — while the three Package
+  Manager-imported samples sat at `Assets/Samples/Cuvara Netcode/0.3.1/`. Unity imports
+  to `Assets/Samples/<displayName>/<version>/<sample displayName>`, so the first path
+  could only have been hand-copied, and the two trees read as two packages.
+  Moved to `Assets/Samples/Cuvara Netcode/0.3.1/DOTS Sample` with its `.meta` files, so
+  every asset GUID is preserved and no scene or asmdef reference breaks; the
+  `com.cuvara.netcode` root is gone. Re-importing the sample from Package Manager now
+  overwrites in place instead of producing a second copy.
+
 ## [0.3.1] - 2026-08-12
 
 Documents multi-instance support that **0.3.0 shipped without documenting**, and settles

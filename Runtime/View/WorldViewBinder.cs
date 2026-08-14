@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using Cuvara.Netcode.World;
 
 namespace Cuvara.Netcode.View
@@ -23,13 +24,37 @@ namespace Cuvara.Netcode.View
     /// and wants the distinction logged. It is diagnostics only; the reconcile does not
     /// depend on it.
     /// </para>
+    /// <para>
+    /// <b>Interpolation</b>: entity positions are interpolated between the two most
+    /// recent snapshot states so movement appears smooth at render frame rate instead
+    /// of teleporting every server tick (~66ms at 15 Hz). The interpolation factor is
+    /// derived from wall-clock time elapsed since the last snapshot, divided by the
+    /// measured snapshot interval. HP values are not interpolated — they snap to the
+    /// latest value.
+    /// </para>
     /// </remarks>
     public sealed class WorldViewBinder
     {
+        /// <summary>Per-entity interpolation state: two most recent snapshot positions.</summary>
+        private struct InterpEntry
+        {
+            public float FromX, FromY;
+            public float ToX, ToY;
+            public int Hp, MaxHp;
+            public bool HasFrom;
+        }
+
         private readonly IEntityView _view;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
         private readonly List<string> _gone = new List<string>();
+
+        private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private long _lastWorldTick;
+        private double _lastSnapshotTimeMs;
+        private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
+        private bool _firstSnapshot = true;
 
         public WorldViewBinder(IEntityView view)
         {
@@ -80,14 +105,42 @@ namespace Cuvara.Netcode.View
                 return;
             }
 
+            double nowMs = _clock.Elapsed.TotalMilliseconds;
+            bool newSnapshot = world.Tick > _lastWorldTick;
+
+            // Measure actual snapshot interval from wall-clock arrivals
+            if (newSnapshot)
+            {
+                if (!_firstSnapshot)
+                {
+                    double measured = nowMs - _lastSnapshotTimeMs;
+                    // Exponential moving average (α = 0.3) to smooth jitter
+                    if (measured > 1.0 && measured < 500.0) // sanity bounds
+                    {
+                        _snapshotIntervalMs = _snapshotIntervalMs * 0.7 + measured * 0.3;
+                    }
+                }
+                _firstSnapshot = false;
+                _lastSnapshotTimeMs = nowMs;
+                _lastWorldTick = world.Tick;
+            }
+
+            // Compute interpolation factor: 0 = at "from", 1 = at "to"
+            // Allow slight extrapolation (up to 1.2) so a late snapshot doesn't
+            // cause a visible stall at t=1 — the entity keeps drifting in the
+            // same direction at reduced speed. Capped to prevent runaway drift.
+            double elapsed = nowMs - _lastSnapshotTimeMs;
+            float t = _snapshotIntervalMs > 0.0
+                ? (float)(elapsed / _snapshotIntervalMs)
+                : 1f;
+            if (t < 0f) t = 0f;
+            if (t > 1.2f) t = 1.2f;
+
             foreach (var kv in world.Entities)
             {
                 var id = kv.Key;
                 if (string.IsNullOrEmpty(id))
                 {
-                    // An empty key would mean an unresolved interned handle reached the
-                    // world, which SnapshotResolver is built to prevent. Skip rather than
-                    // render a nameless entity.
                     continue;
                 }
 
@@ -97,7 +150,53 @@ namespace Cuvara.Netcode.View
                 }
 
                 var e = kv.Value;
-                _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
+
+                if (newSnapshot)
+                {
+                    // Shift To → From, store new snapshot as To
+                    if (_interp.TryGetValue(id, out var prev))
+                    {
+                        prev.FromX = prev.ToX;
+                        prev.FromY = prev.ToY;
+                        prev.ToX = e.X;
+                        prev.ToY = e.Y;
+                        prev.Hp = e.Hp;
+                        prev.MaxHp = e.MaxHp;
+                        prev.HasFrom = true;
+                        _interp[id] = prev;
+                    }
+                    else
+                    {
+                        _interp[id] = new InterpEntry
+                        {
+                            FromX = e.X, FromY = e.Y,
+                            ToX = e.X, ToY = e.Y,
+                            Hp = e.Hp, MaxHp = e.MaxHp,
+                            HasFrom = false
+                        };
+                    }
+                }
+
+                // Interpolate position, snap HP
+                if (_interp.TryGetValue(id, out var entry))
+                {
+                    float ix, iy;
+                    if (entry.HasFrom)
+                    {
+                        ix = entry.FromX + (entry.ToX - entry.FromX) * t;
+                        iy = entry.FromY + (entry.ToY - entry.FromY) * t;
+                    }
+                    else
+                    {
+                        ix = entry.ToX;
+                        iy = entry.ToY;
+                    }
+                    _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
+                }
+                else
+                {
+                    _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
+                }
             }
 
             // Anything we hold that the world no longer lists is gone. Collected first
@@ -115,6 +214,7 @@ namespace Cuvara.Netcode.View
             {
                 var id = _gone[i];
                 _live.Remove(id);
+                _interp.Remove(id);
                 _view.Despawn(id);
 
                 if (_explicitlyRemoved.Remove(id))
@@ -123,8 +223,6 @@ namespace Cuvara.Netcode.View
                 }
                 else
                 {
-                    // No `removed` id named it, so it left by ceasing to be listed —
-                    // an AOI exit, or a hold that finally expired.
                     DespawnsFromAbsence++;
                 }
             }
@@ -139,7 +237,10 @@ namespace Cuvara.Netcode.View
             }
 
             _live.Clear();
+            _interp.Clear();
             _explicitlyRemoved.Clear();
+            _firstSnapshot = true;
+            _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
         }
