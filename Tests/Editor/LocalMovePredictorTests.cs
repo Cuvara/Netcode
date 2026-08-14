@@ -374,6 +374,89 @@ namespace Cuvara.Netcode.Tests.Editor
                 "worth surfacing, not one to absorb");
         }
 
+        // ── Server-supplied speed (wire.proto field 9) ──
+
+        [Test]
+        public void ServerSpeedReplacesTheConfiguredDefault()
+        {
+            var predictor = Seeded(Vec2.Zero);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+
+            predictor.SetServerSpeed(20f);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(20f));
+
+            predictor.RecordInput(1, 1f, 0f);
+
+            float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(20f * dt).Within(1e-5f),
+                "replay must integrate at the speed the server reported, not the default");
+        }
+
+        /// <summary>
+        /// The rule that makes the field safe to add to a live protocol: proto3 elides a
+        /// zero float, so an older server is indistinguishable from an immobile entity.
+        /// Accepting the zero would pin the predicted speed to zero and stop the local
+        /// player moving — strictly worse than the drift the field exists to fix.
+        /// </summary>
+        [Test]
+        public void NonPositiveServerSpeedIsIgnoredBecauseItMeansNotSent()
+        {
+            var predictor = Seeded(Vec2.Zero);
+
+            predictor.SetServerSpeed(0f);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+
+            predictor.SetServerSpeed(-3f);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+
+            predictor.SetServerSpeed(float.NaN);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+        }
+
+        [Test]
+        public void ServerSpeedStillMatchesTheServerExactly()
+        {
+            const float serverSpeed = 12.5f;
+
+            var predictor = new LocalMovePredictor(new PredictionSettings(TickRate, Speed, Bounds));
+            predictor.Reconcile(Vec2.Zero, 0);
+            predictor.SetServerSpeed(serverSpeed);
+
+            for (var i = 0; i < Walk.Length; i++)
+            {
+                predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+            }
+
+            // Same reference walk, integrated at the server's speed.
+            float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
+            Vec2 pos = Vec2.Zero;
+            foreach (var (x, y) in Walk)
+            {
+                var probe = new EntityState { Position = pos, Speed = serverSpeed, Dead = false };
+                if (MovementSystem.TryMove(in probe, x, y, dt, Bounds, out var moved)
+                    is MoveResult.Accepted or MoveResult.Clamped)
+                {
+                    pos = moved;
+                }
+            }
+
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(pos.X),
+                "bit-exact at the server's speed, not merely close");
+            Assert.That(predictor.SimulatedPosition.Y, Is.EqualTo(pos.Y));
+        }
+
+        [Test]
+        public void ResetReturnsToTheConfiguredFallbackSpeed()
+        {
+            var predictor = Seeded(Vec2.Zero);
+            predictor.SetServerSpeed(20f);
+
+            predictor.Reset();
+
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed),
+                "the previous session's speed belonged to a different entity");
+        }
+
         [Test]
         public void ResetForgetsEverything()
         {

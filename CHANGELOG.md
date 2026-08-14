@@ -5,6 +5,45 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**Blocked on `sgl-v0.1.7`.** Version intentionally not bumped: this cannot compile until
+`com.rpgmmo.shared-gamelogic` is retagged with `EntitySnapshotData.Speed` and
+`Packages/manifest.json` moved off `sgl-v0.1.6`. Verified by building against both — see
+below.
+
+### Added
+
+- **Prediction now uses the speed the server sends, closing
+  [rpg-mmo-server#91](https://github.com/Cuvara/rpg-mmo-server/issues/91) end to end.**
+  0.7.0 decoded `speed` off the wire into `ResolvedEntity`; this carries it the last hop
+  through `WorldState` into the merger and into replay, so a buff, mount or slow no longer
+  desyncs client and server silently.
+
+- **`LocalMovePredictor.SetServerSpeed(float)` and `EffectiveSpeed`.** Additive on
+  purpose. `Reconcile`'s signature is a cross-package contract enforced by
+  `PredictionSurfaceContractTests` and driven from `com.cuvara.dots`, whose compiler
+  errors cannot appear in this repository — adding a method breaks nobody, widening an
+  existing one breaks a consumer with no signal here.
+
+  **Non-positive is ignored**, because on the wire that means "not sent": proto3 elides a
+  zero float, so a server predating field 9 is indistinguishable from a stationary
+  entity. Accepting the zero would pin the predicted speed to zero against an older
+  server and stop the local player moving — strictly worse than the drift being fixed.
+  `PredictionSettings.Speed` remains the fallback, and `Reset` returns to it because the
+  previous session's speed belonged to a different entity.
+
+- **Five tests**, including `ServerSpeedStillMatchesTheServerExactly`, which asserts
+  **bit-exact** agreement against a reference walk integrated at the server's speed —
+  the same standard the rest of the replay tests hold, not merely "close".
+
+### Verified
+
+- **54/54 out of Unity** against the merged backend's `Shared.GameLogic`.
+- **The block is demonstrated, not assumed**: building against the currently pinned
+  `sgl-v0.1.6` fails with exactly `CS1729` (`EntitySnapshotData` has no 7-argument
+  constructor) and `CS1061` (no `Speed` member). That is the whole reason this is a draft.
+
 ## [0.7.0] - 2026-08-14
 
 Decodes the per-entity `speed` the server now sends
