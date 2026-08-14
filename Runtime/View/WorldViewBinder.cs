@@ -60,6 +60,12 @@ namespace Cuvara.Netcode.View
     /// optional <see cref="LocalMovePredictor"/> constructor overload supplies.
     /// </para>
     /// <para>
+    /// <b>The predictor overload is for views that render what <c>SetState</c> hands
+    /// them, not for the <c>com.cuvara.dots</c> adapter</b>, which reads that position as
+    /// authoritative and stores it as a reconciliation anchor. See the constructor's own
+    /// remarks — getting this wrong is invisible at runtime.
+    /// </para>
+    /// <para>
     /// <b>With a predictor, the local entity is driven by prediction instead</b>: the
     /// snapshot becomes the anchor that prediction rewinds to rather than the thing
     /// rendered, and <see cref="IsPredicting"/> reports which of the two is live. Without
@@ -104,9 +110,41 @@ namespace Cuvara.Netcode.View
         }
 
         /// <summary>
-        /// Binds a view, optionally driving the local entity from a
+        /// Binds a view, driving the local entity from a
         /// <see cref="LocalMovePredictor"/> instead of from the newest snapshot.
+        /// <b>For views that render what <see cref="IEntityView.SetState"/> hands them —
+        /// NOT for the <c>com.cuvara.dots</c> adapter.</b>
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Do not use this with <c>com.cuvara.dots</c>' <c>DotsEntityView</c>.</b> That
+        /// adapter treats the position it receives from <c>SetState</c> as authoritative
+        /// and stores it in a <c>ReconciliationAnchor</c> component — "what the server
+        /// said", the value a predictor rewinds to. This overload sends it the
+        /// <i>predicted</i> position instead, so the anchor would hold a predicted value
+        /// under a name that promises authority. Nothing detects that: the entity renders
+        /// correctly, and the damage only appears when something finally reads the anchor
+        /// and rewinds to a position its own prediction produced. That reads as float
+        /// divergence and gets debugged as one, in the wrong package.
+        /// </para>
+        /// <para>
+        /// <b>The DOTS path drives the predictor from the other side.</b> A system in that
+        /// package reads <c>ReconciliationAnchor</c>, pairs it with
+        /// <see cref="World.WorldState.AckTick"/>, calls this same
+        /// <see cref="LocalMovePredictor"/>, and writes <c>LocalTransform</c> itself —
+        /// claiming it with a <c>PredictedTransform</c> marker so the adapter stops
+        /// writing it. Construct the binder with the single-argument constructor there and
+        /// hand the predictor to that system instead. <see cref="LocalMovePredictor"/> is
+        /// deliberately free of DOTS types so both paths share one implementation of the
+        /// algorithm.
+        /// </para>
+        /// <para>
+        /// This overload exists for the views where no anchor exists and
+        /// <see cref="IEntityView.SetState"/> is the only channel there is —
+        /// <see cref="GameObjectEntityView"/>, the WorldView sample, and the DOTS sample
+        /// in this package, which uses its own view rather than the adapter.
+        /// </para>
+        /// </remarks>
         /// <param name="predictor">
         /// Prediction for the local player's movement, or null for none. A predictor
         /// reporting <see cref="LocalMovePredictor.IsEnabled"/> false is treated exactly

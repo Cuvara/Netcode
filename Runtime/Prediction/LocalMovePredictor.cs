@@ -65,6 +65,30 @@ namespace Cuvara.Netcode.Prediction
     /// snapshot) and is why the client's input rate should match the server's tick rate
     /// rather than exceed it.</para>
     ///
+    /// <para><b>Two ways to drive it, and they must not both be used on one entity.</b>
+    /// This class is only the algorithm and the input buffer; something else decides
+    /// where the authoritative position comes from and where the predicted one goes.</para>
+    /// <list type="bullet">
+    /// <item><description><b>Through <c>WorldViewBinder</c></b> — pass it to the
+    /// two-argument constructor and the binder reconciles and pushes the predicted
+    /// position out through <c>IEntityView.SetState</c>. For views that render whatever
+    /// <c>SetState</c> hands them. <b>Not for the <c>com.cuvara.dots</c> adapter</b>,
+    /// which reads that position as authoritative.</description></item>
+    /// <item><description><b>Directly, from a DOTS system</b> — call
+    /// <see cref="Reconcile"/> with the position from that package's
+    /// <c>ReconciliationAnchor</c> and the tick from
+    /// <see cref="World.WorldState.AckTick"/>, then read <see cref="Position"/> into
+    /// <c>LocalTransform</c>. Construct the binder without a predictor in that
+    /// case.</description></item>
+    /// </list>
+    ///
+    /// <para><b>Positions here are in the server's coordinate space, not the client's
+    /// world space.</b> That is not a detail: <see cref="MovementSystem.TryMove"/> clamps
+    /// to <see cref="MapBounds"/>, which the server expresses in its own 2D space, so a
+    /// caller holding a projected world-space position must recover the server-space one
+    /// rather than project back — a round trip through a projection is not bit-exact, and
+    /// bit-exactness is the entire point of replaying through the shared library.</para>
+    ///
     /// <para>Not thread-safe. Drive it from the thread that sends input and consumes
     /// snapshots.</para>
     /// </remarks>
