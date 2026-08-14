@@ -5,6 +5,54 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-14
+
+Documentation only. No behaviour change, no API change — but the thing being documented
+is a way to use the prediction shipped in 0.5.0 that is wrong and produces no symptom, so
+it is worth a release rather than a comment.
+
+### Documentation
+
+- **`WorldViewBinder(view, predictor)` must not be used with `com.cuvara.dots`' adapter,
+  and now says so at the call site.** 0.5.0 drives prediction from the binder, which
+  pushes the *predicted* position out through `IEntityView.SetState`. As of
+  `com.cuvara.dots` 0.10.0 that adapter reads the position from `SetState` as
+  **authoritative** and stores it in a `ReconciliationAnchor` component — explicitly "the
+  value a predictor rewinds to". Combining the two puts a predicted position in the anchor
+  under a name that promises authority.
+
+  **Nothing detects it.** The adapter skips writing `LocalTransform` only when a
+  `PredictedTransform` marker is present; netcode never adds that marker, so the transform
+  is still written, the avatar moves correctly, and every test passes. The damage surfaces
+  when something finally reads the anchor and rewinds to a position its own prediction
+  produced — which presents as float divergence and gets debugged as one, in the other
+  package.
+
+  The warning is on the constructor's XML docs, the class remarks, `LocalMovePredictor`
+  and `NETCODE.md`, because the CHANGELOG is not where the next person will be standing.
+
+- **The DOTS path is documented as driving `LocalMovePredictor` directly**: read
+  `ReconciliationAnchor`, pair it with `WorldState.AckTick`, write `LocalTransform`, claim
+  it with `PredictedTransform`, and release the marker when prediction stops — otherwise
+  the transform ends up with no writer at all. The predictor is free of DOTS types
+  precisely so one implementation of the algorithm serves both paths; only the driving
+  side differs.
+
+- **`LocalMovePredictor` works in the server's 2D space, not the client's world space** —
+  now stated, because it was implicit and it is a trap. `MovementSystem.TryMove` clamps to
+  `MapBounds`, which the server expresses in its own coordinates, so a caller holding a
+  world-space anchor must recover the server-space position rather than project back: a
+  round trip through a projection is not bit-exact, and bit-exactness is the entire reason
+  replay goes through the shared library at all. `SnapshotSpaceMapping` deliberately has
+  no inverse, so this is a real gap in the cross-package contract and is being settled
+  with the DOTS side rather than papered over here.
+
+- **The `Locomotion.Speed` wire gap is now a backend ticket** —
+  [rpg-mmo-server#91](https://github.com/Cuvara/rpg-mmo-server/issues/91). No snapshot
+  field carries per-entity speed, so the client predicts against a hand-maintained copy of
+  the server's spawn default and desyncs silently the first time anything changes a
+  player's speed. Recorded there so it outlives the release that discovered it.
+
 ## [0.6.0] - 2026-08-14
 
 Minor rather than patch because the runtime assembly is split: consumers referencing

@@ -319,6 +319,41 @@ predictor.RecordInput(tick, moveX, moveY);
 The binder calls `Reconcile` and `Advance` itself. Pass no predictor and the local
 entity renders at the newest received position, which is 0.4.0's behaviour.
 
+**That wiring is for views that render whatever `SetState` hands them** —
+`GameObjectEntityView`, the WorldView sample, and this package's own DOTS sample, which
+uses its own view rather than the adapter.
+
+### Do NOT pass a predictor to the binder when using the `com.cuvara.dots` adapter
+
+That adapter treats the position from `SetState` as **authoritative** and stores it in a
+`ReconciliationAnchor` component — "what the server said", the value a predictor rewinds
+to. Hand it a predicted position and the anchor holds a predicted value under a name that
+promises authority. **Nothing detects this.** The entity renders correctly; the damage
+appears only when something reads the anchor and rewinds to a position its own prediction
+produced, which reads as float divergence and gets debugged as one, in the wrong package.
+
+There, the predictor is driven from the DOTS side instead:
+
+```csharp
+// one-argument constructor — the binder must not touch the local position
+var binder = new WorldViewBinder(view);
+
+// in a DOTS system, per snapshot, for the local entity:
+predictor.Reconcile(anchorInServerSpace, world.AckTick);   // position + tick, paired here
+localTransform.Position = mapping.ToWorld(predictor.Position);
+```
+
+The system claims `LocalTransform` with a `PredictedTransform` marker so the adapter stops
+writing it, and removes the marker when it stops predicting — otherwise the transform has
+no writer at all.
+
+**One conversion the caller owns: `LocalMovePredictor` works in the server's 2D space, not
+the client's world space.** `MovementSystem.TryMove` clamps to `MapBounds`, which the
+server expresses in its own coordinates, so the anchor's world-space position has to be
+recovered as server-space rather than projected back — a round trip through a projection
+is not bit-exact, and bit-exactness is the whole reason replay goes through the shared
+library.
+
 ### Replay runs the server's code, not a copy of it
 
 `MovementSystem.TryMove` — the exact entry point the server's `InputHandler` calls.
