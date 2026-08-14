@@ -18,7 +18,7 @@ namespace DOTSSample
     /// Server coordinates are (x, y) on a 2D plane. These map to Unity (X, 0.5, Z)
     /// so a top-down camera sees the world as the server lays it out.
     /// Each player gets a unique colour from a fixed palette so multiple clients are
-    /// visually distinguishable. Entities whose ID starts with "enemy-" are rendered
+    /// visually distinguishable. Entities the server types as "mob" are rendered
     /// as red spheres with <see cref="EnemyTag"/> and <see cref="Health"/>; all other
     /// entities are players and receive <see cref="PlayerCombatTag"/> +
     /// <see cref="AutoAttack"/> so the combat systems target them automatically.
@@ -59,7 +59,13 @@ namespace DOTSSample
         };
 
         private static readonly Color EnemyColor = new Color(0.9f, 0.15f, 0.1f);
-        private const string EnemyIdPrefix = "enemy-";
+
+        /// <summary>
+        /// The server's entity kind for a hostile NPC, as it arrives on
+        /// <see cref="IEntityView.Spawn"/>. This used to be an <c>"enemy-"</c> id-prefix
+        /// test, which was a guess at a fact the snapshot was already carrying.
+        /// </summary>
+        private const string MobType = "mob";
 
         private readonly Dictionary<string, Entity> _entities = new Dictionary<string, Entity>();
         private readonly Dictionary<string, int> _playerColorIndex = new Dictionary<string, int>();
@@ -90,12 +96,14 @@ namespace DOTSSample
 
         public int Count => _entities.Count;
 
-        public void Spawn(string id, bool isLocal)
+        public void Spawn(string id, bool isLocal, string type)
         {
             if (!IsValid || string.IsNullOrEmpty(id) || _entities.ContainsKey(id))
                 return;
 
-            bool isEnemy = id.StartsWith(EnemyIdPrefix);
+            // The kind comes from the snapshot. '_enemyIds' still caches it, because
+            // SetState and the label pass need it per frame and only Spawn is told.
+            bool isEnemy = type == MobType;
 
             // Determine visual
             Color color;

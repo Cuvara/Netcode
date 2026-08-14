@@ -46,7 +46,7 @@ namespace Cuvara.Netcode.View
         /// <summary>Live view count, for assertions in tests.</summary>
         public int Count => _objects.Count;
 
-        public void Spawn(string id, bool isLocal)
+        public void Spawn(string id, bool isLocal, string type)
         {
             if (string.IsNullOrEmpty(id) || _objects.ContainsKey(id))
             {
@@ -54,7 +54,14 @@ namespace Cuvara.Netcode.View
             }
 
             var go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            go.name = (isLocal ? "local:" : "remote:") + Short(id);
+
+            // The kind goes in the name and nowhere else. Giving mobs their own mesh or
+            // colour here would be presentation policy, and this view exists to be the
+            // dumbest thing that can be looked at — but a name makes the value visible
+            // in the hierarchy, which is what makes it verifiable.
+            go.name = (isLocal ? "local:" : "remote:")
+                      + (string.IsNullOrEmpty(type) ? "" : type + ":")
+                      + Short(id);
 
             // A collider would let the two capsules shove each other around locally,
             // which would be client-side physics quietly disagreeing with the server.
