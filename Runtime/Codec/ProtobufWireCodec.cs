@@ -236,6 +236,7 @@ namespace Cuvara.Netcode.Codec
                     Hp = e.Hp,
                     MaxHp = e.MaxHp,
                     Handle = e.Handle,
+                    Speed = e.Speed,
                 });
             }
 

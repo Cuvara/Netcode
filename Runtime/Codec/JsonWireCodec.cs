@@ -231,7 +231,13 @@ namespace Cuvara.Netcode.Codec
                     // The JSON encoding never interns; the member is read anyway so
                     // that a server which starts sending it is handled by the same
                     // resolution path rather than silently dropping to id-only.
-                    Handle = item.GetUInt("handle")
+                    Handle = item.GetUInt("handle"),
+
+                    // JSON does not elide zero the way proto3 does, so this key is
+                    // present with 0 from a server that has the field and simply has
+                    // nothing to say. Same rule either way: non-positive means "no
+                    // value", not "cannot move".
+                    Speed = item.GetFloat("speed")
                 });
             }
 
