@@ -3,7 +3,6 @@
     "rootNamespace": "Cuvara.Netcode",
     "references": [
         "UniTask",
-        "VContainer",
         "Shared.GameLogic"
     ],
     "includePlatforms": [],

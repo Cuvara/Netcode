@@ -190,6 +190,17 @@ jobs:
             handDeps: false
             sharedGameLogic: true
             required: true
+          # The documented install with VContainer deliberately withheld. VContainer is
+          # optional as of 0.6.0: Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap are gated
+          # behind a versionDefines symbol, so a consumer without it should lose those two
+          # assemblies and keep a working transport. This row is what makes that claim
+          # falsifiable — if the gating is wrong, the package stops compiling here.
+          - name: no-vcontainer
+            registries: true
+            handDeps: false
+            sharedGameLogic: true
+            blockVContainer: true
+            required: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,7 +212,13 @@ jobs:
 
           REGISTRIES=""
           if [ "${{ matrix.probe.registries }}" = "true" ]; then
-            REGISTRIES='"scopedRegistries": [{"name":"OpenUPM","url":"https://package.openupm.com","scopes":["com.cysharp","jp.hadashikick","org.nuget"]}],'
+            SCOPES='"com.cysharp","jp.hadashikick","org.nuget"'
+            # Withhold the VContainer scope entirely, so nothing can pull it in as a
+            # transitive dependency and quietly satisfy what we are testing the absence of.
+            if [ "${{ matrix.probe.blockVContainer }}" = "true" ]; then
+              SCOPES='"com.cysharp","org.nuget"'
+            fi
+            REGISTRIES="\"scopedRegistries\": [{\"name\":\"OpenUPM\",\"url\":\"https://package.openupm.com\",\"scopes\":[$SCOPES]}],"
           fi
 
           SGL=""
