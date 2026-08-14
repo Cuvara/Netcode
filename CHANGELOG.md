@@ -5,6 +5,106 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-08-14
+
+Makes `LocalMovePredictor`'s cross-package surface enforceable instead of merely
+documented, and writes down the two ownership rules that the DOTS integration depends on.
+No behaviour change.
+
+### Added
+
+- **`PredictionSurfaceContractTests` — a gate on the six members `com.cuvara.dots`
+  drives.** `RecordInput`, `Reconcile`, `Advance`, `Position`, `IsEnabled`, `Reset`.
+
+  **This exists because the break is otherwise invisible here.** The DOTS adapter
+  references `Cuvara.Netcode.Runtime`; netcode must never reference it back, so the
+  adapter is not built in this repository and **its compiler errors cannot appear in this
+  repository's CI**. Rename `Reconcile` and everything stays green; the failure surfaces
+  in another repo, whenever someone next compiles it.
+
+  Two halves, both checked by mutation:
+
+  | Change | Caught by |
+  |---|---|
+  | `Reconcile(Vec2, long)` → `(Vec2, int)` | compile error at the call sites, immediately |
+  | `Advance(float)` → `Advance(double)` | **only** the reflection assert — every existing call still compiles via implicit widening |
+
+  The second is the one worth having. A widening that compiles everywhere on this side is
+  exactly the "harmless tidy-up" that reaches a consumer as a hard break.
+
+- **A test that the predictor's surface names no Unity or DOTS type**, and that
+  `Cuvara.Netcode.Runtime` does not reference `Unity.Entities`. That is what keeps the
+  dependency one-directional and the algorithm testable in EditMode without a World.
+
+### Documentation
+
+- **One predictor instance, constructed at the composition root and injected.**
+  `RecordInput` is called by whatever sends input, `Reconcile` by whatever consumes
+  snapshots — a binder here, or a system in the DOTS package. Two instances is silent:
+  the recording one is never reconciled and drifts, the reconciling one has an empty
+  buffer, replays nothing, and returns the authoritative position every time. Nothing
+  throws, `PendingCount` is legitimately zero, and the symptom is that prediction appears
+  to do nothing — so the search starts in the replay arithmetic, which is correct.
+
+- **The DOTS driving example now uses the real spelling**, verified against
+  `com.cuvara.dots` rather than sketched: `ReconciliationAnchor.ServerPosition` (the raw
+  `(x, y)` stored verbatim before any arithmetic) converted with `SimConversions.ToVec2`,
+  paired with `WorldState.AckTick`. The world-space `Position` field on the same component
+  is what `LocalTransform` wants and is **not** what the predictor wants.
+
+- **`PredictedTransform` must be released when prediction stops** — spectate, death, or
+  `IsEnabled == false` — or `LocalTransform` has no writer at all and the entity freezes.
+  That is the marker's own failure mode reached from the opposite direction, and it shows
+  up in a build rather than in CI.
+
+## [0.6.1] - 2026-08-14
+
+Documentation only. No behaviour change, no API change — but the thing being documented
+is a way to use the prediction shipped in 0.5.0 that is wrong and produces no symptom, so
+it is worth a release rather than a comment.
+
+### Documentation
+
+- **`WorldViewBinder(view, predictor)` must not be used with `com.cuvara.dots`' adapter,
+  and now says so at the call site.** 0.5.0 drives prediction from the binder, which
+  pushes the *predicted* position out through `IEntityView.SetState`. As of
+  `com.cuvara.dots` 0.10.0 that adapter reads the position from `SetState` as
+  **authoritative** and stores it in a `ReconciliationAnchor` component — explicitly "the
+  value a predictor rewinds to". Combining the two puts a predicted position in the anchor
+  under a name that promises authority.
+
+  **Nothing detects it.** The adapter skips writing `LocalTransform` only when a
+  `PredictedTransform` marker is present; netcode never adds that marker, so the transform
+  is still written, the avatar moves correctly, and every test passes. The damage surfaces
+  when something finally reads the anchor and rewinds to a position its own prediction
+  produced — which presents as float divergence and gets debugged as one, in the other
+  package.
+
+  The warning is on the constructor's XML docs, the class remarks, `LocalMovePredictor`
+  and `NETCODE.md`, because the CHANGELOG is not where the next person will be standing.
+
+- **The DOTS path is documented as driving `LocalMovePredictor` directly**: read
+  `ReconciliationAnchor`, pair it with `WorldState.AckTick`, write `LocalTransform`, claim
+  it with `PredictedTransform`, and release the marker when prediction stops — otherwise
+  the transform ends up with no writer at all. The predictor is free of DOTS types
+  precisely so one implementation of the algorithm serves both paths; only the driving
+  side differs.
+
+- **`LocalMovePredictor` works in the server's 2D space, not the client's world space** —
+  now stated, because it was implicit and it is a trap. `MovementSystem.TryMove` clamps to
+  `MapBounds`, which the server expresses in its own coordinates, so a caller holding a
+  world-space anchor must recover the server-space position rather than project back: a
+  round trip through a projection is not bit-exact, and bit-exactness is the entire reason
+  replay goes through the shared library at all. `SnapshotSpaceMapping` deliberately has
+  no inverse, so this is a real gap in the cross-package contract and is being settled
+  with the DOTS side rather than papered over here.
+
+- **The `Locomotion.Speed` wire gap is now a backend ticket** —
+  [rpg-mmo-server#91](https://github.com/Cuvara/rpg-mmo-server/issues/91). No snapshot
+  field carries per-entity speed, so the client predicts against a hand-maintained copy of
+  the server's spawn default and desyncs silently the first time anything changes a
+  player's speed. Recorded there so it outlives the release that discovered it.
+
 ## [0.6.0] - 2026-08-14
 
 Minor rather than patch because the runtime assembly is split: consumers referencing
