@@ -37,6 +37,20 @@ would be indistinguishable from one that never had it.
   **bit-exact** agreement against a reference walk integrated at the server's speed —
   the same standard the rest of the replay tests hold, not merely "close".
 
+### Changed
+
+- **Minimum `com.rpgmmo.shared-gamelogic` raised to `sgl-v0.1.7`** — the tag that adds
+  `EntitySnapshotData.Speed`. Bumped in all four live pins: `package.json`'s
+  `x-manualDependencies`, the README install snippet, `NETCODE.md`, and **both** places
+  the CI workflow writes it (the test project's manifest and the install probes).
+
+  The CI pin is the one that matters and the one that caught this: the first run of this
+  change went red because the workflow still bootstrapped `sgl-v0.1.6`, so the package
+  it was testing could not compile. That is the gate doing exactly its job — a repo can
+  pin its own dependency in five places, and a stale one in CI means the suite validates
+  a configuration nobody ships. `NETCODE.md`'s other `sgl-v0.1.x` references are a
+  history of past releases and are deliberately unchanged.
+
 ### Verified
 
 - **54/54 out of Unity against the tagged `sgl-v0.1.7` source itself**, checked out at
