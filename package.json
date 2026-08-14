@@ -1,6 +1,6 @@
 {
     "name": "com.cuvara.netcode",
-    "version": "0.4.1",
+    "version": "0.5.0",
     "displayName": "Cuvara Netcode",
     "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
     "unity": "6000.3",
@@ -20,6 +20,7 @@
     "dependencies": {
         "com.cysharp.unitask": "2.5.10",
         "com.unity.modules.unitywebrequest": "1.0.0",
+        "com.unity.modules.physics": "1.0.0",
         "jp.hadashikick.vcontainer": "1.16.8"
     },
     "x-manualDependencies": {

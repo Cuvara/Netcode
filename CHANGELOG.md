@@ -5,6 +5,138 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-14
+
+Client-side prediction and reconciliation for local player **movement**. Minor rather
+than patch because `WorldViewBinder` gains a constructor overload and a new
+`Cuvara.Netcode.Prediction` namespace; nothing existing breaks, and a caller that passes
+no predictor gets 0.4.1's behaviour byte for byte.
+
+### Added
+
+- **`LocalMovePredictor` — predict on input, reconcile on snapshot.** Each input is
+  given a tick, sent, buffered, and applied to the predicted position immediately. Each
+  snapshot carries `AckTick` — the newest input tick the server accepted — so the client
+  drops everything up to it, rewinds to the authoritative position, and replays only what
+  the server has not seen. **The server needed no change:** `AckTick` has been on the wire
+  and surfaced on `WorldState` since 0.3.0 with nothing consuming it.
+
+  **Replay goes through `MovementSystem.TryMove`** — the exact entry point the server's
+  `InputHandler` calls — which runs `ResolveDirection` and then `Integrate` internally.
+  Both halves matter and skipping either is a silent bug:
+
+  | Skipped | What breaks |
+  |---|---|
+  | `Integrate`'s split multiply-add | the JIT may contract it into one FMA, rounding once instead of twice — a last-place divergence that drifts instead of failing |
+  | `ResolveDirection`'s normalization | raw diagonal input `(1,1)` predicts **41% too fast**; correct arithmetic on the wrong input |
+
+  Pinned by tests comparing against a reference walk built from the same `TryMove`,
+  asserting **exact** float equality rather than a tolerance — a tolerance would hide
+  precisely the class of bug the split exists to prevent. Swapping the predictor for a
+  hand-rolled `pos += dir * speed * dt` turns three of them red.
+
+- **`PredictionSettings` — tick rate, speed, bounds, none of them defaulted.** Each has a
+  plausible default and taking any silently is the failure this type exists to prevent:
+  prediction against the wrong speed does not fail, it produces a position wrong by a
+  little every tick, corrected by every snapshot, which reads as rubber-banding rather
+  than as a misconfiguration. Unusable settings produce a predictor whose `IsEnabled` is
+  false, which **refuses to predict** and leaves the caller on the previous path. An
+  approximation drifts silently; an absence is diagnosable.
+
+  **The weakest joint, stated rather than hidden:** speed is a per-entity server stat
+  (`Locomotion.Speed`) that **no wire message carries**, so the client keeps a
+  hand-maintained copy of the server's spawn default. A buff, mount or slow desyncs
+  prediction until the next snapshot and neither side reports an error. This is the same
+  shape as 0.4.1's lesson — something outside the package supplying what the package
+  needs — and a `speed` field on the snapshot would close it properly.
+
+- **`WorldViewBinder(IEntityView, LocalMovePredictor)`** and `IsPredicting`. A predictor
+  reporting `IsEnabled == false` is treated exactly like `null`, so the fallback is a real
+  code path rather than something each caller must remember to write.
+
+- **Keyboard input in the DOTS sample** (`useKeyboardInput`, default on). The sample sent
+  `sin(Time.time * 1.5)` / `cos(Time.time * 0.8)` — an autopilot, kept behind the flag for
+  unattended soak runs. It makes the question the sample exists to answer unanswerable:
+  "does moving feel responsive?" is meaningless when nothing is pressing anything, and
+  **keypress-to-visible latency cannot be measured without a keypress**. Raw axes, not
+  smoothed — `GetAxis`'s acceleration curve would put a second client-only easing in front
+  of a change whose purpose is removing delay.
+
+- **A prediction line in the sample HUD**, shown even when prediction is off, because a
+  silently-absent predictor looks exactly like a working one with nothing to do. `snaps`
+  is the number to watch: a steady climb means client and server disagree about speed,
+  tick rate or bounds.
+
+- **`WorldViewBinderTests` and `LocalMovePredictorTests` — 39 cases.** The binder had none
+  before this.
+
+- **`WorldViewBinder.Relocalizations`** — see *Fixed*.
+
+### Changed
+
+- **Corrections are smoothed below 0.5 world units and snapped above it.** Every reconcile
+  produces some error, mostly float noise, and hard-setting on each is visible as jitter;
+  blending all of them is worse in the other direction, because a real correction then
+  arrives as a slow glide from a place the server has already ruled out. The threshold is
+  derived from the movement model, not taste: one tick at 5 u/s and 15 Hz is 0.33 units,
+  so this is 1.5 ticks' worth. Decay is `pow(base, dt)` — frame-rate independent, because
+  a correction must not resolve faster on a faster machine — and settles at exactly zero.
+
+### Fixed
+
+- **`package.json` never declared `com.unity.modules.physics`, which the runtime
+  requires.** `GameObjectEntityView` destroys the `Collider` on the primitive it spawns
+  (client-side physics would quietly disagree with the server), so `UnityEngine.Collider`
+  is a hard dependency of `Cuvara.Netcode.Runtime`. It resolved anyway because Physics is
+  on by default — **the same defect 0.4.1 fixed twice over** (`Unsafe`, VContainer): the
+  package relying on its consumers' defaults instead of declaring what it needs. Surfaced
+  as `CS1069` in a project that did not happen to include it.
+
+- **The DOTS sample's asmdef did not reference `Shared.GameLogic`.** Latent until now
+  because nothing in the sample named a shared type.
+
+- **`WorldViewBinder` now survives `localId` changing under a live entity.** 0.4.0 fixed
+  this at the caller (the sample resets on a session boundary, which is correct and makes
+  this path unreachable from there). This is the backstop, because the failure is silent:
+  `isLocal` is handed to a view once at `Spawn` and the view is entitled to keep it, but
+  *which id is local* is a session fact, and a client rejoining as a different user while
+  the server still holds the previous session's entity would leave the old avatar
+  presenting itself as the local player forever, with no error. The binder despawns and
+  respawns the at-most-two entities whose locality flipped, reusing the existing three
+  interface methods rather than widening `IEntityView` again so soon after 0.4.0 broke
+  every implementation of it. Counted in `Relocalizations`, deliberately **not** in
+  `DespawnsFromAbsence` — the entity did not leave, and folding them in would make an
+  AOI-churn diagnostic lie.
+
+### Documentation
+
+- New **Prediction and reconciliation** section in `NETCODE.md`: the loop, the wiring, why
+  replay runs the server's code, why refusing is a feature, the correction policy, why
+  combat is excluded, and the superseded-input divergence.
+- **Three rows deleted from the "Not implemented" table because they describe shipped
+  features** — "Protobuf codec — interface and sniff in place, no implementation" (wrong
+  since 0.2.0), "Protobuf-side world merge — only what the JSON codec decodes" (never true
+  of `WorldState.Apply`, which takes a codec-agnostic `ResolvedSnapshot`), and
+  "Prediction, reconciliation — out of scope by design" (this release).
+- The README's sample table listed **two of the four** samples in `package.json`.
+
+### Verified
+
+- **39/39 tests pass outside Unity** — `Runtime/View`, `Runtime/World`, `Runtime/Snapshot`
+  and `Runtime/Prediction` compiled with `dotnet` on .NET 10 against the real
+  `Shared.GameLogic` at `sgl-v0.1.6`, the tag `package.json` pins.
+- **Mutation-checked, not just green:** replacing `TryMove` with a hand-rolled integrator
+  fails 3 tests; removing the relocalization backstop fails 1.
+- **Not verified in the Unity Editor**, which was held by another task throughout. The
+  DOTS sample's own compilation (Entities, Entities.Graphics, `Input.GetAxisRaw`) and the
+  on-screen result are unexercised. 0.4.1's repaired CI gate — which now really does run
+  the suite, 138 tests on `main` — is what will exercise them.
+- **No keypress-to-visible measurement.** It could not be taken before this change because
+  the sample had no keypress, and taking it now needs the Editor. The arithmetic case is
+  that prediction removes RTT (measured 20–31 ms) and the server tick wait from the local
+  avatar's response, leaving input-send quantisation (0–66 ms at 15 Hz). **That is a
+  projection from measured components, not a measurement.**
+
 ## [0.4.1] - 2026-08-14
 
 **Use this instead of `0.4.0`.** `0.4.0` is tagged and published to GitHub Packages, and it
