@@ -10,6 +10,7 @@
         "Unity.Collections",
         "Unity.Entities.Graphics",
         "Cuvara.Netcode.Runtime",
+        "Shared.GameLogic",
         "UniTask"
     ],
     "includePlatforms": [],
