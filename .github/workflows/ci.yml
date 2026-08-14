@@ -163,7 +163,10 @@ jobs:
   install-probe:
     name: Install probe (${{ matrix.probe.name }})
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # Only the informational rows are allowed to fail. Leaving this 'true' for every row
+    # would let the documented-install row go red without failing anything — a gate that
+    # cannot fail, which is the exact defect this whole job exists because of.
+    continue-on-error: ${{ !matrix.probe.required }}
     strategy:
       fail-fast: false
       matrix:
