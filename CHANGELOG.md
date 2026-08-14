@@ -10,6 +10,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Minor rather than patch because `IEntityView.Spawn` gains a parameter. One line per
 implementation to migrate, and the sample in this repo gets shorter as a result.
 
+Also in this release: the local player is no longer rendered behind its own authoritative
+position, and the DOTS sample stops labelling two entities `★ YOU` after a rejoin.
+
+### Fixed
+
+- **The local player was interpolated like everyone else, rendering it behind its own
+  authoritative position.** `WorldViewBinder` used `localId` only to set the `isLocal`
+  flag at spawn; the entity then went through the same lerp-between-the-last-two-snapshots
+  path as every remote. That path renders up to one snapshot interval in the past by
+  design — correct for remote entities, whose smoothness is the entire reason it exists,
+  and wrong for the one entity whose response delay a player is holding a key to feel.
+
+  Measured against a live backend at 15 Hz, comparing the rendered local position with the
+  newest authoritative position: **mean 0.172 world units of lag, worst case 0.471**,
+  against a per-tick step of 0.333 units over a measured 68.4 ms interval — about
+  **35 ms of render delay on average and up to ~97 ms**. After the change the same
+  measurement reads **0.000**, and remote entities still measure 0.07–0.17 units, so their
+  interpolation is untouched.
+
+  **This is not prediction and does not claim to be.** It removes the render buffer, not
+  the round trip. What remains between a keypress and seeing yourself move is input-send
+  quantisation (0–66 ms at 15 Hz), RTT (20–31 ms measured), and the server tick; closing
+  that needs a prediction layer reconciling against `WorldState.AckTick`, which is
+  surfaced for exactly that purpose and which nothing consumes yet.
+
+  **The trade is real and worth stating**: the local avatar now advances in 15 Hz steps
+  instead of gliding, because there is no longer anything between two snapshots to glide
+  through. Latency is bought with smoothness on that one entity. Prediction is what buys
+  both, and it is still unwritten.
+
+  A late snapshot makes the local entity **hold at its last received position** rather than
+  extrapolate. There is nothing honest to extrapolate from — the client does not simulate
+  the local player, so a guess would be motion the server never confirmed, visibly undone
+  when the real snapshot lands. Remote entities keep extrapolating to `t = 1.2`, where the
+  alternative is a visible stall and the correction lands on somebody else's avatar.
+
+- **A rejoin in the DOTS sample left two entities labelled `★ YOU`, one of them somebody
+  else.** `LeaveRoom` cleared every cached HUD string and disposed the client, but never
+  reset `WorldViewBinder` or the view — so the ending session's entities stayed presented,
+  with the `IsLocal` flag they were given when they *were* the local player.
+
+  That flag is decided in exactly one place, `Spawn`, and the binder only calls `Spawn`
+  for ids it has not already seen. A carried-over entity is therefore never
+  re-evaluated. Rejoining authenticates with a fresh device id and so a fresh Nakama user
+  id, whose entity is spawned local as well — two locals, and the older one is a stranger.
+  Measured directly after a `Leave Room`: the view still held the previous session's
+  player at `IsLocal=True` with no client connected at all.
+
+  It needs the old entity to still be listed when the new session's first snapshot
+  arrives, which a rejoin inside the server's ~30 s entity hold satisfies.
+
+  `StartConnection` and `LeaveRoom` now share a `ResetSessionView` that resets the binder,
+  despawning everything it holds, and clears the label caches. `StartConnection` also
+  refuses to start a second session while a client is live — two clients ticking one
+  binder was the other way to reach the same state, and nothing in the sample wanted it.
+
+- **The DOTS sample's floating labels cached `★ YOU` per id and never re-derived it.**
+  A second, independent defect on the rendering side, and the same shape as the RTT
+  freeze fixed below in this release: `_entityLabelTextCache` was keyed on the entity id alone, so once
+  a label had been built the star could not come off. The neighbouring `style` lookup read
+  the *live* `IsLocal` on every frame, which is why an entity could render a stale star in
+  a colour that correctly said "remote". The cache now stores the locality its text was
+  built from and rebuilds when the two disagree.
+
+
+- **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
+  had been frozen since the first frame of the session.** Observed live at `996ms` in the
+  HUD against `31ms` in the FPS panel, and the panel held `31ms` unchanged across two
+  captures 45 s apart. Both labels read the same `_client.Session.RoundTripMs`, so there
+  was never a second measurement to disagree with; the two caches shared one dirty-flag
+  field. The HUD's own cache check advances `_prevRttMs` to the current sample, and the
+  FPS panel — drawn later in the *same* `OnGUI` pass — then tested `_prevRttMs != rttMs`
+  as its own invalidation condition. That comparison is always false by the time it runs,
+  so `_cachedFpsRttText` was built once and never rebuilt. The HUD number was the honest
+  one throughout. The FPS panel now caches against its own `_prevFpsRttMs`, and
+  `LeaveRoom` resets both previous-value fields along with the strings it was already
+  clearing — without that, the first RTT after a rejoin could match the stale flag and
+  start the freeze over again.
+
+- **Configuring the DOTS sample with a single map connected to whatever `mapId` held,
+  not to the map that was configured.** `Start`'s `availableMaps.Length <= 1` branch
+  auto-connected by calling `RunAsync` directly, which reads the separate serialized
+  `mapId` field — so a one-entry list of `map_07` connected to `map_01`. The two
+  single-map cases are now split: an empty or null list connects to `mapId` as before,
+  and a one-entry list connects to *that entry*, through the same `StartConnection` path
+  the selector uses, so the map indicator and status text are set the same way in both.
+
 ### Changed
 
 - **BREAKING: `IEntityView.Spawn` takes the entity's kind —
@@ -42,9 +129,12 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
   schema.
 
   **Consumers can now delete prefix-based resolvers.** Anything that guessed entity kind
-  from an id has a first-class source for it. Note that a downstream resolver still
-  *compiles* against this release if it sits behind its own interface rather than
-  implementing `IEntityView` directly — this makes such code deletable, not broken.
+  from an id has a first-class source for it. Be aware that this is a compile break for
+  anything implementing `IEntityView` directly, including through a helper interface of
+  its own: verified against `com.cuvara.dots` 0.8.0, where `DotsEntityView.Spawn` is a
+  `CS0535`, twenty test call sites through an `IEntityView`-typed variable are `CS7036`,
+  and `INetworkArchetypeResolver.TryResolve` needs the type as well before its prefix
+  resolver can actually be retired. Update the consumer and the package together.
 
   A fourth method or a binder-preferred overload were both considered and rejected. The
   interface documents itself as "deliberately three methods" so a DOTS implementation can
@@ -59,35 +149,17 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
   can be looked at. A name makes the value visible in the hierarchy, which is what makes
   it verifiable.
 
+- **`package.json`'s sample description for *DOTS Sample* now describes the sample.** It
+  read "Spawns 5 ECS entities with 3D meshes that move and spin" — written before the
+  networking, combat and economy landed, and the first thing anyone reads in Package
+  Manager before importing.
+
 ### Removed
 
 - **`DOTSEntityView`'s `EnemyIdPrefix` constant and the `id.StartsWith` test it fed.**
   Replaced by the `type` parameter. The `_enemyIds` set stays — `SetState` and the label
   pass need the kind every frame and only `Spawn` is told it, so it is a cache now
   rather than a re-derivation.
-
-### Fixed
-
-- **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
-  had been frozen since the first frame of the session.** Observed live at `996ms` in the
-  HUD against `31ms` in the FPS panel, and the panel held `31ms` unchanged across two
-  captures 45 s apart. Both labels read the same `_client.Session.RoundTripMs`, so there
-  was never a second measurement to disagree with; the two caches shared one dirty-flag
-  field. The HUD's own cache check advances `_prevRttMs` to the current sample, and the
-  FPS panel — drawn later in the *same* `OnGUI` pass — then tested `_prevRttMs != rttMs`
-  as its own invalidation condition. That comparison is always false by the time it runs,
-  so `_cachedFpsRttText` was built once and never rebuilt. The HUD number was the honest
-  one throughout. The FPS panel now caches against its own `_prevFpsRttMs`, and
-  `LeaveRoom` resets both previous-value fields along with the strings it was already
-  clearing — without that, the first RTT after a rejoin could match the stale flag and
-  start the freeze over again.
-- **Configuring the DOTS sample with a single map connected to whatever `mapId` held,
-  not to the map that was configured.** `Start`'s `availableMaps.Length <= 1` branch
-  auto-connected by calling `RunAsync` directly, which reads the separate serialized
-  `mapId` field — so a one-entry list of `map_07` connected to `map_01`. The two
-  single-map cases are now split: an empty or null list connects to `mapId` as before,
-  and a one-entry list connects to *that entry*, through the same `StartConnection` path
-  the selector uses, so the map indicator and status text are set the same way in both.
 
 ### Added
 

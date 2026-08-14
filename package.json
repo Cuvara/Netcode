@@ -42,7 +42,7 @@
         },
         {
             "displayName": "DOTS Sample",
-            "description": "Spawns 5 ECS entities with 3D meshes that move and spin using pure DOTS/ECS systems (Burst-compiled ISystem). Demonstrates runtime entity creation with RenderMeshUtility, IComponentData, and SystemAPI.Query.",
+            "description": "Full client against a live backend, presented with DOTS/ECS: Nakama device auth, the gateway hop, a direct game-server join, and replicated entities reconciled into Burst-compiled ISystem simulation with Entities.Graphics rendering. Includes auto-attack combat, a gold/leaderboard economy, a map selector, and an on-screen HUD for connection state, RTT and server health. Needs a running backend.",
             "path": "Samples~/DOTSSample"
         }
     ],
