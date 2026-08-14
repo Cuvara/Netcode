@@ -5,12 +5,12 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-14
 
-**Blocked on `sgl-v0.1.7`.** Version intentionally not bumped: this cannot compile until
-`com.rpgmmo.shared-gamelogic` is retagged with `EntitySnapshotData.Speed` and
-`Packages/manifest.json` moved off `sgl-v0.1.6`. Verified by building against both — see
-below.
+Requires `com.rpgmmo.shared-gamelogic` **`sgl-v0.1.7`** or newer — that tag is what adds
+`EntitySnapshotData.Speed`. Against `sgl-v0.1.6` this does not compile (`CS1729`,
+`CS1061`), which is deliberate: a version of the client that silently dropped speed again
+would be indistinguishable from one that never had it.
 
 ### Added
 
@@ -39,10 +39,11 @@ below.
 
 ### Verified
 
-- **54/54 out of Unity** against the merged backend's `Shared.GameLogic`.
-- **The block is demonstrated, not assumed**: building against the currently pinned
-  `sgl-v0.1.6` fails with exactly `CS1729` (`EntitySnapshotData` has no 7-argument
-  constructor) and `CS1061` (no `Speed` member). That is the whole reason this is a draft.
+- **54/54 out of Unity against the tagged `sgl-v0.1.7` source itself**, checked out at
+  `d88213f` rather than against a branch that merely contains the change.
+- **The dependency is demonstrated, not assumed**: the same tree against `sgl-v0.1.6`
+  fails with exactly `CS1729` (no 7-argument `EntitySnapshotData` constructor) and
+  `CS1061` (no `Speed` member).
 
 ## [0.7.0] - 2026-08-14
 
