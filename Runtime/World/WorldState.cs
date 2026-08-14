@@ -84,7 +84,11 @@ namespace Cuvara.Netcode.World
                 for (var i = 0; i < entities.Count; i++)
                 {
                     var e = entities[i];
-                    converted[i] = new EntitySnapshotData(e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp);
+                    // Speed rides through to the merger so a prediction layer can read
+                    // the server's actual value for an entity rather than assume the
+                    // spawn default. Zero here means the server sent none — the
+                    // fallback is the predictor's decision, not this adapter's.
+                    converted[i] = new EntitySnapshotData(e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed);
                 }
             }
 

@@ -68,7 +68,7 @@ jobs:
               "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
-              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6"
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.7"
             },
             "scopedRegistries": [
               {
@@ -223,7 +223,7 @@ jobs:
 
           SGL=""
           if [ "${{ matrix.probe.sharedGameLogic }}" = "true" ]; then
-            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",'
+            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.7",'
           fi
 
           cat > Packages/manifest.json << JSON
