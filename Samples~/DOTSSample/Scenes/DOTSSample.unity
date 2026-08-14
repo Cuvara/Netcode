@@ -148,6 +148,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 66903e88c7c425e419b04be7c7a4d8f5, type: 3}
   m_Name:
   m_EditorClassIdentifier: DOTSSample::DOTSSample.DOTSSceneSetup
+  availableMaps:
+  - map_01
+  - map_02
 --- !u!4 &500000003
 Transform:
   m_ObjectHideFlags: 0

@@ -73,6 +73,11 @@ namespace DOTSSample
         private string _cachedFpsText;
         private string _cachedFpsStatsText;
         private string _cachedFpsRttText;
+        // Own dirty-flag for the top-right RTT label. It must NOT share '_prevRttMs'
+        // with the HUD label above: that field is advanced by the HUD's own cache check
+        // earlier in the same OnGUI pass, so a shared flag reads as "unchanged" every
+        // frame and freezes this label on its first sample.
+        private int _prevFpsRttMs = -1;
         private readonly GUIContent _sharedContent = new GUIContent();
 
         // --- Per-entity label cache (rebuilt on entity set change) ---
@@ -108,6 +113,9 @@ namespace DOTSSample
         [Header("Nakama API")]
         [SerializeField] private string nakamaBaseUrl = "http://127.0.0.1:7350";
         [SerializeField] private string leaderboardId = "kills_alltime";
+
+        [Tooltip("Maps offered at startup. One entry connects to it straight away; " +
+                 "two or more draw the map selector and wait for a click.")]
         [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
 
         private GUIStyle _serverPanelStyle;
@@ -202,14 +210,38 @@ namespace DOTSSample
             _binder = new WorldViewBinder(_view);
 
             _cts = new CancellationTokenSource();
-            // Connection starts when map is selected (see OnGUI map selector)
-            // If only one map configured, auto-select it
-            if (availableMaps == null || availableMaps.Length <= 1)
+            // Connection starts when a map is selected (see the OnGUI map selector).
+            // With a single map there is nothing to choose, so connect to it directly —
+            // taking the id from the list rather than from 'mapId', or configuring one
+            // map would silently connect to whatever 'mapId' happened to hold.
+            if (availableMaps == null || availableMaps.Length == 0)
             {
-                _mapSelected = true;
-                RunAsync(_cts.Token).Forget();
+                StartConnection(mapId);
+            }
+            else if (availableMaps.Length == 1)
+            {
+                StartConnection(availableMaps[0]);
             }
             PollServerStatusAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Replaces the map set offered at startup.
+        /// </summary>
+        /// <remarks>
+        /// For callers that add this component from script — <see cref="DOTSSceneSetup"/>
+        /// does — because a component added at runtime can only ever carry its field
+        /// initializers, never a scene's inspector values. Call it in the same frame the
+        /// component is added: <c>Start</c> reads <c>availableMaps</c> to decide between
+        /// connecting directly and drawing the selector, and it runs after the frame's
+        /// <c>Awake</c> pass. A null or empty array is ignored, so a caller that has
+        /// nothing to say leaves the inspector-authored value alone.
+        /// </remarks>
+        public void ConfigureMaps(string[] maps)
+        {
+            if (maps == null || maps.Length == 0)
+                return;
+            availableMaps = maps;
         }
 
         private void StartConnection(string selectedMap)
@@ -247,6 +279,9 @@ namespace DOTSSample
             _cachedEntityText = null;
             _cachedRttText = null;
             _cachedFpsRttText = null;
+            _prevRttMs = -1;
+            _prevFpsRttMs = -1;
+            _prevWorldTick = -1;
             _cachedCombatText = null;
             _prevKills = -1;
             _prevLocalKills = 0;
@@ -902,10 +937,12 @@ namespace DOTSSample
 
                 if (_client?.Session != null)
                 {
-                    // Reuse RTT value already computed above
+                    // Same source as the HUD label above — one session, one round-trip
+                    // measurement — but cached against its own previous value.
                     var rttMs = (int)_client.Session.RoundTripMs;
-                    if (_cachedFpsRttText == null || _prevRttMs != rttMs)
+                    if (_cachedFpsRttText == null || _prevFpsRttMs != rttMs)
                     {
+                        _prevFpsRttMs = rttMs;
                         _cachedFpsRttText = "RTT: " + rttMs + "ms";
                     }
                     GUI.Label(new Rect(fpsX, fpsY, fpsW, fpsH), _cachedFpsRttText, _fpsStyle);
