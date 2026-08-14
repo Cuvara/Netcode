@@ -5,6 +5,94 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-14
+
+**Use this instead of `0.4.0`.** `0.4.0` is tagged and published to GitHub Packages, and it
+does not work in a project that does not already supply
+`System.Runtime.CompilerServices.Unsafe` from somewhere else: its runtime assembly fails to
+load, silently. It also does not compile in a clean project, because `VContainer` was
+referenced but never declared. `0.4.1` fixes both and supersedes it.
+
+`0.4.0` is deliberately **not** retagged. A published version can be superseded, never
+rewritten — moving the tag would leave the registry artifact and the tag pointing at
+different code, which is worse than the state it would be fixing.
+
+Both defects were invisible for the same reason, and it is the reason worth remembering:
+**something other than the package supplied the dependency.** The only project anyone runs
+supplies `Unsafe` three times over by accident and supplies VContainer itself, and this
+repository's own CI bootstrap hardcodes VContainer into the manifest it writes. Every
+install anyone had ever tested was propped up from outside. And the test job that existed
+to catch it was reporting green while executing zero tests.
+
+### Fixed
+
+- **The package did not load at all in a project that does not already happen to supply
+  `System.Runtime.CompilerServices.Unsafe`.** `Runtime/Plugins/Google.Protobuf.dll`
+  references that assembly and shipped with a two-line stub `.meta`, so it imported with
+  Unity's default `validateReferences: 1`. In a project without the assembly, validation
+  refuses the plugin and the failure cascades:
+
+  ```
+  Assembly 'Packages/com.cuvara.netcode/Runtime/Plugins/Google.Protobuf.dll' will not be loaded due to errors:
+  Unable to resolve reference 'System.Runtime.CompilerServices.Unsafe'.
+
+  Assembly 'Library/ScriptAssemblies/Cuvara.Netcode.Tests.Editor.dll' will not be loaded due to errors:
+  Reference has errors 'Cuvara.Netcode.Runtime'.
+  ```
+
+  `Cuvara.Netcode.Runtime` is poisoned, and so is everything referencing it. The plugin now
+  ships a full `PluginImporter` meta with `validateReferences: 0`, which is what Unity's own
+  message recommends.
+
+  **Declaring the dependency was tried first and is not available to a package.**
+  `org.nuget.system.runtime.compilerservices.unsafe` lives on OpenUPM, a *scoped registry* —
+  and a UPM package cannot declare a scoped registry for its consumers, only a project can.
+  Adding it resolved to `Package [org.nuget.system.runtime.compilerservices.unsafe@6.0.0]
+  cannot be found` in a clean project. Vendoring a copy of the DLL was rejected too: the
+  consuming project already carries the assembly from two other plugin folders, and a third
+  would risk a duplicate-assembly conflict in the one project that currently works.
+
+  It stayed invisible because the only project anyone runs supplies the assembly several
+  times over by accident — `com.gdk.core/Plugins`, `Assets/Plugins/NuGet`, and Burst — none
+  of it this package's doing.
+
+- **`VContainer` was referenced by the runtime assembly and never declared, so a clean
+  install did not compile.** Found by `com.cuvara.dots`' new gate, which installs this
+  package into a minimal project:
+
+  ```
+  Runtime/Bootstrap/NetworkBootstrap.cs(13,7): error CS0246: The type or namespace name 'VContainer' could not be found
+  Runtime/DI/NetworkingRegistration.cs(31,23): error CS0246: The type or namespace name 'IContainerBuilder' could not be found
+  ```
+
+  `jp.hadashikick.vcontainer@1.16.8` is now a declared dependency. The README had
+  documented it as a manual step, so this was deliberate rather than forgotten — but a
+  hard asmdef reference that the package does not declare fails as a compile error deep in
+  someone else's build, where declaring it fails as a resolution error that names the
+  package. The second is the better failure.
+
+  This package's own CI could not have caught it either: the bootstrap manifest hardcodes
+  `jp.hadashikick.vcontainer`, so CI was supplying by hand exactly what the package failed
+  to declare. Same accident as the one above, a different actor.
+
+- **`gitDependencies` renamed to `x-manualDependencies`.** `Shared.GameLogic` was recorded
+  under a `dependencies`-shaped key that **stock Unity UPM does not read**, so it looked
+  declared and was not. It genuinely cannot be declared — a package's `dependencies` takes
+  registry version ranges only, a git URL is valid in a project manifest and nowhere else,
+  and this is a git subpath rather than a published package. The `x-` prefix marks it as
+  informational, and the README now states it as an install prerequisite rather than
+  implying Unity will resolve it.
+
+### Changed
+
+- **The CI test job is a gate now, rather than a decoration.** It ran green while executing
+  **zero tests** for its entire history, so every green on this repository up to and
+  including `v0.4.0` asserted only that Unity started and exited 0. The runner is invoked
+  with `USE_EXIT_CODE=false` and publishes a NEUTRAL check rather than a red one on an empty
+  run, so neither Unity's exit code nor the check could catch it. A step now parses the NUnit
+  XML the runner produces and fails on no XML, on zero tests, or on any failure or error, and
+  prints the count.
+
 ## [0.4.0] - 2026-08-14
 
 Minor rather than patch because `IEntityView.Spawn` gains a parameter. One line per

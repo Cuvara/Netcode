@@ -27,17 +27,42 @@ Already embedded in `Packages/com.cuvara.netcode/`.
 
 ## Dependencies
 
-Resolved automatically via `package.json`:
-- **UniTask** (`com.cysharp.unitask`) — requires OpenUPM scoped registry
+`Cuvara.Netcode.Runtime` references three assemblies — `UniTask`, `VContainer` and
+`Shared.GameLogic` — and all three are required. There is no configuration in which the
+package compiles without them.
 
-Must be added manually to your project's `Packages/manifest.json`:
-- **VContainer** (`jp.hadashikick.vcontainer`) — DI container (OpenUPM scoped registry)
-- **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared with server
+**Resolved automatically via `package.json`**, provided your project has the OpenUPM
+scoped registry (both live there, not on Unity's registry):
+
+- **UniTask** (`com.cysharp.unitask`)
+- **VContainer** (`jp.hadashikick.vcontainer`)
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",
-"jp.hadashikick.vcontainer": "1.16.8"
+"scopedRegistries": [
+  { "name": "OpenUPM", "url": "https://package.openupm.com",
+    "scopes": ["com.cysharp", "jp.hadashikick"] }
+]
 ```
+
+Without that registry these fail to *resolve*, which at least names the missing package.
+Before 0.4.1 VContainer was undeclared, so the same project instead failed to *compile*
+with `CS0246: The type or namespace name 'VContainer' could not be found`.
+
+**Must be added manually to your project's `Packages/manifest.json`:**
+
+- **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared
+  with the server.
+
+```json
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6"
+```
+
+This one cannot be declared by the package. A UPM package's `dependencies` accepts
+registry version ranges only — a git URL is valid in a *project* manifest and nowhere
+else — and this is a git subpath, not a published package. `package.json` records it
+under **`x-manualDependencies`**, which is informational: the `x-` prefix marks it as not
+a UPM key, because nothing resolves it. It was previously called `gitDependencies`, which
+read like a declaration Unity would honour and is not.
 
 ## Samples
 
