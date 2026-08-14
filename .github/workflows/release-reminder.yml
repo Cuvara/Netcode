@@ -1,0 +1,55 @@
+name: Release reminder
+
+# Releasing is deliberately manual: pushing a `v*` tag is the last gate before
+# `npm publish`, which cannot be undone — a bad version can only be superseded,
+# never withdrawn. So this workflow never tags and never publishes. It only
+# notices that `main` carries a version nobody has tagged yet, and says so.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  untagged-version:
+    name: Warn if package.json version is untagged
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are needed to answer the question at all; the default shallow
+          # fetch has none, which would make every version look untagged.
+          fetch-depth: 0
+
+      - name: Compare package.json version against tags
+        run: |
+          set -euo pipefail
+
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).version")
+          TAG="v$VERSION"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAGGED_SHA=$(git rev-list -n 1 "$TAG")
+            if [ "$TAGGED_SHA" = "$GITHUB_SHA" ]; then
+              echo "::notice title=Released::$TAG points at this commit. Nothing to do."
+            else
+              # The version is spoken for, but main has moved past it. Whatever
+              # landed since is unreleased and needs a version bump of its own.
+              echo "::warning title=Version already used::package.json is still $VERSION, but $TAG points at ${TAGGED_SHA:0:7}, not this commit. Commits since that tag are unreleased. Bump the version in package.json, add a matching CHANGELOG section, then tag."
+            fi
+            exit 0
+          fi
+
+          # No tag for this version: the normal state right after a version bump
+          # merges, and the reminder this workflow exists for.
+          echo "::warning title=Untagged version::package.json is $VERSION and $TAG does not exist. To release: git tag $TAG && git push origin $TAG — this triggers the release workflow, which creates the GitHub Release and publishes @cuvara/netcode@$VERSION to GitHub Packages. npm publish cannot be undone, so tag only once the version is verified."
+
+          # release.yml builds its release notes by extracting this exact heading
+          # from CHANGELOG.md. A missing section does not fail that workflow — it
+          # publishes with empty notes — so it is worth catching here instead.
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::warning title=Missing changelog section::CHANGELOG.md has no '## [$VERSION]' heading. release.yml extracts the release notes from it, so tagging now would publish a release with empty notes."
+          fi

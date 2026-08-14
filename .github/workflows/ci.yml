@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  validate:
+    name: Validate package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate package.json
+        run: |
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('./package.json','utf8'));
+            const required = ['name', 'version', 'displayName', 'description', 'unity'];
+            const missing = required.filter(k => !pkg[k]);
+            if (missing.length) {
+              console.error('Missing fields:', missing.join(', '));
+              process.exit(1);
+            }
+            console.log(pkg.name + '@' + pkg.version + ' — valid');
+          "
+
+      - name: Validate CHANGELOG has current version
+        run: |
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).version")
+          grep -q "\[$VERSION\]" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md missing entry for v$VERSION"
+            exit 1
+          }
+
+      - name: Check asmdef names
+        run: |
+          find . -name "*.asmdef" -not -path "./.github/*" | while read f; do
+            NAME=$(node -p "JSON.parse(require('fs').readFileSync('$f','utf8')).name")
+            echo "  $f → $NAME"
+          done
+
+  test:
+    name: Unity Tests (${{ matrix.unityVersion }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        unityVersion:
+          - 6000.3.9f1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: package
+
+      # Build a Unity project at repo root that references the package
+      - name: Bootstrap test project
+        run: |
+          mkdir -p Assets ProjectSettings Packages
+
+          cat > Packages/manifest.json << 'JSON'
+          {
+            "dependencies": {
+              "com.cuvara.netcode": "file:../package",
+              "com.cysharp.unitask": "2.5.10",
+              "jp.hadashikick.vcontainer": "1.16.8",
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6"
+            },
+            "scopedRegistries": [
+              {
+                "name": "OpenUPM",
+                "url": "https://package.openupm.com",
+                "scopes": ["com.cysharp", "jp.hadashikick"]
+              }
+            ],
+            "testables": ["com.cuvara.netcode"]
+          }
+          JSON
+
+          cat > ProjectSettings/ProjectSettings.asset << 'YAML'
+          %YAML 1.1
+          %TAG !u! tag:unity3d.com,2011:
+          --- !u!129 &1
+          PlayerSettings:
+            companyName: Cuvara
+            productName: NetcodeTest
+          YAML
+
+      - name: Run EditMode tests
+        uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          unityVersion: ${{ matrix.unityVersion }}
+          testMode: EditMode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: EditMode Test Results
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.unityVersion }}
+          path: artifacts/

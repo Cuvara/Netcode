@@ -1,139 +1,53 @@
-# NDC Unity Template
+# Cuvara Netcode
 
-Unity project template maintained by CuongND, built and released via the
-`unity-build-workflows` CI toolkit.
+Client-side networking module for the RPG MMO. Handles wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management.
 
----
+## Features
 
-## CI / Build System
+- **Wire transport** — TCP (KCP planned), 4-byte BE length-prefix framing
+- **Codec** — JSON and Protobuf wire codecs, distinguished inbound by a one-byte sniff
+- **Two-hop handshake** — Gateway auth → JoinToken → Game server connect
+- **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
+- **Snapshot resolution** — Entity handle table, delta resolution
+- **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
+- **VContainer DI** — One-line registration via `NetworkingRegistration.RegisterNetworking()`
+- **Two wire encodings** — Protobuf (the backend default, with entity-id interning and the entity-type enum) and legacy JSON. JSON is the registration default so upgrades do not change behaviour; pass `WireEncoding.Protobuf` to opt in. Ships one vendored third-party binary, `Google.Protobuf` — see `Documentation~/NETCODE.md` for why it is unavoidable.
 
-This project uses the
-[unity-build-workflows](unity-build-workflows/README.md) toolkit (included as a
-git submodule) for all CI builds. Unity operations run inside pinned Docker
-containers on GitHub Actions — no local Unity installation is required for CI.
+## Installation
 
-The active build workflow is **`unity-build.yml`** (explicit-platform-jobs flow).
-Each platform is a separate named job in the GitHub Actions UI — independently
-retryable and independently colour-coded.
+### Embedded (recommended for development)
 
-See [unity-build-workflows/docs/EXPLICIT\_PLATFORM\_FLOW.md](unity-build-workflows/docs/EXPLICIT_PLATFORM_FLOW.md)
-for a full guide to the job graph, inputs, activation, and platform selection rules.
+Already embedded in `Packages/com.cuvara.netcode/`.
 
-### Triggering builds manually
+### Git URL
 
-```bash
-# Android
-gh workflow run unity-build.yml \
-  --repo Cuvara/IndieRPGMMOAdventure \
-  --ref main \
-  -f platform=Android
-
-# WebGL
-gh workflow run unity-build.yml \
-  --repo Cuvara/IndieRPGMMOAdventure \
-  --ref main \
-  -f platform=WebGL
-
-# Linux64
-gh workflow run unity-build.yml \
-  --repo Cuvara/IndieRPGMMOAdventure \
-  --ref main \
-  -f platform=Linux64
-
-# Linux Dedicated Server
-gh workflow run unity-build.yml \
-  --repo Cuvara/IndieRPGMMOAdventure \
-  --ref main \
-  -f platform=LinuxServer
-
-# All platforms at once
-gh workflow run unity-build.yml \
-  --repo Cuvara/IndieRPGMMOAdventure \
-  --ref main \
-  -f platform=All
+```json
+"com.cuvara.netcode": "https://github.com/Cuvara/Netcode.git#v0.1.0"
 ```
 
-Supported platforms: **Android**, **WebGL**, **Linux64**, **LinuxServer**.
-**iOS** requires a registered self-hosted macOS runner with the
-`macos-unity-xcode` label — it is **blocked** until one is provisioned (see
-[SELF\_HOSTED\_MACOS\_RUNNER.md](unity-build-workflows/docs/SELF_HOSTED_MACOS_RUNNER.md),
-[EXPLICIT\_PLATFORM\_FLOW.md § iOS](unity-build-workflows/docs/EXPLICIT_PLATFORM_FLOW.md#6-ios-build--special-requirements)
-and
-[GITHUB\_ACTIONS\_BUILD\_RUNBOOK.md § 10](unity-build-workflows/docs/GITHUB_ACTIONS_BUILD_RUNBOOK.md#10-iosmacos-runner-limitations)).
+## Dependencies
 
-### Key dispatch inputs
+Resolved automatically via `package.json`:
+- **UniTask** (`com.cysharp.unitask`) — requires OpenUPM scoped registry
 
-| Input | Default | Description |
-|---|---|---|
-| `platform` | `All` | `All`, `Android`, `WebGL`, `Linux64`, `LinuxServer`, `iOS` |
-| `run-tests` | `false` | Run Unity tests before builds |
-| `build-addressables` | `false` | Build Addressables catalog before platform builds |
-| `environment` | `production` | `production`, `staging`, `development` |
-| `runner-mode` | `docker` | `docker`, `self-hosted-windows` |
-| `clean-build` | `false` | Force full `Library/` cache delete |
+Must be added manually to your project's `Packages/manifest.json`:
+- **VContainer** (`jp.hadashikick.vcontainer`) — DI container (OpenUPM scoped registry)
+- **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared with server
 
-Full input reference: [EXPLICIT\_PLATFORM\_FLOW.md § 2](unity-build-workflows/docs/EXPLICIT_PLATFORM_FLOW.md#2-workflow-dispatch-inputs).
-
-### Unity version
-
-Current version: **6000.0.26f1** — defined in
-`ProjectSettings/ProjectVersion.txt` (single source of truth).
-
-To upgrade Unity, follow the checklist in
-[unity-build-workflows/docs/UNITY\_VERSION\_UPGRADE.md](unity-build-workflows/docs/UNITY_VERSION_UPGRADE.md).
-
----
-
-## Required Secrets
-
-Configure in `Settings → Secrets and variables → Actions`:
-
-| Secret | Required | Purpose |
-|---|---|---|
-| `UNITY_LICENSE` | Yes | Raw `.ulf` file contents |
-| `UNITY_EMAIL` | Yes | Unity account email |
-| `UNITY_PASSWORD` | Yes | Unity account password |
-| `ANDROID_KEYSTORE_BASE64` | Optional | Android signing |
-| `ANDROID_KEYSTORE_PASS` | Optional | Android signing |
-| `ANDROID_KEY_ALIAS` | Optional | Android signing |
-| `ANDROID_KEY_PASS` | Optional | Android signing |
-| `DISCORD_WEBHOOK_URL` | Optional | Discord build notifications |
-
-All three Unity license secrets (`UNITY_LICENSE`, `UNITY_EMAIL`,
-`UNITY_PASSWORD`) must be set together. See
-[unity-build-workflows/docs/UNITY\_PERSONAL\_DOCKER\_LICENSE.md](unity-build-workflows/docs/UNITY_PERSONAL_DOCKER_LICENSE.md)
-for setup instructions.
-
-Verify secrets are present:
-```bash
-gh secret list --repo Cuvara/IndieRPGMMOAdventure \
-  | grep -E 'UNITY_LICENSE|UNITY_EMAIL|UNITY_PASSWORD'
+```json
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",
+"jp.hadashikick.vcontainer": "1.16.8"
 ```
 
----
+## Samples
 
-## Downloading Build Artifacts
+Both are imported from the Package Manager and both need a running backend.
 
-Build artifacts are retained for 14 days.
-
-```bash
-# List recent builds
-gh run list --repo Cuvara/IndieRPGMMOAdventure \
-  --workflow build.yml --limit 10
-
-# Download artifacts from a specific run
-gh run download <RUN_ID> --repo Cuvara/IndieRPGMMOAdventure
-```
-
----
+| Sample | What it is |
+|---|---|
+| **Demo Bootstrap** | Minimal dev harness scene: press Play and the full connection flow runs against a local backend, logging every step. Mints its own development JWT from a shared secret in the config asset. |
+| **E2E Certification** | Certification rig that drives the whole flow from the client with **no signing secret**: Nakama device auth, the `gateway_token` RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Exposes its results as static fields so they can be asserted on rather than read off the console. |
 
 ## Documentation
 
-| Document | Description |
-|---|---|
-| [unity-build-workflows/docs/EXPLICIT\_PLATFORM\_FLOW.md](unity-build-workflows/docs/EXPLICIT_PLATFORM_FLOW.md) | **New** — explicit-platform-jobs flow: job graph, dispatch inputs, activation, platform selection, iOS requirements |
-| [unity-build-workflows/docs/UNITY\_PERSONAL\_DOCKER\_LICENSE.md](unity-build-workflows/docs/UNITY_PERSONAL_DOCKER_LICENSE.md) | Unity Personal/free Docker licensing — `personal-combined` strategy, secret setup, troubleshooting |
-| [unity-build-workflows/docs/UNITY\_VERSION\_UPGRADE.md](unity-build-workflows/docs/UNITY_VERSION_UPGRADE.md) | Step-by-step Unity version upgrade checklist |
-| [unity-build-workflows/docs/GITHUB\_ACTIONS\_BUILD\_RUNBOOK.md](unity-build-workflows/docs/GITHUB_ACTIONS_BUILD_RUNBOOK.md) | Operational runbook — triggering builds, reading logs, artifacts, common errors |
-| [unity-build-workflows/docs/SELF\_HOSTED\_MACOS\_RUNNER.md](unity-build-workflows/docs/SELF_HOSTED_MACOS_RUNNER.md) | Provisioning a `macos-unity-xcode` self-hosted runner for iOS builds (Xcode, Unity iOS module, activation) |
-| [unity-build-workflows/README.md](unity-build-workflows/README.md) | CI toolkit — architecture, workflows, image variants |
+See `Documentation~/NETCODE.md` for architecture details, wire protocol spec, and handshake sequence.

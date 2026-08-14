@@ -1,8 +1,0 @@
-# Claude Code tooling rewrites these with CRLF on Windows/WSL, which git reports
-# as a full-file rewrite: 142 skill files showed as modified with zero content
-# change. Normalising keeps that churn out of every future diff.
-#
-# Scoped to .claude/ deliberately. A repo-wide rule would also renormalise ~113
-# Unity files that are legitimately stored with CRLF, which is a much larger and
-# unrelated change.
-.claude/** text=auto eol=lf
