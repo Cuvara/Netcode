@@ -286,17 +286,83 @@ is `Shared.GameLogic.Systems.SnapshotMerger`'s job — the same code the server 
 diffed against. A second copy in the client is the divergence ADR-10 exists to
 prevent.
 
+## Presentation: `IEntityView` and `WorldViewBinder`
+
+The netcode never touches a Unity object. `WorldViewBinder.Tick(world, localId)` polls
+`WorldState` and drives an `IEntityView` — three methods, `Spawn` / `Despawn` /
+`SetState` — and something else decides what that looks like. `GameObjectEntityView`
+ships as the dumbest possible implementation; the DOTS sample replaces it with an
+ECS-backed one.
+
+### `Spawn` is told the entity's kind
+
+`void Spawn(string id, bool isLocal, string type)`. `type` is the server's kind —
+`player`, `mob`, `npc`, `item`, `projectile`, or an unrecognised name passed through
+verbatim. Never null; **empty** when the server sent no type. It is passed at spawn
+rather than on every `SetState` because kind does not change over an entity's
+lifetime.
+
+A view must not infer kind from the shape of the id. Two independent implementations
+did exactly that before this parameter existed — both keying on an `"enemy-"` id
+prefix — which couples presentation to how the server *names* entities rather than
+how it *types* them.
+
+### Interpolation applies to remote entities only
+
+| Entity | Position source |
+|---|---|
+| Remote | interpolated between the two most recent snapshot positions |
+| **Local** | **snapped to the authoritative position, every pass** |
+
+Interpolating between two past snapshots means rendering the world as it was roughly
+one snapshot interval ago (~66 ms at 15 Hz). For an entity whose next position this
+client cannot know, that delay buys smooth motion and is worth paying. For the one
+entity the client drives, it buys nothing and adds a full interpolation interval
+between an input and any visible response — so the local entity is not interpolated.
+
+This does **not** make local movement feel immediate on its own: without prediction
+the local entity still waits a full round trip for the server to move it. It removes
+one of the two delays, not both. HP is never interpolated for anyone.
+
+Which id is local comes from the `localId` argument, compared against the entity key.
+Entity ids are Nakama user ids and the local player's is `NetworkClient.UserId`, so
+locality needs no extra wire field. Pass an empty string and nothing is local — which
+is the correct thing to pass before the handshake has produced a user id.
+
+### When `localId` changes underneath a live entity
+
+`isLocal` is handed to a view once and the view is entitled to keep it. What can change
+is *which id is local*: a client that leaves and rejoins can come back as a different
+user while an entity from the previous session is still on screen — the server holds a
+disconnected player's entity for 30 s (60 s in a dungeon). The spawn guard would then
+refuse to re-spawn the old entity, leaving it presenting itself as the local player
+alongside the new one.
+
+The binder detects the change and despawns-then-respawns the (at most two) entities
+whose locality actually flipped, counting them in `Relocalizations` rather than in
+`DespawnsFromAbsence` — the entity did not leave, and folding these into that counter
+would make an AOI-churn diagnostic lie. **Calling `Reset()` on a session boundary
+avoids the path entirely and is what a caller should do**; the recovery is the
+backstop for the caller that does not.
+
 ## Not implemented
 
 | | Status |
 |---|---|
-| Protobuf codec | interface and sniff in place; no implementation (see above) |
 | KCP transport | `DefaultTransportFactory` throws rather than silently downgrading to TCP — a KCP server is not listening on TCP at all, so a fallback would surface as an unexplained connection refusal |
 | WebGL | `System.Net.Sockets` is unavailable there; needs a WebSocket `ITransport`, which the gateway does not speak today either |
 | Map transfer (13/14) | `transfer_map` is not sent; an inbound `transfer_map_resp` decodes to a null payload and is logged |
 | Reconnect / resume | none. A closed session is reported, not retried; the server holds the entity 30 s (60 s in a dungeon) |
 | Prediction, reconciliation | out of scope by design — `AckTick` is surfaced for whoever builds it |
-| Protobuf-side world merge | `WorldState` merges, but only what the JSON codec decodes |
+
+Two rows were removed from this table in 0.4.0 because they had stopped being true
+and nothing failed when they stopped: **"Protobuf codec — interface and sniff in
+place, no implementation"** (`Runtime/Codec/ProtobufWireCodec.cs` has existed since
+0.2.0 and the DOTS sample constructs it) and **"Protobuf-side world merge — only
+what the JSON codec decodes"** (`WorldState.Apply` takes a `ResolvedSnapshot`, which
+is codec-agnostic by construction; the resolver upstream of it is the only thing that
+ever saw a wire type). A "not implemented" row that describes a shipped feature is
+worse than no table, because it is the row a reader trusts.
 
 ## `Shared.GameLogic` — wired up
 

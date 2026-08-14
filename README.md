@@ -10,6 +10,7 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 - **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
+- **Presentation** — `IEntityView` + `WorldViewBinder` reconcile the world against a view; remote entities are interpolated between snapshots, the local entity is snapped to its authoritative position
 - **VContainer DI** — One-line registration via `NetworkingRegistration.RegisterNetworking()`
 - **Two wire encodings** — Protobuf (the backend default, with entity-id interning and the entity-type enum) and legacy JSON. JSON is the registration default so upgrades do not change behaviour; pass `WireEncoding.Protobuf` to opt in. Ships one vendored third-party binary, `Google.Protobuf` — see `Documentation~/NETCODE.md` for why it is unavoidable.
 
@@ -41,12 +42,14 @@ Must be added manually to your project's `Packages/manifest.json`:
 
 ## Samples
 
-Both are imported from the Package Manager and both need a running backend.
+All four are imported from the Package Manager and all four need a running backend.
 
 | Sample | What it is |
 |---|---|
 | **Demo Bootstrap** | Minimal dev harness scene: press Play and the full connection flow runs against a local backend, logging every step. Mints its own development JWT from a shared secret in the config asset. |
+| **World View** | Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. |
 | **E2E Certification** | Certification rig that drives the whole flow from the client with **no signing secret**: Nakama device auth, the `gateway_token` RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Exposes its results as static fields so they can be asserted on rather than read off the console. |
+| **DOTS Sample** | The same world rendered as ECS entities via Entities.Graphics, with a HUD, a map selector and a server-authoritative combat demo. This is the sample the presentation work below is exercised against. |
 
 ## Documentation
 

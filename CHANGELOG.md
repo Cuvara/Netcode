@@ -53,6 +53,21 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
   prefix inference alive as a supported path. Nobody deletes a workaround that still
   compiles.
 
+- **The local entity is no longer interpolated.** `WorldViewBinder` eased every entity
+  between its two most recent snapshot positions, the local player included.
+  Interpolation renders the world as it was roughly one snapshot interval ago (~66 ms at
+  15 Hz) — worth paying for an entity whose next position this client cannot know, and
+  pure added latency for the one entity it drives. The local id is now snapped to its
+  authoritative position each pass; remote entities are unchanged.
+
+  `Tick(world, localId)` already knew which id was local — it used it only to set the
+  `isLocal` flag at spawn — so this needs no new argument and no interface change.
+
+  **This does not make local movement feel immediate**, and should not be reported as if
+  it does. Without prediction the local entity still waits a full round trip for the
+  server to move it; this removes one of the two delays. The other one is 0.5.0's
+  problem.
+
 - `GameObjectEntityView` puts the kind in the GameObject's name
   (`remote:mob:1a2b3c4d`). Deliberately nothing else — giving mobs their own mesh or
   colour would be presentation policy, and this view exists to be the dumbest thing that
@@ -67,6 +82,36 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
   rather than a re-derivation.
 
 ### Fixed
+
+- **Two entities rendered the `★ YOU` marker in the DOTS sample.** Not a bug in the
+  label — the label is one ternary on a flag, and the flag was true on two entities.
+
+  `isLocal` is decided once, at `Spawn`, from `id == localId`, and a view is entitled to
+  keep it: locality does not change over an entity's lifetime. What can change is *which
+  id is local*. The DOTS sample mints a fresh Nakama device id on every join
+  (`dots-editor-{DateTime.UtcNow.Ticks}`), so a rejoin authenticates as a **different
+  user**, while the server holds a disconnected player's entity for 30 s. Both are in the
+  next snapshot. The binder's spawn guard (`_live.Add`) then refuses to re-spawn the
+  previous session's avatar, so it keeps the `isLocal: true` it was given — and the new
+  avatar is spawned `isLocal: true` as well.
+
+  Fixed in `WorldViewBinder`, not in the sample and not in the view: the view is told
+  locality once and correctly trusts it, and the binder is the only party that knows
+  `localId` changed. It now despawns-and-respawns the at-most-two entities whose locality
+  actually flipped. That reuses the existing three methods rather than widening
+  `IEntityView` with a fourth, which matters in the same release that just broke every
+  implementation of it.
+
+  These despawns are counted in a new `Relocalizations` property, deliberately **not** in
+  `DespawnsFromAbsence` — the entity did not leave, and folding them in would make an
+  AOI-churn diagnostic lie. `DOTSNetworkBridge.LeaveRoom` additionally calls
+  `_binder.Reset()`, which is what a caller crossing a session boundary should do; the
+  binder's recovery is the backstop for the caller that does not.
+
+  **Not reproduced in the Editor** — the Editor was held by another task for the whole of
+  this work. The chain above is read off the code on both sides (client `Spawn` guard,
+  server `HoldTtl`), and the binder half is pinned by a failing-without-the-fix test;
+  the specific 30 s window in a live session is inference.
 
 - **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
   had been frozen since the first frame of the session.** Observed live at `996ms` in the
@@ -91,6 +136,28 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
 
 ### Added
 
+- **`WorldViewBinderTests` — the binder had no tests at all before this.** Twelve cases
+  covering what it spawns, the type it forwards, and which entities it interpolates.
+
+  The interpolation assertions do not race the clock. The binder's interpolation factor
+  is derived from time since the last snapshot, so immediately after one it is ~0 — an
+  interpolated entity renders the *previous* position and a snapped one renders the new
+  one. Asserting at that instant separates the two paths by a whole snapshot interval
+  (~66 ms) rather than by a float comparison, and the assertions use ranges, so ordinary
+  scheduling jitter cannot flip them.
+
+  Both fixes in this release were checked by removing them and watching the suite go red:
+  without the local-snap change three cases fail, without the relocalization fix one does.
+  A test that passes either way pins nothing.
+
+- **`WorldViewBinder.Relocalizations`** — entities re-spawned because the local player's
+  id changed under them. Nonzero means a session boundary was crossed without `Reset()`.
+
+- **A `Presentation` section in `Documentation~/NETCODE.md`**, covering the `Spawn` type
+  parameter, the remote-interpolated / local-snapped split and why it is not symmetric,
+  and the `localId`-changed path. The view layer had shipped across three releases with
+  no prose outside its own XML docs.
+
 - **`availableMaps` on `DOTSSceneSetup`, and `DOTSNetworkBridge.ConfigureMaps`.**
   `DOTSSceneSetup` adds the bridge from `Awake`, and a component added at runtime can
   only carry its field initializers — never a scene's inspector values. The bridge
@@ -105,6 +172,29 @@ implementation to migrate, and the sample in this repo gets shorter as a result.
   out-of-the-box behaviour; the point is that a consumer can now change it. The list is
   written into `Scenes/DOTSSample.unity` explicitly rather than left to the field
   initializer, so it is visible and editable in the Inspector on first open.
+
+### Documentation
+
+- **Two rows deleted from the "Not implemented" table because they describe shipped
+  features.** "Protobuf codec — interface and sniff in place, no implementation" has been
+  wrong since 0.2.0 added `Runtime/Codec/ProtobufWireCodec.cs`, which the DOTS sample
+  constructs directly; "Protobuf-side world merge — only what the JSON codec decodes" was
+  never true of `WorldState.Apply`, which takes a codec-agnostic `ResolvedSnapshot`. A
+  "not implemented" row describing a working feature is the row a reader trusts, and it
+  costs them the feature.
+- **The README's sample table listed two of the four samples in `package.json`** and
+  opened with "Both are imported from the Package Manager". `World View` and
+  `DOTS Sample` were missing.
+
+### Verified
+
+- `Runtime/View`, `Runtime/World` and `Runtime/Snapshot` compile and their tests pass
+  **outside Unity**, against the real `Shared.GameLogic` at `sgl-v0.1.6` — the same source
+  the package's `gitDependencies` pins — under `dotnet test` on .NET 10. 12/12.
+- **Not verified in the Unity Editor.** The Editor was held by another task throughout,
+  so the DOTS sample's own compilation (it needs Entities/Entities.Graphics) and the
+  visual result of both fixes are unexercised. What is claimed above is what a headless
+  run of the shared, engine-free code proves; the sample-side edits are read, not run.
 
 ## [0.3.2] - 2026-08-14
 

@@ -267,6 +267,15 @@ namespace DOTSSample
             _client?.Dispose();
             _client = null;
 
+            // Drop the presented world. Without this the previous session's entities stay
+            // on screen and in the binder's live set, and because this sample mints a new
+            // Nakama device id (and so a new user id) on every join, the previous
+            // session's avatar would still be flagged as the local player while the new
+            // one is too — two "★ YOU" markers. The binder now recovers from that on
+            // its own, but recovering is not the same as not causing it: a rejoin should
+            // start from an empty world, not from the last one plus a correction.
+            _binder?.Reset();
+
             // Reset state for map selector
             _mapSelected = false;
             _status = "Disconnected";

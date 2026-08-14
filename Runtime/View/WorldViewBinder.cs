@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Cuvara.Netcode.World;
@@ -32,6 +33,15 @@ namespace Cuvara.Netcode.View
     /// measured snapshot interval. HP values are not interpolated — they snap to the
     /// latest value.
     /// </para>
+    /// <para>
+    /// <b>The local entity is excluded from interpolation.</b> Smoothing between two
+    /// past snapshots means rendering the world as it was one snapshot interval ago —
+    /// worth it for entities whose next position this client cannot know, and pure
+    /// added latency for the one entity it drives. The local id is snapped to its
+    /// authoritative position instead. Which id that is comes from the
+    /// <c>localId</c> argument to <see cref="Tick"/>; pass an empty string and nothing
+    /// is treated as local, which is the pre-existing behaviour.
+    /// </para>
     /// </remarks>
     public sealed class WorldViewBinder
     {
@@ -51,6 +61,7 @@ namespace Cuvara.Netcode.View
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
         private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private string _localId = string.Empty;
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
         private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
@@ -69,6 +80,13 @@ namespace Cuvara.Netcode.View
 
         /// <summary>Despawns where the entity simply stopped being listed.</summary>
         public int DespawnsFromAbsence { get; private set; }
+
+        /// <summary>
+        /// Entities re-spawned because the local player's id changed under them. Nonzero
+        /// means a session boundary was crossed without <see cref="Reset"/>; see
+        /// <see cref="Tick"/>.
+        /// </summary>
+        public int Relocalizations { get; private set; }
 
         /// <summary>
         /// Records ids a snapshot named in <c>removed</c>, so the next reconcile can
@@ -104,6 +122,8 @@ namespace Cuvara.Netcode.View
             {
                 return;
             }
+
+            RelocalizeIfLocalIdChanged(localId);
 
             double nowMs = _clock.Elapsed.TotalMilliseconds;
             bool newSnapshot = world.Tick > _lastWorldTick;
@@ -145,6 +165,7 @@ namespace Cuvara.Netcode.View
                 }
 
                 var e = kv.Value;
+                bool isLocal = id == localId;
 
                 if (_live.Add(id))
                 {
@@ -152,7 +173,21 @@ namespace Cuvara.Netcode.View
                     // and delta alike, so it is already correct on the pass that first
                     // sees the id. Null-coalesced because the merger stores whatever the
                     // wire sent and a view should never have to null-check this.
-                    _view.Spawn(id, id == localId, e.Type ?? string.Empty);
+                    _view.Spawn(id, isLocal, e.Type ?? string.Empty);
+                }
+
+                if (isLocal)
+                {
+                    // The local entity is NOT interpolated. Interpolation exists to hide
+                    // the gap between snapshots for entities whose future this client
+                    // cannot know; for its own avatar it buys nothing and costs a full
+                    // interpolation delay (~66 ms at 15 Hz) on every one of its own
+                    // inputs. The authoritative position is used directly, and any
+                    // interpolation history is dropped so a later change of localId
+                    // cannot resume from a stale pair.
+                    _interp.Remove(id);
+                    _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
+                    continue;
                 }
 
                 if (newSnapshot)
@@ -232,6 +267,74 @@ namespace Cuvara.Netcode.View
             }
         }
 
+        /// <summary>
+        /// Drops the presentation of any entity whose locality changed because
+        /// <c>localId</c> did, so the next pass re-spawns it with the right flag.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why this is needed at all.</b> <c>isLocal</c> is handed to the view once,
+        /// at <see cref="IEntityView.Spawn"/>, and the view is entitled to keep it —
+        /// locality does not change over an entity's lifetime. What can change is
+        /// <i>which id is local</i>: <c>NetworkClient.UserId</c> is a session fact, and a
+        /// client that leaves and rejoins can come back as a different user while an
+        /// entity from the previous session is still on screen. The spawn guard
+        /// (<c>_live.Add</c>) then refuses to re-spawn it, so it keeps the locality it was
+        /// given — and both the old avatar and the new one present themselves as the
+        /// local player.
+        /// </para>
+        /// <para>
+        /// Fixed here rather than in the view because the view is told locality once and
+        /// correctly trusts it; the binder is what knows the id changed. Fixed by
+        /// despawn-then-respawn rather than by widening <see cref="IEntityView"/> with a
+        /// "locality changed" method: this costs one interface no consumer has to
+        /// implement, and it is the same pair of calls a despawn/respawn across the
+        /// boundary would have produced anyway.
+        /// </para>
+        /// <para>
+        /// The despawns are deliberately NOT counted in
+        /// <see cref="DespawnsFromAbsence"/>: the entity did not leave, and folding these
+        /// into that counter would make an AOI-churn diagnostic lie. They get
+        /// <see cref="Relocalizations"/> instead.
+        /// </para>
+        /// <para>
+        /// Calling <see cref="Reset"/> on a session boundary avoids reaching this path at
+        /// all, and is what a caller should do. This is the backstop for the caller that
+        /// does not.
+        /// </para>
+        /// </remarks>
+        private void RelocalizeIfLocalIdChanged(string localId)
+        {
+            var incoming = localId ?? string.Empty;
+            if (string.Equals(incoming, _localId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // Only two ids can have changed locality: the one that used to be local and
+            // the one that now is. Every other entity's `id == localId` answer is
+            // unchanged, so re-spawning them would be churn for nothing.
+            Forget(_localId);
+            Forget(incoming);
+            _localId = incoming;
+        }
+
+        /// <summary>
+        /// Drops one id from the presentation so the next pass treats it as new. No-op
+        /// for an id that is not currently presented.
+        /// </summary>
+        private void Forget(string id)
+        {
+            if (string.IsNullOrEmpty(id) || !_live.Remove(id))
+            {
+                return;
+            }
+
+            _interp.Remove(id);
+            _view.Despawn(id);
+            Relocalizations++;
+        }
+
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
         public void Reset()
         {
@@ -243,10 +346,12 @@ namespace Cuvara.Netcode.View
             _live.Clear();
             _interp.Clear();
             _explicitlyRemoved.Clear();
+            _localId = string.Empty;
             _firstSnapshot = true;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
+            Relocalizations = 0;
         }
     }
 }
