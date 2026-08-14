@@ -18,13 +18,33 @@ namespace Cuvara.Netcode.Prediction
     /// be predicting, so <see cref="LocalMovePredictor"/> refuses rather than guesses.
     /// </para>
     /// <para>
-    /// <b>Speed is the fragile one.</b> Tick rate and bounds are per-map constants the
-    /// caller can reasonably know, but speed is a per-entity server stat
-    /// (<c>Locomotion.Speed</c>) that no message on the wire carries today. The client
-    /// can only assume the server's spawn default. Anything that changes a player's speed
-    /// at runtime — a buff, a mount, a slow — desyncs prediction until the next snapshot
-    /// corrects it, and neither side will report an error. See
-    /// <see cref="LocalMovePredictor"/> for what that looks like on screen.
+    /// <b>Speed is the fragile one, and it is the only one the server can correct.</b>
+    /// Tick rate and bounds are per-map constants the caller has to get right by knowing
+    /// them. Speed is a per-entity server stat (<c>Locomotion.Speed</c>), so a value
+    /// stated here is only ever the client's belief about it — and a wrong belief does
+    /// not fail loudly. It produces a position wrong by a little on every tick, corrected
+    /// by every snapshot, which reads as rubber-banding rather than as a
+    /// misconfiguration. See <see cref="LocalMovePredictor"/> for what that looks like on
+    /// screen.
+    /// </para>
+    /// <para>
+    /// <b>Since the wire carries speed, <see cref="Speed"/> is the fallback rather than
+    /// the answer.</b> Snapshots include a per-entity speed
+    /// (<c>wire.proto</c> field 9), and
+    /// <see cref="LocalMovePredictor.SetServerSpeed"/> adopts it — the binder calls that
+    /// on every snapshot for the local entity, so a buff, mount or slow is picked up
+    /// rather than silently desynced. Do not conclude from this paragraph that the speed
+    /// must be maintained by hand: it must be <i>stated</i>, because the predictor
+    /// refuses to run without one, but the server's value supersedes it as soon as one
+    /// arrives.
+    /// </para>
+    /// <para>
+    /// This value therefore matters in exactly two situations, and it must still be
+    /// right in both: before the first snapshot, and against a server predating field 9.
+    /// A zero on the wire means "not sent" rather than "immobile" — proto3 elides a zero
+    /// float — so <see cref="LocalMovePredictor.SetServerSpeed"/> ignores non-positive
+    /// values and this value stands. <see cref="LocalMovePredictor.EffectiveSpeed"/>
+    /// reports which one is live; it diverging from this is the normal, healthy case.
     /// </para>
     /// </remarks>
     public readonly struct PredictionSettings
@@ -37,9 +57,17 @@ namespace Cuvara.Netcode.Prediction
         public readonly int TickRate;
 
         /// <summary>
-        /// Local player's movement speed in world units per second, matching the
-        /// server's <c>Locomotion.Speed</c> for this entity.
+        /// Fallback movement speed in world units per second — what replay integrates
+        /// with until a snapshot supplies the server's own value for this entity.
         /// </summary>
+        /// <remarks>
+        /// Should match the server's spawn default (<c>ServerDefaults.DefaultPlayerSpeed</c>).
+        /// It governs in exactly two situations, and has to be right in both: before the
+        /// first snapshot, and against a server predating <c>wire.proto</c> field 9. Once
+        /// a positive speed arrives it is superseded — see
+        /// <see cref="LocalMovePredictor.SetServerSpeed"/> and
+        /// <see cref="LocalMovePredictor.EffectiveSpeed"/>.
+        /// </remarks>
         public readonly float Speed;
 
         /// <summary>Play area the server clamps positions into.</summary>

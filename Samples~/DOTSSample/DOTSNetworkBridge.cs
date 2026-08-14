@@ -45,9 +45,12 @@ namespace DOTSSample
         [SerializeField] private bool useKeyboardInput = true;
 
         [Header("Prediction")]
-        [Tooltip("Local player's movement speed. MUST match the server's " +
-                 "ServerDefaults.DefaultPlayerSpeed — no wire message carries it, so this " +
-                 "is a hand-kept copy. Zero disables prediction rather than guessing.")]
+        [Tooltip("Fallback movement speed, used before the first snapshot and against a " +
+                 "server predating wire.proto field 9. Snapshots now carry per-entity " +
+                 "speed and it supersedes this, so a buff or slow is picked up rather " +
+                 "than desynced. Should still match the server's " +
+                 "ServerDefaults.DefaultPlayerSpeed. Zero disables prediction entirely " +
+                 "rather than guessing.")]
         [SerializeField] private float playerSpeed = 5f;
 
         [Header("Run")]
