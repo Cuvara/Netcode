@@ -34,11 +34,20 @@ namespace DOTSSample
         private void Start()
         {
             if (material == null)
-            {
                 material = CreateDefaultMaterial();
-            }
 
             var world = World.DefaultGameObjectInjectionWorld;
+            if (world == null)
+            {
+                Debug.LogWarning("[DOTSSpawner] DOTS World not ready — skipping entity spawn");
+                return;
+            }
+            if (material == null)
+            {
+                Debug.LogWarning("[DOTSSpawner] No material available — skipping entity spawn");
+                return;
+            }
+
             var em = world.EntityManager;
 
             float halfBounds = boundsSize * 0.5f;
@@ -112,16 +121,7 @@ namespace DOTSSample
 
         private static Material CreateDefaultMaterial()
         {
-            // Use URP Lit shader
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null)
-                shader = Shader.Find("Standard");
-
-            var mat = new Material(shader)
-            {
-                color = new Color(0.3f, 0.7f, 1f)
-            };
-            return mat;
+            return Resources.Load<Material>("DOTSDefaultMaterial");
         }
     }
 }

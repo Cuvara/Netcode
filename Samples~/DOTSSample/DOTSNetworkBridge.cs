@@ -10,6 +10,7 @@ using Cuvara.Netcode.View;
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace DOTSSample
 {
@@ -98,6 +99,101 @@ namespace DOTSSample
         private float _displayMax;
         private float _displayAvg;
 
+        // --- Server status panel (bottom-left) ---
+        [Header("Server Status")]
+        [SerializeField] private string gameServerStatusUrl = "http://127.0.0.1:9101/status";
+        [SerializeField] private string nakamaHealthUrl = "http://127.0.0.1:7350/healthcheck";
+        [SerializeField] private float statusPollInterval = 4f;
+
+        [Header("Nakama API")]
+        [SerializeField] private string nakamaBaseUrl = "http://127.0.0.1:7350";
+        [SerializeField] private string leaderboardId = "kills_alltime";
+        [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
+
+        private GUIStyle _serverPanelStyle;
+        private GUIStyle _mapButtonStyle;
+
+        // --- Auth ---
+        private string _nakamaSessionToken;
+
+        // --- Economy (gold) ---
+        private int _goldDisplay;
+        private int _goldServer;
+        private int _goldOptimistic;
+        private string _cachedGoldText;
+        private int _prevGoldDisplay = -1;
+        private int _prevLocalKills;
+
+        // --- Leaderboard ---
+        private string _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n(waiting...)";
+        private string _prevLeaderboardRaw;
+        private LeaderboardRecord[] _leaderboardRecords = Array.Empty<LeaderboardRecord>();
+
+        [Serializable]
+        private struct LeaderboardRecord
+        {
+            public string username;
+            public string score;
+            public string rank;
+            public string owner_id;
+        }
+
+        [Serializable]
+        private struct LeaderboardResponse
+        {
+            public LeaderboardRecord[] records;
+        }
+
+        [Serializable]
+        private struct AccountResponse
+        {
+            public string wallet;
+        }
+
+        [Serializable]
+        private struct WalletData
+        {
+            public int gold;
+        }
+
+        // --- Map selector ---
+        private bool _mapSelected;
+        private string _cachedMapText;
+
+        // Cached poll results
+        private bool _nakamaOk;
+        private bool _gameServerOk;
+        private int _gsTickRate;
+        private int _gsPlayers;
+        private int _gsEnemies;
+        private string _gsRedis = "unknown";
+        private string _gsPostgres = "unknown";
+        private int _gsUptimeSeconds;
+
+        // Cached display strings (rebuilt only on change)
+        private string _cachedServerPanel;
+        private bool _prevNakamaOk;
+        private bool _prevGameServerOk;
+        private int _prevGsTickRate = -1;
+        private int _prevGsPlayers = -1;
+        private int _prevGsEnemies = -1;
+        private string _prevGsRedis;
+        private string _prevGsPostgres;
+        private int _prevGsUptime = -1;
+        private bool _prevGatewayOk;
+
+        [Serializable]
+        private struct GameServerStatus
+        {
+            public bool ok;
+            public int tick_rate;
+            public int players_online;
+            public int enemies_alive;
+            public string redis;
+            public string postgres;
+            public int uptime_seconds;
+        }
+
         private void Start()
         {
             Application.runInBackground = true;
@@ -106,7 +202,59 @@ namespace DOTSSample
             _binder = new WorldViewBinder(_view);
 
             _cts = new CancellationTokenSource();
+            // Connection starts when map is selected (see OnGUI map selector)
+            // If only one map configured, auto-select it
+            if (availableMaps == null || availableMaps.Length <= 1)
+            {
+                _mapSelected = true;
+                RunAsync(_cts.Token).Forget();
+            }
+            PollServerStatusAsync(_cts.Token).Forget();
+        }
+
+        private void StartConnection(string selectedMap)
+        {
+            mapId = selectedMap;
+            _cachedMapText = "Map: " + selectedMap;
+            _mapSelected = true;
+            _status = "Authenticating...";
             RunAsync(_cts.Token).Forget();
+        }
+
+        private void LeaveRoom()
+        {
+            Debug.Log("[DOTSNet] Leaving room");
+
+            // Cancel running tasks (RunAsync, economy, leaderboard polls)
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            // Disconnect from game server
+            _client?.Disconnect();
+            _client?.Dispose();
+            _client = null;
+
+            // Reset state for map selector
+            _mapSelected = false;
+            _status = "Disconnected";
+            _inputTick = 0;
+            _pendingAttackTarget = "";
+            _snapshotCount = 0;
+            _entityCount = 0;
+            _cachedMapText = null;
+            _cachedStatusText = null;
+            _cachedEntityText = null;
+            _cachedRttText = null;
+            _cachedFpsRttText = null;
+            _cachedCombatText = null;
+            _prevKills = -1;
+            _prevLocalKills = 0;
+            _goldOptimistic = 0;
+            _entityLabelTextCache.Clear();
+
+            // Restart server status polling (doesn't need auth)
+            PollServerStatusAsync(_cts.Token).Forget();
         }
 
         private void Update()
@@ -158,8 +306,22 @@ namespace DOTSSample
                     var stats = _combatStatsQuery.GetSingleton<CombatStats>();
                     if (_prevKills != stats.Kills)
                     {
+                        // Optimistic gold: +10 per new kill
+                        int newKills = stats.Kills - _prevLocalKills;
+                        if (newKills > 0)
+                            _goldOptimistic += newKills * 10;
+                        _prevLocalKills = stats.Kills;
+
                         _prevKills = stats.Kills;
                         _cachedCombatText = "Kills: " + stats.Kills;
+                    }
+
+                    // Gold display: server value + optimistic delta, reconcile on next poll
+                    _goldDisplay = _goldServer + _goldOptimistic;
+                    if (_prevGoldDisplay != _goldDisplay)
+                    {
+                        _prevGoldDisplay = _goldDisplay;
+                        _cachedGoldText = "Gold: " + _goldDisplay;
                     }
                 }
             }
@@ -221,9 +383,14 @@ namespace DOTSSample
                 var auth = new SampleNakamaAuth();
                 var jwt = await auth.GetGatewayTokenAsync(device, ct);
                 _userId = auth.UserId;
+                _nakamaSessionToken = auth.SessionToken;
                 _cachedUserText = "User: " + (_userId.Length > 12 ? _userId.Substring(0, 12) : _userId) + "...";
                 _status = "Connecting to gateway...";
                 Debug.Log($"[DOTSNet] Auth OK, user_id={_userId}");
+
+                // Start economy + leaderboard polling now that we have a session token
+                PollEconomyAsync(ct).Forget();
+                PollLeaderboardAsync(ct).Forget();
 
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
@@ -289,6 +456,254 @@ namespace DOTSSample
             }
         }
 
+        private async UniTaskVoid PollServerStatusAsync(CancellationToken ct)
+        {
+            // Wait for initial connection before polling
+            await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
+                PlayerLoopTiming.Update, ct);
+
+            while (!ct.IsCancellationRequested)
+            {
+                // Poll Nakama health
+                try
+                {
+                    using (var req = UnityWebRequest.Get(nakamaHealthUrl))
+                    {
+                        req.timeout = 3;
+                        await req.SendWebRequest().ToUniTask(cancellationToken: ct);
+                        _nakamaOk = req.result == UnityWebRequest.Result.Success;
+                    }
+                }
+                catch (Exception)
+                {
+                    _nakamaOk = false;
+                }
+
+                // Poll game server status
+                try
+                {
+                    using (var req = UnityWebRequest.Get(gameServerStatusUrl))
+                    {
+                        req.timeout = 3;
+                        await req.SendWebRequest().ToUniTask(cancellationToken: ct);
+                        if (req.result == UnityWebRequest.Result.Success)
+                        {
+                            _gameServerOk = true;
+                            var status = JsonUtility.FromJson<GameServerStatus>(req.downloadHandler.text);
+                            _gsTickRate = status.tick_rate;
+                            _gsPlayers = status.players_online;
+                            _gsEnemies = status.enemies_alive;
+                            _gsRedis = status.redis ?? "unknown";
+                            _gsPostgres = status.postgres ?? "unknown";
+                            _gsUptimeSeconds = status.uptime_seconds;
+                        }
+                        else
+                        {
+                            _gameServerOk = false;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    _gameServerOk = false;
+                }
+
+                await UniTask.Delay(TimeSpan.FromSeconds(statusPollInterval),
+                    DelayType.Realtime, PlayerLoopTiming.Update, ct);
+            }
+        }
+
+        private static string FormatUptime(int totalSeconds)
+        {
+            if (totalSeconds < 60) return totalSeconds + "s";
+            int m = totalSeconds / 60;
+            int s = totalSeconds % 60;
+            if (m < 60) return m + "m " + s.ToString("D2") + "s";
+            int h = m / 60;
+            m %= 60;
+            return h + "h " + m.ToString("D2") + "m";
+        }
+
+        private void RebuildServerPanelIfNeeded()
+        {
+            bool gatewayOk = _client?.State == NetworkClientState.InWorld;
+
+            if (_prevNakamaOk == _nakamaOk &&
+                _prevGameServerOk == _gameServerOk &&
+                _prevGsTickRate == _gsTickRate &&
+                _prevGsPlayers == _gsPlayers &&
+                _prevGsEnemies == _gsEnemies &&
+                _prevGsRedis == _gsRedis &&
+                _prevGsPostgres == _gsPostgres &&
+                _prevGsUptime == _gsUptimeSeconds &&
+                _prevGatewayOk == gatewayOk &&
+                _cachedServerPanel != null)
+                return;
+
+            _prevNakamaOk = _nakamaOk;
+            _prevGameServerOk = _gameServerOk;
+            _prevGsTickRate = _gsTickRate;
+            _prevGsPlayers = _gsPlayers;
+            _prevGsEnemies = _gsEnemies;
+            _prevGsRedis = _gsRedis;
+            _prevGsPostgres = _gsPostgres;
+            _prevGsUptime = _gsUptimeSeconds;
+            _prevGatewayOk = gatewayOk;
+
+            string Dot(bool ok) => ok ? "<color=#44ff44>\u25cf</color>" : "<color=#ff4444>\u25cf</color>";
+            string State(bool ok) => ok ? "<color=#44ff44>Connected</color>" : "<color=#ff4444>Disconnected</color>";
+            string Svc(string s) => s == "connected"
+                ? "<color=#44ff44>Connected</color>"
+                : "<color=#ff4444>" + s + "</color>";
+
+            _cachedServerPanel =
+                "<b>Server Status</b>\n" +
+                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+                Dot(_nakamaOk) + " Nakama         " + State(_nakamaOk) + "\n" +
+                Dot(gatewayOk) + " Gateway        " + State(gatewayOk) + "\n" +
+                Dot(_gameServerOk) + " Game Server    " + State(_gameServerOk) + "\n" +
+                (_gameServerOk
+                    ? "  Tick Rate      " + _gsTickRate + " Hz\n" +
+                      "  Players        " + _gsPlayers + "\n" +
+                      "  Enemies        " + _gsEnemies + "\n" +
+                      Dot(_gsPostgres == "connected") + " PostgreSQL     " + Svc(_gsPostgres) + "\n" +
+                      Dot(_gsRedis == "connected") + " Redis          " + Svc(_gsRedis) + "\n" +
+                      "  Uptime         " + FormatUptime(_gsUptimeSeconds)
+                    : "  (no data)");
+        }
+
+        private async UniTaskVoid PollEconomyAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                if (string.IsNullOrEmpty(_nakamaSessionToken))
+                {
+                    await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
+                        PlayerLoopTiming.Update, ct);
+                    continue;
+                }
+
+                try
+                {
+                    var url = nakamaBaseUrl + "/v2/account";
+                    using (var req = UnityWebRequest.Get(url))
+                    {
+                        req.timeout = 5;
+                        req.SetRequestHeader("Authorization", "Bearer " + _nakamaSessionToken);
+                        await req.SendWebRequest().ToUniTask(cancellationToken: ct);
+                        if (req.result == UnityWebRequest.Result.Success)
+                        {
+                            var account = JsonUtility.FromJson<AccountResponse>(req.downloadHandler.text);
+                            if (!string.IsNullOrEmpty(account.wallet))
+                            {
+                                var wallet = JsonUtility.FromJson<WalletData>(account.wallet);
+                                _goldServer = wallet.gold;
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"[Economy] Poll failed: {req.responseCode} {req.error}");
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[Economy] Poll exception: {ex.Message}");
+                }
+
+                await UniTask.Delay(TimeSpan.FromSeconds(5), DelayType.Realtime,
+                    PlayerLoopTiming.Update, ct);
+            }
+        }
+
+        private async UniTaskVoid PollLeaderboardAsync(CancellationToken ct)
+        {
+            // Wait briefly for session token to be set
+            await UniTask.Delay(TimeSpan.FromSeconds(1), DelayType.Realtime,
+                PlayerLoopTiming.Update, ct);
+
+            while (!ct.IsCancellationRequested)
+            {
+                if (string.IsNullOrEmpty(_nakamaSessionToken))
+                {
+                    Debug.LogWarning("[Leaderboard] No session token yet, skipping poll");
+                    await UniTask.Delay(TimeSpan.FromSeconds(3), DelayType.Realtime,
+                        PlayerLoopTiming.Update, ct);
+                    continue;
+                }
+
+                try
+                {
+                    var url = nakamaBaseUrl + "/v2/leaderboard/" + leaderboardId + "?limit=10";
+                    using (var req = UnityWebRequest.Get(url))
+                    {
+                        req.timeout = 5;
+                        req.SetRequestHeader("Authorization", "Bearer " + _nakamaSessionToken);
+                        await req.SendWebRequest().ToUniTask(cancellationToken: ct);
+
+                        Debug.Log($"[Leaderboard] Poll response: {req.responseCode} result={req.result}");
+
+                        if (req.result == UnityWebRequest.Result.Success)
+                        {
+                            var raw = req.downloadHandler.text;
+                            Debug.Log($"[Leaderboard] Body: {(raw.Length > 200 ? raw.Substring(0, 200) : raw)}");
+                            if (raw != _prevLeaderboardRaw)
+                            {
+                                _prevLeaderboardRaw = raw;
+                                var response = JsonUtility.FromJson<LeaderboardResponse>(raw);
+                                _leaderboardRecords = response.records ?? Array.Empty<LeaderboardRecord>();
+                                RebuildLeaderboardPanel();
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"[Leaderboard] Poll failed: {req.responseCode} {req.error}");
+                            // Show error state but keep panel visible
+                            _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Error " + req.responseCode + "</color>";
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[Leaderboard] Poll exception: {ex.Message}");
+                    _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Connection error</color>";
+                }
+
+                await UniTask.Delay(TimeSpan.FromSeconds(10), DelayType.Realtime,
+                    PlayerLoopTiming.Update, ct);
+            }
+        }
+
+        private void RebuildLeaderboardPanel()
+        {
+            if (_leaderboardRecords.Length == 0)
+            {
+                _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n(no data)";
+                return;
+            }
+
+            var sb = new System.Text.StringBuilder(256);
+            sb.Append("<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n");
+
+            for (int i = 0; i < _leaderboardRecords.Length; i++)
+            {
+                var rec = _leaderboardRecords[i];
+                var name = string.IsNullOrEmpty(rec.username)
+                    ? (rec.owner_id != null && rec.owner_id.Length > 8 ? rec.owner_id.Substring(0, 8) : rec.owner_id ?? "???")
+                    : rec.username;
+                bool isLocal = rec.owner_id == _userId;
+                var line = "#" + rec.rank + "  " + name + "  " + rec.score;
+                if (isLocal)
+                    sb.Append("<color=#33ccff>").Append(line).Append(" \u2190</color>\n");
+                else
+                    sb.Append(line).Append("\n");
+            }
+
+            _cachedLeaderboardPanel = sb.ToString();
+        }
+
         private void EnsureGuiStyles()
         {
             if (_labelStyle != null) return;
@@ -326,6 +741,22 @@ namespace DOTSSample
                 normal = { textColor = Color.white, background = _bgTex },
                 padding = new RectOffset(8, 8, 4, 4)
             };
+
+            _serverPanelStyle = new GUIStyle(GUI.skin.box)
+            {
+                normal = { background = _bgTex, textColor = Color.white },
+                alignment = TextAnchor.UpperLeft,
+                fontSize = 13,
+                richText = true,
+                padding = new RectOffset(10, 10, 8, 8)
+            };
+
+            _mapButtonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 20,
+                fontStyle = FontStyle.Bold,
+                fixedHeight = 50
+            };
         }
 
         private Camera GetCamera()
@@ -342,6 +773,30 @@ namespace DOTSSample
         private void OnGUI()
         {
             EnsureGuiStyles();
+
+            // --- Map selector (pre-connection) ---
+            if (!_mapSelected && availableMaps != null && availableMaps.Length > 1)
+            {
+                const int btnW = 250;
+                int totalH = 40 + availableMaps.Length * 60;
+                int startX = (Screen.width - btnW) / 2;
+                int startY = (Screen.height - totalH) / 2;
+
+                GUI.color = Color.white;
+                GUI.Label(new Rect(startX, startY, btnW, 30), "Select Map:", _fpsStyle);
+                startY += 40;
+
+                for (int i = 0; i < availableMaps.Length; i++)
+                {
+                    if (GUI.Button(new Rect(startX, startY + i * 60, btnW, 50),
+                        availableMaps[i], _mapButtonStyle))
+                    {
+                        StartConnection(availableMaps[i]);
+                    }
+                }
+
+                return; // Don't draw HUD until connected
+            }
 
             // --- HUD panel (top-left) — strings rebuilt only on value change ---
             var y = 10;
@@ -389,13 +844,40 @@ namespace DOTSSample
                 GUI.Label(new Rect(10, y, w, h), _cachedRttText);
             }
 
-            // --- Combat stats (below network HUD) ---
+            // --- Combat stats + gold (below network HUD) ---
             if (_cachedCombatText != null)
             {
                 GUI.color = new Color(1f, 0.6f, 0.2f);
                 GUI.Label(new Rect(10, y, w, h), _cachedCombatText);
                 y += h;
                 GUI.color = Color.white;
+            }
+
+            if (_cachedGoldText != null)
+            {
+                GUI.color = new Color(1f, 0.85f, 0.2f);
+                GUI.Label(new Rect(10, y, w, h), _cachedGoldText);
+                y += h;
+                GUI.color = Color.white;
+            }
+
+            // Map indicator (cached)
+            if (_cachedMapText == null)
+                _cachedMapText = "Map: " + mapId;
+            GUI.Label(new Rect(10, y, w, h), _cachedMapText);
+            y += h;
+
+            // Leave room button (visible when connected)
+            if (currentState == NetworkClientState.InWorld)
+            {
+                y += 4;
+                GUI.color = new Color(1f, 0.4f, 0.4f);
+                if (GUI.Button(new Rect(10, y, 120, 28), "Leave Room"))
+                {
+                    LeaveRoom();
+                }
+                GUI.color = Color.white;
+                y += 32;
             }
 
             // --- FPS counter (top-right) — strings rebuilt at 4 Hz in Update ---
@@ -427,6 +909,30 @@ namespace DOTSSample
                         _cachedFpsRttText = "RTT: " + rttMs + "ms";
                     }
                     GUI.Label(new Rect(fpsX, fpsY, fpsW, fpsH), _cachedFpsRttText, _fpsStyle);
+                }
+            }
+
+            // --- Leaderboard panel (bottom-right, always visible) ---
+            {
+                const int lbW = 240;
+                const int lbH = 260;
+                int lbX = Screen.width - lbW - 10;
+                int lbY = Screen.height - lbH - 10;
+                GUI.color = Color.white;
+                GUI.Label(new Rect(lbX, lbY, lbW, lbH), _cachedLeaderboardPanel, _serverPanelStyle);
+            }
+
+            // --- Server status panel (bottom-left) ---
+            {
+                RebuildServerPanelIfNeeded();
+                if (_cachedServerPanel != null)
+                {
+                    const int panelW = 280;
+                    const int panelH = 220;
+                    int panelX = 10;
+                    int panelY = Screen.height - panelH - 10;
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(panelX, panelY, panelW, panelH), _cachedServerPanel, _serverPanelStyle);
                 }
             }
 
