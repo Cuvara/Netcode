@@ -102,6 +102,47 @@ jobs:
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: EditMode Test Results
 
+      # The runner is started with USE_EXIT_CODE=false, so Unity exiting 0 says only
+      # that Unity started and stopped. It exits 0 on "No tests were executed" too, and
+      # the published check goes NEUTRAL rather than red — which is how this repo ran
+      # green for its entire history while executing zero tests. This step is the gate:
+      # it reads what the runner actually produced and fails on an empty or failing run.
+      - name: Assert tests ran and passed
+        if: always()
+        run: |
+          python3 - << 'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          files = sorted(glob.glob('artifacts/**/*.xml', recursive=True))
+          if not files:
+              sys.exit('::error::No test result XML was produced. '
+                       'The runner reported nothing, so nothing was verified.')
+
+          total = passed = failed = errors = inconclusive = skipped = 0
+          for path in files:
+              try:
+                  run = ET.parse(path).getroot()
+              except ET.ParseError as exc:
+                  sys.exit(f'::error::{path} is not parseable XML: {exc}')
+              if run.tag != 'test-run':
+                  continue
+              g = lambda k: int(run.get(k) or 0)
+              total += g('total'); passed += g('passed'); failed += g('failed')
+              errors += g('errors'); inconclusive += g('inconclusive'); skipped += g('skipped')
+
+          print(f'total={total} passed={passed} failed={failed} '
+                f'errors={errors} inconclusive={inconclusive} skipped={skipped}')
+
+          if total == 0:
+              sys.exit('::error::Zero tests were executed. A green run that ran nothing '
+                       'is not a passing run — check that the package resolves and that '
+                       'its test assembly loads (a plugin that fails reference validation '
+                       'takes the whole assembly chain down silently).')
+          if failed or errors:
+              sys.exit(f'::error::{failed} failed and {errors} errored out of {total}.')
+          print(f'::notice::{passed}/{total} EditMode tests passed.')
+          PY
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()

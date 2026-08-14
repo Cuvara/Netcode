@@ -32,6 +32,30 @@ namespace Cuvara.Netcode.View
     /// measured snapshot interval. HP values are not interpolated — they snap to the
     /// latest value.
     /// </para>
+    /// <para>
+    /// <b>The local player is excluded from interpolation.</b> Interpolating between the
+    /// previous and the newest snapshot renders an entity behind the newest authoritative
+    /// position by up to one snapshot interval — deliberate for remote entities, whose
+    /// smoothness is the entire reason this code exists, and indefensible for the one
+    /// entity whose response delay the player is holding a key to feel. The local id is
+    /// rendered at the newest received position instead.
+    /// </para>
+    /// <para>
+    /// <b>What the local entity does when a snapshot is late:</b> it holds at the last
+    /// received position. It does not extrapolate. There is nothing honest to extrapolate
+    /// from — the client does not simulate the local player, so a guess would be the
+    /// binder inventing motion the server never confirmed, and it would have to be
+    /// visibly undone when the real snapshot lands. Remote entities still extrapolate up
+    /// to <c>t = 1.2</c>, because for them the alternative is a visible stall and the
+    /// correction is somebody else's avatar drifting slightly, not the player's own.
+    /// </para>
+    /// <para>
+    /// <b>This is not prediction.</b> It removes the render buffer, not the round trip.
+    /// Keypress-to-visible remains input-send quantisation plus RTT plus server tick;
+    /// closing that needs a prediction layer reconciling against
+    /// <c>WorldState.AckTick</c>, which is surfaced for exactly that purpose and which
+    /// nothing currently consumes.
+    /// </para>
     /// </remarks>
     public sealed class WorldViewBinder
     {
@@ -144,12 +168,16 @@ namespace Cuvara.Netcode.View
                     continue;
                 }
 
+                var e = kv.Value;
+
                 if (_live.Add(id))
                 {
-                    _view.Spawn(id, id == localId);
+                    // Type is carried on every snapshot the entity appears in, keyframe
+                    // and delta alike, so it is already correct on the pass that first
+                    // sees the id. Null-coalesced because the merger stores whatever the
+                    // wire sent and a view should never have to null-check this.
+                    _view.Spawn(id, id == localId, e.Type ?? string.Empty);
                 }
-
-                var e = kv.Value;
 
                 if (newSnapshot)
                 {
@@ -181,7 +209,11 @@ namespace Cuvara.Netcode.View
                 if (_interp.TryGetValue(id, out var entry))
                 {
                     float ix, iy;
-                    if (entry.HasFrom)
+                    // 'id != localId': the local player renders at the newest received
+                    // position, never behind it. See the class remarks — this is a render
+                    // delay removal, not prediction, and a late snapshot holds rather
+                    // than extrapolates.
+                    if (entry.HasFrom && id != localId)
                     {
                         ix = entry.FromX + (entry.ToX - entry.FromX) * t;
                         iy = entry.FromY + (entry.ToY - entry.FromY) * t;

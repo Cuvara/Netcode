@@ -20,7 +20,30 @@ namespace Cuvara.Netcode.View
     public interface IEntityView
     {
         /// <summary>An id appeared in the world for the first time.</summary>
-        void Spawn(string id, bool isLocal);
+        /// <param name="id">The entity id. For players this is the Nakama user id.</param>
+        /// <param name="isLocal">Whether this id is the local player's.</param>
+        /// <param name="type">
+        /// The server's entity kind — <c>"player"</c>, <c>"mob"</c>, <c>"npc"</c>,
+        /// <c>"item"</c>, <c>"projectile"</c>, or whatever a newer simulation sends that
+        /// this build's schema does not name yet. Never null; empty when the server sent
+        /// no type at all.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>Why this is a parameter and not something the view infers.</b> The kind
+        /// crosses the wire on every snapshot, keyframe and delta alike, so a view that
+        /// guesses it from the shape of the id is re-deriving a fact it was already
+        /// given. Two separate implementations did exactly that before this parameter
+        /// existed — both keyed on an <c>"enemy-"</c> id prefix — which is a decoding
+        /// rule invented by the presentation layer, silently coupled to how the server
+        /// happens to name things, and wrong the moment it stops.
+        /// </para>
+        /// <para>
+        /// Passed at spawn rather than on every <c>SetState</c> because kind does not
+        /// change over an entity's lifetime; a view that needs it later should keep it.
+        /// </para>
+        /// </remarks>
+        void Spawn(string id, bool isLocal, string type);
 
         /// <summary>An id is gone from the world.</summary>
         void Despawn(string id);

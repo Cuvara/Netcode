@@ -73,10 +73,19 @@ namespace DOTSSample
         private string _cachedFpsText;
         private string _cachedFpsStatsText;
         private string _cachedFpsRttText;
+        // Own dirty-flag for the top-right RTT label. It must NOT share '_prevRttMs'
+        // with the HUD label above: that field is advanced by the HUD's own cache check
+        // earlier in the same OnGUI pass, so a shared flag reads as "unchanged" every
+        // frame and freezes this label on its first sample.
+        private int _prevFpsRttMs = -1;
         private readonly GUIContent _sharedContent = new GUIContent();
 
         // --- Per-entity label cache (rebuilt on entity set change) ---
-        private readonly Dictionary<string, string> _entityLabelTextCache = new Dictionary<string, string>();
+        // Keyed by id, but the locality the text was built with is stored alongside it: the
+        // '★ YOU' prefix is derived from IsLocal, so caching on the id alone renders a stale
+        // star for any entity whose locality changes under it.
+        private readonly Dictionary<string, (bool IsLocal, string Text)> _entityLabelTextCache =
+            new Dictionary<string, (bool, string)>();
 
         // --- Combat stats cache ---
         private string _cachedCombatText;
@@ -108,6 +117,9 @@ namespace DOTSSample
         [Header("Nakama API")]
         [SerializeField] private string nakamaBaseUrl = "http://127.0.0.1:7350";
         [SerializeField] private string leaderboardId = "kills_alltime";
+
+        [Tooltip("Maps offered at startup. One entry connects to it straight away; " +
+                 "two or more draw the map selector and wait for a click.")]
         [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
 
         private GUIStyle _serverPanelStyle;
@@ -202,23 +214,86 @@ namespace DOTSSample
             _binder = new WorldViewBinder(_view);
 
             _cts = new CancellationTokenSource();
-            // Connection starts when map is selected (see OnGUI map selector)
-            // If only one map configured, auto-select it
-            if (availableMaps == null || availableMaps.Length <= 1)
+            // Connection starts when a map is selected (see the OnGUI map selector).
+            // With a single map there is nothing to choose, so connect to it directly —
+            // taking the id from the list rather than from 'mapId', or configuring one
+            // map would silently connect to whatever 'mapId' happened to hold.
+            if (availableMaps == null || availableMaps.Length == 0)
             {
-                _mapSelected = true;
-                RunAsync(_cts.Token).Forget();
+                StartConnection(mapId);
+            }
+            else if (availableMaps.Length == 1)
+            {
+                StartConnection(availableMaps[0]);
             }
             PollServerStatusAsync(_cts.Token).Forget();
         }
 
+        /// <summary>
+        /// Replaces the map set offered at startup.
+        /// </summary>
+        /// <remarks>
+        /// For callers that add this component from script — <see cref="DOTSSceneSetup"/>
+        /// does — because a component added at runtime can only ever carry its field
+        /// initializers, never a scene's inspector values. Call it in the same frame the
+        /// component is added: <c>Start</c> reads <c>availableMaps</c> to decide between
+        /// connecting directly and drawing the selector, and it runs after the frame's
+        /// <c>Awake</c> pass. A null or empty array is ignored, so a caller that has
+        /// nothing to say leaves the inspector-authored value alone.
+        /// </remarks>
+        public void ConfigureMaps(string[] maps)
+        {
+            if (maps == null || maps.Length == 0)
+                return;
+            availableMaps = maps;
+        }
+
         private void StartConnection(string selectedMap)
         {
+            if (_client != null)
+            {
+                // A second session on one bridge would leave two live clients ticking the
+                // same binder, and the older one's entities would never despawn.
+                Debug.LogWarning("[DOTSNet] Already connected — leave the room before connecting again.");
+                return;
+            }
+
+            // Every join authenticates with a fresh device id and therefore gets a fresh
+            // Nakama user id, so anything the previous session presented is about to be
+            // wrong about which entity is 'you'. Clear it before the first snapshot lands.
+            ResetSessionView();
+
             mapId = selectedMap;
             _cachedMapText = "Map: " + selectedMap;
             _mapSelected = true;
             _status = "Authenticating...";
             RunAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Drops everything the view and the binder hold for the session that just ended.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Not optional, and not merely tidy.</b> <see cref="WorldViewBinder"/> only calls
+        /// <c>Spawn</c> for ids it has not seen, and <c>Spawn</c> is the only place locality is
+        /// decided. An entity carried over from the previous session is therefore never
+        /// re-evaluated: it keeps the <c>IsLocal</c> it was given when it *was* the local
+        /// player, and the next session's own player is spawned local too — two entities
+        /// labelled <c>★ YOU</c>, one of them somebody else.
+        /// </para>
+        /// <para>
+        /// The carry-over is real whenever the old entity is still listed in the world when
+        /// the new session's first snapshot arrives — the server holds a disconnected
+        /// player's entity for ~30 s, so a quick rejoin lands inside that window.
+        /// </para>
+        /// </remarks>
+        private void ResetSessionView()
+        {
+            _binder?.Reset();
+            _entityLabelTextCache.Clear();
+            _labelCache.Clear();
+            _entityCount = 0;
         }
 
         private void LeaveRoom()
@@ -247,11 +322,17 @@ namespace DOTSSample
             _cachedEntityText = null;
             _cachedRttText = null;
             _cachedFpsRttText = null;
+            _prevRttMs = -1;
+            _prevFpsRttMs = -1;
+            _prevWorldTick = -1;
             _cachedCombatText = null;
             _prevKills = -1;
             _prevLocalKills = 0;
             _goldOptimistic = 0;
-            _entityLabelTextCache.Clear();
+
+            // Despawns every presented entity and clears the binder's live set, so the next
+            // join starts from an empty world instead of inheriting this one's.
+            ResetSessionView();
 
             // Restart server status polling (doesn't need auth)
             PollServerStatusAsync(_cts.Token).Forget();
@@ -902,10 +983,12 @@ namespace DOTSSample
 
                 if (_client?.Session != null)
                 {
-                    // Reuse RTT value already computed above
+                    // Same source as the HUD label above — one session, one round-trip
+                    // measurement — but cached against its own previous value.
                     var rttMs = (int)_client.Session.RoundTripMs;
-                    if (_cachedFpsRttText == null || _prevRttMs != rttMs)
+                    if (_cachedFpsRttText == null || _prevFpsRttMs != rttMs)
                     {
+                        _prevFpsRttMs = rttMs;
                         _cachedFpsRttText = "RTT: " + rttMs + "ms";
                     }
                     GUI.Label(new Rect(fpsX, fpsY, fpsW, fpsH), _cachedFpsRttText, _fpsStyle);
@@ -955,13 +1038,17 @@ namespace DOTSSample
 
                 float screenY = Screen.height - screenPos.y;
 
-                // Cache label text per entity — only rebuild on first sight
-                if (!_entityLabelTextCache.TryGetValue(label.Id, out var displayText))
+                // Cache label text per entity — rebuilt on first sight, and again when locality changes
+                if (!_entityLabelTextCache.TryGetValue(label.Id, out var cached)
+                    || cached.IsLocal != label.IsLocal)
                 {
                     var shortId = label.Id.Length > 8 ? label.Id.Substring(0, 8) : label.Id;
-                    displayText = label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId;
-                    _entityLabelTextCache[label.Id] = displayText;
+                    cached = (label.IsLocal,
+                        label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId);
+                    _entityLabelTextCache[label.Id] = cached;
                 }
+
+                var displayText = cached.Text;
 
                 var style = label.IsLocal ? _localLabelStyle : _labelStyle;
                 _sharedContent.text = displayText;

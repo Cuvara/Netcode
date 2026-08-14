@@ -8,6 +8,13 @@ namespace DOTSSample
     /// </summary>
     public sealed class DOTSSceneSetup : MonoBehaviour
     {
+        [Header("Network")]
+        [Tooltip("Maps the network bridge offers at startup. One entry connects to it " +
+                 "straight away; two or more draw the map selector and wait for a click. " +
+                 "Ignored if the GameObject already carries a DOTSNetworkBridge — that " +
+                 "one keeps its own inspector values.")]
+        [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
+
         private void Awake()
         {
             // Camera — top-down orthographic
@@ -46,9 +53,15 @@ namespace DOTSSample
 
             // Network bridge — connects to gateway → game server and renders
             // replicated entities as ECS entities alongside the local demo ones.
+            // A component added here carries only its field initializers, so the map set
+            // has to be handed over explicitly; without that the scene could never
+            // configure it and the selector would always appear.
             var bridge = gameObject.GetComponent<DOTSNetworkBridge>();
             if (bridge == null)
-                gameObject.AddComponent<DOTSNetworkBridge>();
+            {
+                bridge = gameObject.AddComponent<DOTSNetworkBridge>();
+                bridge.ConfigureMaps(availableMaps);
+            }
 
             Debug.Log("[DOTSSceneSetup] Scene ready — DOTS entities + combat + network bridge");
         }

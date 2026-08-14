@@ -5,6 +5,267 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-14
+
+**Use this instead of `0.4.0`.** `0.4.0` is tagged and published to GitHub Packages, and it
+does not work in a project that does not already supply
+`System.Runtime.CompilerServices.Unsafe` from somewhere else: its runtime assembly fails to
+load, silently. It also does not compile in a clean project, because `VContainer` was
+referenced but never declared. `0.4.1` fixes both and supersedes it.
+
+`0.4.0` is deliberately **not** retagged. A published version can be superseded, never
+rewritten — moving the tag would leave the registry artifact and the tag pointing at
+different code, which is worse than the state it would be fixing.
+
+Both defects were invisible for the same reason, and it is the reason worth remembering:
+**something other than the package supplied the dependency.** The only project anyone runs
+supplies `Unsafe` three times over by accident and supplies VContainer itself, and this
+repository's own CI bootstrap hardcodes VContainer into the manifest it writes. Every
+install anyone had ever tested was propped up from outside. And the test job that existed
+to catch it was reporting green while executing zero tests.
+
+### Fixed
+
+- **The package did not load at all in a project that does not already happen to supply
+  `System.Runtime.CompilerServices.Unsafe`.** `Runtime/Plugins/Google.Protobuf.dll`
+  references that assembly and shipped with a two-line stub `.meta`, so it imported with
+  Unity's default `validateReferences: 1`. In a project without the assembly, validation
+  refuses the plugin and the failure cascades:
+
+  ```
+  Assembly 'Packages/com.cuvara.netcode/Runtime/Plugins/Google.Protobuf.dll' will not be loaded due to errors:
+  Unable to resolve reference 'System.Runtime.CompilerServices.Unsafe'.
+
+  Assembly 'Library/ScriptAssemblies/Cuvara.Netcode.Tests.Editor.dll' will not be loaded due to errors:
+  Reference has errors 'Cuvara.Netcode.Runtime'.
+  ```
+
+  `Cuvara.Netcode.Runtime` is poisoned, and so is everything referencing it. The plugin now
+  ships a full `PluginImporter` meta with `validateReferences: 0`, which is what Unity's own
+  message recommends.
+
+  **Declaring the dependency was tried first and is not available to a package.**
+  `org.nuget.system.runtime.compilerservices.unsafe` lives on OpenUPM, a *scoped registry* —
+  and a UPM package cannot declare a scoped registry for its consumers, only a project can.
+  Adding it resolved to `Package [org.nuget.system.runtime.compilerservices.unsafe@6.0.0]
+  cannot be found` in a clean project. Vendoring a copy of the DLL was rejected too: the
+  consuming project already carries the assembly from two other plugin folders, and a third
+  would risk a duplicate-assembly conflict in the one project that currently works.
+
+  It stayed invisible because the only project anyone runs supplies the assembly several
+  times over by accident — `com.gdk.core/Plugins`, `Assets/Plugins/NuGet`, and Burst — none
+  of it this package's doing.
+
+- **`VContainer` was referenced by the runtime assembly and never declared, so a clean
+  install did not compile.** Found by `com.cuvara.dots`' new gate, which installs this
+  package into a minimal project:
+
+  ```
+  Runtime/Bootstrap/NetworkBootstrap.cs(13,7): error CS0246: The type or namespace name 'VContainer' could not be found
+  Runtime/DI/NetworkingRegistration.cs(31,23): error CS0246: The type or namespace name 'IContainerBuilder' could not be found
+  ```
+
+  `jp.hadashikick.vcontainer@1.16.8` is now a declared dependency. The README had
+  documented it as a manual step, so this was deliberate rather than forgotten — but a
+  hard asmdef reference that the package does not declare fails as a compile error deep in
+  someone else's build, where declaring it fails as a resolution error that names the
+  package. The second is the better failure.
+
+  This package's own CI could not have caught it either: the bootstrap manifest hardcodes
+  `jp.hadashikick.vcontainer`, so CI was supplying by hand exactly what the package failed
+  to declare. Same accident as the one above, a different actor.
+
+- **`gitDependencies` renamed to `x-manualDependencies`.** `Shared.GameLogic` was recorded
+  under a `dependencies`-shaped key that **stock Unity UPM does not read**, so it looked
+  declared and was not. It genuinely cannot be declared — a package's `dependencies` takes
+  registry version ranges only, a git URL is valid in a project manifest and nowhere else,
+  and this is a git subpath rather than a published package. The `x-` prefix marks it as
+  informational, and the README now states it as an install prerequisite rather than
+  implying Unity will resolve it.
+
+### Changed
+
+- **The CI test job is a gate now, rather than a decoration.** It ran green while executing
+  **zero tests** for its entire history, so every green on this repository up to and
+  including `v0.4.0` asserted only that Unity started and exited 0. The runner is invoked
+  with `USE_EXIT_CODE=false` and publishes a NEUTRAL check rather than a red one on an empty
+  run, so neither Unity's exit code nor the check could catch it. A step now parses the NUnit
+  XML the runner produces and fails on no XML, on zero tests, or on any failure or error, and
+  prints the count.
+
+## [0.4.0] - 2026-08-14
+
+Minor rather than patch because `IEntityView.Spawn` gains a parameter. One line per
+implementation to migrate, and the sample in this repo gets shorter as a result.
+
+Also in this release: the local player is no longer rendered behind its own authoritative
+position, and the DOTS sample stops labelling two entities `★ YOU` after a rejoin.
+
+### Fixed
+
+- **The local player was interpolated like everyone else, rendering it behind its own
+  authoritative position.** `WorldViewBinder` used `localId` only to set the `isLocal`
+  flag at spawn; the entity then went through the same lerp-between-the-last-two-snapshots
+  path as every remote. That path renders up to one snapshot interval in the past by
+  design — correct for remote entities, whose smoothness is the entire reason it exists,
+  and wrong for the one entity whose response delay a player is holding a key to feel.
+
+  Measured against a live backend at 15 Hz, comparing the rendered local position with the
+  newest authoritative position: **mean 0.172 world units of lag, worst case 0.471**,
+  against a per-tick step of 0.333 units over a measured 68.4 ms interval — about
+  **35 ms of render delay on average and up to ~97 ms**. After the change the same
+  measurement reads **0.000**, and remote entities still measure 0.07–0.17 units, so their
+  interpolation is untouched.
+
+  **This is not prediction and does not claim to be.** It removes the render buffer, not
+  the round trip. What remains between a keypress and seeing yourself move is input-send
+  quantisation (0–66 ms at 15 Hz), RTT (20–31 ms measured), and the server tick; closing
+  that needs a prediction layer reconciling against `WorldState.AckTick`, which is
+  surfaced for exactly that purpose and which nothing consumes yet.
+
+  **The trade is real and worth stating**: the local avatar now advances in 15 Hz steps
+  instead of gliding, because there is no longer anything between two snapshots to glide
+  through. Latency is bought with smoothness on that one entity. Prediction is what buys
+  both, and it is still unwritten.
+
+  A late snapshot makes the local entity **hold at its last received position** rather than
+  extrapolate. There is nothing honest to extrapolate from — the client does not simulate
+  the local player, so a guess would be motion the server never confirmed, visibly undone
+  when the real snapshot lands. Remote entities keep extrapolating to `t = 1.2`, where the
+  alternative is a visible stall and the correction lands on somebody else's avatar.
+
+- **A rejoin in the DOTS sample left two entities labelled `★ YOU`, one of them somebody
+  else.** `LeaveRoom` cleared every cached HUD string and disposed the client, but never
+  reset `WorldViewBinder` or the view — so the ending session's entities stayed presented,
+  with the `IsLocal` flag they were given when they *were* the local player.
+
+  That flag is decided in exactly one place, `Spawn`, and the binder only calls `Spawn`
+  for ids it has not already seen. A carried-over entity is therefore never
+  re-evaluated. Rejoining authenticates with a fresh device id and so a fresh Nakama user
+  id, whose entity is spawned local as well — two locals, and the older one is a stranger.
+  Measured directly after a `Leave Room`: the view still held the previous session's
+  player at `IsLocal=True` with no client connected at all.
+
+  It needs the old entity to still be listed when the new session's first snapshot
+  arrives, which a rejoin inside the server's ~30 s entity hold satisfies.
+
+  `StartConnection` and `LeaveRoom` now share a `ResetSessionView` that resets the binder,
+  despawning everything it holds, and clears the label caches. `StartConnection` also
+  refuses to start a second session while a client is live — two clients ticking one
+  binder was the other way to reach the same state, and nothing in the sample wanted it.
+
+- **The DOTS sample's floating labels cached `★ YOU` per id and never re-derived it.**
+  A second, independent defect on the rendering side, and the same shape as the RTT
+  freeze fixed below in this release: `_entityLabelTextCache` was keyed on the entity id alone, so once
+  a label had been built the star could not come off. The neighbouring `style` lookup read
+  the *live* `IsLocal` on every frame, which is why an entity could render a stale star in
+  a colour that correctly said "remote". The cache now stores the locality its text was
+  built from and rebuilds when the two disagree.
+
+
+- **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
+  had been frozen since the first frame of the session.** Observed live at `996ms` in the
+  HUD against `31ms` in the FPS panel, and the panel held `31ms` unchanged across two
+  captures 45 s apart. Both labels read the same `_client.Session.RoundTripMs`, so there
+  was never a second measurement to disagree with; the two caches shared one dirty-flag
+  field. The HUD's own cache check advances `_prevRttMs` to the current sample, and the
+  FPS panel — drawn later in the *same* `OnGUI` pass — then tested `_prevRttMs != rttMs`
+  as its own invalidation condition. That comparison is always false by the time it runs,
+  so `_cachedFpsRttText` was built once and never rebuilt. The HUD number was the honest
+  one throughout. The FPS panel now caches against its own `_prevFpsRttMs`, and
+  `LeaveRoom` resets both previous-value fields along with the strings it was already
+  clearing — without that, the first RTT after a rejoin could match the stale flag and
+  start the freeze over again.
+
+- **Configuring the DOTS sample with a single map connected to whatever `mapId` held,
+  not to the map that was configured.** `Start`'s `availableMaps.Length <= 1` branch
+  auto-connected by calling `RunAsync` directly, which reads the separate serialized
+  `mapId` field — so a one-entry list of `map_07` connected to `map_01`. The two
+  single-map cases are now split: an empty or null list connects to `mapId` as before,
+  and a one-entry list connects to *that entry*, through the same `StartConnection` path
+  the selector uses, so the map indicator and status text are set the same way in both.
+
+### Changed
+
+- **BREAKING: `IEntityView.Spawn` takes the entity's kind —
+  `void Spawn(string id, bool isLocal, string type)`.** The server types every entity,
+  and that type crosses the wire on every snapshot the entity appears in, keyframe *and*
+  delta (`SnapshotDeltaState` encodes it alongside `SnapshotEncoder`). It reached
+  `WorldViewBinder` intact and died there: the binder read `X`, `Y`, `Hp` and `MaxHp`
+  off the entity and dropped `Type` on the floor, so a view was told an id and a bool
+  and had to work out for itself what it was drawing.
+
+  What that cost is not hypothetical. **Two independent implementations invented the
+  same workaround** — inferring kind from an `"enemy-"` prefix on the id — this repo's
+  own `DOTSEntityView` and, downstream, `PrefixArchetypeResolver` in
+  `com.cuvara.dots`. Neither author would have chosen it; both were re-deriving a fact
+  the snapshot already carried, through a rule the presentation layer made up, coupled
+  to how the server happens to *name* entities rather than how it *types* them.
+
+  Migration is one signature and, usually, one deletion:
+  ```diff
+  - public void Spawn(string id, bool isLocal)
+  - {
+  -     bool isEnemy = id.StartsWith("enemy-");
+  + public void Spawn(string id, bool isLocal, string type)
+  + {
+  +     bool isEnemy = type == "mob";
+  ```
+  `type` is never null — empty when the server sent none — so no null check is needed.
+  Values are the wire's names: `player`, `mob`, `npc`, `item`, `projectile`, or an
+  unrecognised name passed through verbatim when a simulation grows a kind ahead of the
+  schema.
+
+  **Consumers can now delete prefix-based resolvers.** Anything that guessed entity kind
+  from an id has a first-class source for it. Be aware that this is a compile break for
+  anything implementing `IEntityView` directly, including through a helper interface of
+  its own: verified against `com.cuvara.dots` 0.8.0, where `DotsEntityView.Spawn` is a
+  `CS0535`, twenty test call sites through an `IEntityView`-typed variable are `CS7036`,
+  and `INetworkArchetypeResolver.TryResolve` needs the type as well before its prefix
+  resolver can actually be retired. Update the consumer and the package together.
+
+  A fourth method or a binder-preferred overload were both considered and rejected. The
+  interface documents itself as "deliberately three methods" so a DOTS implementation can
+  replace `GameObjectEntityView` cheaply; either non-breaking route would have bought
+  source compatibility with the exact narrowness that design is protecting, and left the
+  prefix inference alive as a supported path. Nobody deletes a workaround that still
+  compiles.
+
+- `GameObjectEntityView` puts the kind in the GameObject's name
+  (`remote:mob:1a2b3c4d`). Deliberately nothing else — giving mobs their own mesh or
+  colour would be presentation policy, and this view exists to be the dumbest thing that
+  can be looked at. A name makes the value visible in the hierarchy, which is what makes
+  it verifiable.
+
+- **`package.json`'s sample description for *DOTS Sample* now describes the sample.** It
+  read "Spawns 5 ECS entities with 3D meshes that move and spin" — written before the
+  networking, combat and economy landed, and the first thing anyone reads in Package
+  Manager before importing.
+
+### Removed
+
+- **`DOTSEntityView`'s `EnemyIdPrefix` constant and the `id.StartsWith` test it fed.**
+  Replaced by the `type` parameter. The `_enemyIds` set stays — `SetState` and the label
+  pass need the kind every frame and only `Spawn` is told it, so it is a cache now
+  rather than a re-derivation.
+
+### Added
+
+- **`availableMaps` on `DOTSSceneSetup`, and `DOTSNetworkBridge.ConfigureMaps`.**
+  `DOTSSceneSetup` adds the bridge from `Awake`, and a component added at runtime can
+  only carry its field initializers — never a scene's inspector values. The bridge
+  therefore always started with the two-map default, always drew the selector, and the
+  sample could never auto-connect no matter what the scene said. The setup component now
+  carries the map list itself and hands it to the bridge it creates, in the same frame,
+  before the bridge's `Start` reads it. `ConfigureMaps` ignores a null or empty array,
+  and the setup component only configures a bridge it created — a bridge placed on the
+  GameObject by hand keeps its own inspector values.
+
+  The shipped scene still lists `map_01` and `map_02`, so the selector remains the
+  out-of-the-box behaviour; the point is that a consumer can now change it. The list is
+  written into `Scenes/DOTSSample.unity` explicitly rather than left to the field
+  initializer, so it is visible and editable in the Inspector on first open.
+
 ## [0.3.2] - 2026-08-14
 
 ### Fixed
