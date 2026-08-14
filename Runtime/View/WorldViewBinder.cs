@@ -144,12 +144,16 @@ namespace Cuvara.Netcode.View
                     continue;
                 }
 
+                var e = kv.Value;
+
                 if (_live.Add(id))
                 {
-                    _view.Spawn(id, id == localId);
+                    // Type is carried on every snapshot the entity appears in, keyframe
+                    // and delta alike, so it is already correct on the pass that first
+                    // sees the id. Null-coalesced because the merger stores whatever the
+                    // wire sent and a view should never have to null-check this.
+                    _view.Spawn(id, id == localId, e.Type ?? string.Empty);
                 }
-
-                var e = kv.Value;
 
                 if (newSnapshot)
                 {

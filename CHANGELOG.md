@@ -5,7 +5,66 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-14
+
+Minor rather than patch because `IEntityView.Spawn` gains a parameter. One line per
+implementation to migrate, and the sample in this repo gets shorter as a result.
+
+### Changed
+
+- **BREAKING: `IEntityView.Spawn` takes the entity's kind —
+  `void Spawn(string id, bool isLocal, string type)`.** The server types every entity,
+  and that type crosses the wire on every snapshot the entity appears in, keyframe *and*
+  delta (`SnapshotDeltaState` encodes it alongside `SnapshotEncoder`). It reached
+  `WorldViewBinder` intact and died there: the binder read `X`, `Y`, `Hp` and `MaxHp`
+  off the entity and dropped `Type` on the floor, so a view was told an id and a bool
+  and had to work out for itself what it was drawing.
+
+  What that cost is not hypothetical. **Two independent implementations invented the
+  same workaround** — inferring kind from an `"enemy-"` prefix on the id — this repo's
+  own `DOTSEntityView` and, downstream, `PrefixArchetypeResolver` in
+  `com.cuvara.dots`. Neither author would have chosen it; both were re-deriving a fact
+  the snapshot already carried, through a rule the presentation layer made up, coupled
+  to how the server happens to *name* entities rather than how it *types* them.
+
+  Migration is one signature and, usually, one deletion:
+  ```diff
+  - public void Spawn(string id, bool isLocal)
+  - {
+  -     bool isEnemy = id.StartsWith("enemy-");
+  + public void Spawn(string id, bool isLocal, string type)
+  + {
+  +     bool isEnemy = type == "mob";
+  ```
+  `type` is never null — empty when the server sent none — so no null check is needed.
+  Values are the wire's names: `player`, `mob`, `npc`, `item`, `projectile`, or an
+  unrecognised name passed through verbatim when a simulation grows a kind ahead of the
+  schema.
+
+  **Consumers can now delete prefix-based resolvers.** Anything that guessed entity kind
+  from an id has a first-class source for it. Note that a downstream resolver still
+  *compiles* against this release if it sits behind its own interface rather than
+  implementing `IEntityView` directly — this makes such code deletable, not broken.
+
+  A fourth method or a binder-preferred overload were both considered and rejected. The
+  interface documents itself as "deliberately three methods" so a DOTS implementation can
+  replace `GameObjectEntityView` cheaply; either non-breaking route would have bought
+  source compatibility with the exact narrowness that design is protecting, and left the
+  prefix inference alive as a supported path. Nobody deletes a workaround that still
+  compiles.
+
+- `GameObjectEntityView` puts the kind in the GameObject's name
+  (`remote:mob:1a2b3c4d`). Deliberately nothing else — giving mobs their own mesh or
+  colour would be presentation policy, and this view exists to be the dumbest thing that
+  can be looked at. A name makes the value visible in the hierarchy, which is what makes
+  it verifiable.
+
+### Removed
+
+- **`DOTSEntityView`'s `EnemyIdPrefix` constant and the `id.StartsWith` test it fed.**
+  Replaced by the `type` parameter. The `_enemyIds` set stays — `SetState` and the label
+  pass need the kind every frame and only `Spawn` is told it, so it is a cache now
+  rather than a re-derivation.
 
 ### Fixed
 
