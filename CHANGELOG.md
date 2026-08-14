@@ -5,6 +5,60 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-14
+
+Requires `com.rpgmmo.shared-gamelogic` **`sgl-v0.1.7`** or newer — that tag is what adds
+`EntitySnapshotData.Speed`. Against `sgl-v0.1.6` this does not compile (`CS1729`,
+`CS1061`), which is deliberate: a version of the client that silently dropped speed again
+would be indistinguishable from one that never had it.
+
+### Added
+
+- **Prediction now uses the speed the server sends, closing
+  [rpg-mmo-server#91](https://github.com/Cuvara/rpg-mmo-server/issues/91) end to end.**
+  0.7.0 decoded `speed` off the wire into `ResolvedEntity`; this carries it the last hop
+  through `WorldState` into the merger and into replay, so a buff, mount or slow no longer
+  desyncs client and server silently.
+
+- **`LocalMovePredictor.SetServerSpeed(float)` and `EffectiveSpeed`.** Additive on
+  purpose. `Reconcile`'s signature is a cross-package contract enforced by
+  `PredictionSurfaceContractTests` and driven from `com.cuvara.dots`, whose compiler
+  errors cannot appear in this repository — adding a method breaks nobody, widening an
+  existing one breaks a consumer with no signal here.
+
+  **Non-positive is ignored**, because on the wire that means "not sent": proto3 elides a
+  zero float, so a server predating field 9 is indistinguishable from a stationary
+  entity. Accepting the zero would pin the predicted speed to zero against an older
+  server and stop the local player moving — strictly worse than the drift being fixed.
+  `PredictionSettings.Speed` remains the fallback, and `Reset` returns to it because the
+  previous session's speed belonged to a different entity.
+
+- **Five tests**, including `ServerSpeedStillMatchesTheServerExactly`, which asserts
+  **bit-exact** agreement against a reference walk integrated at the server's speed —
+  the same standard the rest of the replay tests hold, not merely "close".
+
+### Changed
+
+- **Minimum `com.rpgmmo.shared-gamelogic` raised to `sgl-v0.1.7`** — the tag that adds
+  `EntitySnapshotData.Speed`. Bumped in all four live pins: `package.json`'s
+  `x-manualDependencies`, the README install snippet, `NETCODE.md`, and **both** places
+  the CI workflow writes it (the test project's manifest and the install probes).
+
+  The CI pin is the one that matters and the one that caught this: the first run of this
+  change went red because the workflow still bootstrapped `sgl-v0.1.6`, so the package
+  it was testing could not compile. That is the gate doing exactly its job — a repo can
+  pin its own dependency in five places, and a stale one in CI means the suite validates
+  a configuration nobody ships. `NETCODE.md`'s other `sgl-v0.1.x` references are a
+  history of past releases and are deliberately unchanged.
+
+### Verified
+
+- **54/54 out of Unity against the tagged `sgl-v0.1.7` source itself**, checked out at
+  `d88213f` rather than against a branch that merely contains the change.
+- **The dependency is demonstrated, not assumed**: the same tree against `sgl-v0.1.6`
+  fails with exactly `CS1729` (no 7-argument `EntitySnapshotData` constructor) and
+  `CS1061` (no `Speed` member).
+
 ## [0.7.0] - 2026-08-14
 
 Decodes the per-entity `speed` the server now sends

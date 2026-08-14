@@ -154,6 +154,7 @@ namespace Cuvara.Netcode.Prediction
 
         private readonly PendingInput[] _pending = new PendingInput[Capacity];
         private readonly PredictionSettings _settings;
+        private float _speed;
         private readonly float _dt;
 
         private int _head;      // next write slot
@@ -194,6 +195,7 @@ namespace Cuvara.Netcode.Prediction
         public LocalMovePredictor(PredictionSettings settings)
         {
             _settings = settings;
+            _speed = settings.Speed;
             IsEnabled = settings.IsUsable;
             _dt = IsEnabled ? MovementSystem.DeltaTimeForTickRate(settings.TickRate) : 0f;
 
@@ -408,6 +410,48 @@ namespace Cuvara.Netcode.Prediction
             _renderOffset = new Vec2(x, y);
         }
 
+        /// <summary>
+        /// Adopts the server's speed for the local entity, as carried on the snapshot
+        /// (<c>wire.proto</c> field 9).
+        /// </summary>
+        /// <param name="speed">
+        /// The value from the snapshot. <b>Non-positive is ignored</b>, because on the
+        /// wire that means "not sent" rather than "immobile": proto3 elides a zero float,
+        /// so a server predating the field is indistinguishable from a stationary entity.
+        /// Accepting a zero would pin the predicted speed to zero against an older server
+        /// and the local player would stop moving — worse than the drift this exists to
+        /// fix.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// Separate from <see cref="Reconcile"/> rather than an extra parameter on it, and
+        /// deliberately so: that signature is a cross-package contract enforced by
+        /// <c>PredictionSurfaceContractTests</c> and driven from <c>com.cuvara.dots</c>,
+        /// whose compiler errors cannot appear in this repository. Adding a method breaks
+        /// nobody; widening an existing one breaks a consumer with no signal here.
+        /// </para>
+        /// <para>
+        /// Until this is called, the speed is whatever <see cref="PredictionSettings"/>
+        /// was constructed with — which remains the correct fallback for a server that
+        /// does not send the field.
+        /// </para>
+        /// </remarks>
+        public void SetServerSpeed(float speed)
+        {
+            if (speed > 0f && !float.IsNaN(speed) && !float.IsInfinity(speed))
+            {
+                _speed = speed;
+            }
+        }
+
+        /// <summary>The speed replay is currently integrating with.</summary>
+        /// <remarks>
+        /// Equal to <see cref="PredictionSettings.Speed"/> until a snapshot supplies one.
+        /// Diverging from the configured default is the normal, healthy case once the
+        /// server sends field 9.
+        /// </remarks>
+        public float EffectiveSpeed => _speed;
+
         /// <summary>Forgets all prediction state. For a new session or a map transfer.</summary>
         public void Reset()
         {
@@ -417,6 +461,9 @@ namespace Cuvara.Netcode.Prediction
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
             _seeded = false;
+            // Back to the configured fallback: the previous session's speed belonged to
+            // a different entity, and possibly a different player.
+            _speed = _settings.Speed;
             LastCorrection = 0f;
             Snaps = 0;
             SmoothedCorrections = 0;
@@ -439,7 +486,7 @@ namespace Cuvara.Netcode.Prediction
             var probe = new EntityState
             {
                 Position = from,
-                Speed = _settings.Speed,
+                Speed = _speed,
                 Dead = false,
             };
 
