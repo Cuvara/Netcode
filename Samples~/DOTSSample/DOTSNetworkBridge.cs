@@ -81,7 +81,11 @@ namespace DOTSSample
         private readonly GUIContent _sharedContent = new GUIContent();
 
         // --- Per-entity label cache (rebuilt on entity set change) ---
-        private readonly Dictionary<string, string> _entityLabelTextCache = new Dictionary<string, string>();
+        // Keyed by id, but the locality the text was built with is stored alongside it: the
+        // '★ YOU' prefix is derived from IsLocal, so caching on the id alone renders a stale
+        // star for any entity whose locality changes under it.
+        private readonly Dictionary<string, (bool IsLocal, string Text)> _entityLabelTextCache =
+            new Dictionary<string, (bool, string)>();
 
         // --- Combat stats cache ---
         private string _cachedCombatText;
@@ -246,11 +250,50 @@ namespace DOTSSample
 
         private void StartConnection(string selectedMap)
         {
+            if (_client != null)
+            {
+                // A second session on one bridge would leave two live clients ticking the
+                // same binder, and the older one's entities would never despawn.
+                Debug.LogWarning("[DOTSNet] Already connected — leave the room before connecting again.");
+                return;
+            }
+
+            // Every join authenticates with a fresh device id and therefore gets a fresh
+            // Nakama user id, so anything the previous session presented is about to be
+            // wrong about which entity is 'you'. Clear it before the first snapshot lands.
+            ResetSessionView();
+
             mapId = selectedMap;
             _cachedMapText = "Map: " + selectedMap;
             _mapSelected = true;
             _status = "Authenticating...";
             RunAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Drops everything the view and the binder hold for the session that just ended.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Not optional, and not merely tidy.</b> <see cref="WorldViewBinder"/> only calls
+        /// <c>Spawn</c> for ids it has not seen, and <c>Spawn</c> is the only place locality is
+        /// decided. An entity carried over from the previous session is therefore never
+        /// re-evaluated: it keeps the <c>IsLocal</c> it was given when it *was* the local
+        /// player, and the next session's own player is spawned local too — two entities
+        /// labelled <c>★ YOU</c>, one of them somebody else.
+        /// </para>
+        /// <para>
+        /// The carry-over is real whenever the old entity is still listed in the world when
+        /// the new session's first snapshot arrives — the server holds a disconnected
+        /// player's entity for ~30 s, so a quick rejoin lands inside that window.
+        /// </para>
+        /// </remarks>
+        private void ResetSessionView()
+        {
+            _binder?.Reset();
+            _entityLabelTextCache.Clear();
+            _labelCache.Clear();
+            _entityCount = 0;
         }
 
         private void LeaveRoom()
@@ -286,7 +329,10 @@ namespace DOTSSample
             _prevKills = -1;
             _prevLocalKills = 0;
             _goldOptimistic = 0;
-            _entityLabelTextCache.Clear();
+
+            // Despawns every presented entity and clears the binder's live set, so the next
+            // join starts from an empty world instead of inheriting this one's.
+            ResetSessionView();
 
             // Restart server status polling (doesn't need auth)
             PollServerStatusAsync(_cts.Token).Forget();
@@ -992,13 +1038,17 @@ namespace DOTSSample
 
                 float screenY = Screen.height - screenPos.y;
 
-                // Cache label text per entity — only rebuild on first sight
-                if (!_entityLabelTextCache.TryGetValue(label.Id, out var displayText))
+                // Cache label text per entity — rebuilt on first sight, and again when locality changes
+                if (!_entityLabelTextCache.TryGetValue(label.Id, out var cached)
+                    || cached.IsLocal != label.IsLocal)
                 {
                     var shortId = label.Id.Length > 8 ? label.Id.Substring(0, 8) : label.Id;
-                    displayText = label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId;
-                    _entityLabelTextCache[label.Id] = displayText;
+                    cached = (label.IsLocal,
+                        label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId);
+                    _entityLabelTextCache[label.Id] = cached;
                 }
+
+                var displayText = cached.Text;
 
                 var style = label.IsLocal ? _localLabelStyle : _labelStyle;
                 _sharedContent.text = displayText;

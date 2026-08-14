@@ -5,6 +5,45 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A rejoin in the DOTS sample left two entities labelled `★ YOU`, one of them somebody
+  else.** `LeaveRoom` cleared every cached HUD string and disposed the client, but never
+  reset `WorldViewBinder` or the view — so the ending session's entities stayed presented,
+  with the `IsLocal` flag they were given when they *were* the local player.
+
+  That flag is decided in exactly one place, `Spawn`, and the binder only calls `Spawn`
+  for ids it has not already seen. A carried-over entity is therefore never
+  re-evaluated. Rejoining authenticates with a fresh device id and so a fresh Nakama user
+  id, whose entity is spawned local as well — two locals, and the older one is a stranger.
+  Measured directly after a `Leave Room`: the view still held the previous session's
+  player at `IsLocal=True` with no client connected at all.
+
+  It needs the old entity to still be listed when the new session's first snapshot
+  arrives, which a rejoin inside the server's ~30 s entity hold satisfies.
+
+  `StartConnection` and `LeaveRoom` now share a `ResetSessionView` that resets the binder,
+  despawning everything it holds, and clears the label caches. `StartConnection` also
+  refuses to start a second session while a client is live — two clients ticking one
+  binder was the other way to reach the same state, and nothing in the sample wanted it.
+
+- **The DOTS sample's floating labels cached `★ YOU` per id and never re-derived it.**
+  A second, independent defect on the rendering side, and the same shape as the RTT
+  freeze fixed in 0.4.0: `_entityLabelTextCache` was keyed on the entity id alone, so once
+  a label had been built the star could not come off. The neighbouring `style` lookup read
+  the *live* `IsLocal` on every frame, which is why an entity could render a stale star in
+  a colour that correctly said "remote". The cache now stores the locality its text was
+  built from and rebuilds when the two disagree.
+
+### Changed
+
+- **`package.json`'s sample description for *DOTS Sample* now describes the sample.** It
+  read "Spawns 5 ECS entities with 3D meshes that move and spin" — written before the
+  networking, combat and economy landed, and the first thing anyone reads in Package
+  Manager before importing.
+
 ## [0.4.0] - 2026-08-14
 
 Minor rather than patch because `IEntityView.Spawn` gains a parameter. One line per
