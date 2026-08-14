@@ -5,6 +5,58 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-08-14
+
+Makes `LocalMovePredictor`'s cross-package surface enforceable instead of merely
+documented, and writes down the two ownership rules that the DOTS integration depends on.
+No behaviour change.
+
+### Added
+
+- **`PredictionSurfaceContractTests` — a gate on the six members `com.cuvara.dots`
+  drives.** `RecordInput`, `Reconcile`, `Advance`, `Position`, `IsEnabled`, `Reset`.
+
+  **This exists because the break is otherwise invisible here.** The DOTS adapter
+  references `Cuvara.Netcode.Runtime`; netcode must never reference it back, so the
+  adapter is not built in this repository and **its compiler errors cannot appear in this
+  repository's CI**. Rename `Reconcile` and everything stays green; the failure surfaces
+  in another repo, whenever someone next compiles it.
+
+  Two halves, both checked by mutation:
+
+  | Change | Caught by |
+  |---|---|
+  | `Reconcile(Vec2, long)` → `(Vec2, int)` | compile error at the call sites, immediately |
+  | `Advance(float)` → `Advance(double)` | **only** the reflection assert — every existing call still compiles via implicit widening |
+
+  The second is the one worth having. A widening that compiles everywhere on this side is
+  exactly the "harmless tidy-up" that reaches a consumer as a hard break.
+
+- **A test that the predictor's surface names no Unity or DOTS type**, and that
+  `Cuvara.Netcode.Runtime` does not reference `Unity.Entities`. That is what keeps the
+  dependency one-directional and the algorithm testable in EditMode without a World.
+
+### Documentation
+
+- **One predictor instance, constructed at the composition root and injected.**
+  `RecordInput` is called by whatever sends input, `Reconcile` by whatever consumes
+  snapshots — a binder here, or a system in the DOTS package. Two instances is silent:
+  the recording one is never reconciled and drifts, the reconciling one has an empty
+  buffer, replays nothing, and returns the authoritative position every time. Nothing
+  throws, `PendingCount` is legitimately zero, and the symptom is that prediction appears
+  to do nothing — so the search starts in the replay arithmetic, which is correct.
+
+- **The DOTS driving example now uses the real spelling**, verified against
+  `com.cuvara.dots` rather than sketched: `ReconciliationAnchor.ServerPosition` (the raw
+  `(x, y)` stored verbatim before any arithmetic) converted with `SimConversions.ToVec2`,
+  paired with `WorldState.AckTick`. The world-space `Position` field on the same component
+  is what `LocalTransform` wants and is **not** what the predictor wants.
+
+- **`PredictedTransform` must be released when prediction stops** — spectate, death, or
+  `IsEnabled == false` — or `LocalTransform` has no writer at all and the entity freezes.
+  That is the marker's own failure mode reached from the opposite direction, and it shows
+  up in a build rather than in CI.
+
 ## [0.6.1] - 2026-08-14
 
 Documentation only. No behaviour change, no API change — but the thing being documented

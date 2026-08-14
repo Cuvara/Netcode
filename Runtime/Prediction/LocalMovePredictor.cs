@@ -89,6 +89,16 @@ namespace Cuvara.Netcode.Prediction
     /// rather than project back — a round trip through a projection is not bit-exact, and
     /// bit-exactness is the entire point of replaying through the shared library.</para>
     ///
+    /// <para><b>This type's public surface is a cross-package contract.</b>
+    /// <c>com.cuvara.dots</c> drives it from a system this package cannot see and must
+    /// never reference. Six members are load-bearing across that seam —
+    /// <see cref="RecordInput"/>, <see cref="Reconcile"/>, <see cref="Advance"/>,
+    /// <see cref="Position"/>, <see cref="IsEnabled"/> and <see cref="Reset"/> — and
+    /// changing any of their signatures breaks a consumer whose compiler errors will not
+    /// appear in this repository's CI, because the DOTS adapter is not built here. Add
+    /// rather than change, and if one of them genuinely has to change, say so on the dots
+    /// side before it lands, not after.</para>
+    ///
     /// <para>Not thread-safe. Drive it from the thread that sends input and consumes
     /// snapshots.</para>
     /// </remarks>
@@ -159,6 +169,28 @@ namespace Cuvara.Netcode.Prediction
         /// unusable settings produce a predictor that refuses to predict rather than one
         /// that predicts badly.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Construct exactly one per local player, at the composition root, and inject
+        /// it into everything that touches it.</b> <see cref="RecordInput"/> is called by
+        /// whatever sends input; <see cref="Reconcile"/> is called by whatever consumes
+        /// snapshots — a binder here, or a system in the DOTS package. Those must be the
+        /// <i>same instance</i>.
+        /// </para>
+        /// <para>
+        /// Two instances is the failure worth naming, because it is silent: the one that
+        /// records inputs is never reconciled and drifts unbounded, while the one that
+        /// reconciles has an empty buffer, replays nothing, and returns the authoritative
+        /// position every time. Nothing throws, no counter looks wrong —
+        /// <see cref="PendingCount"/> is legitimately zero on the second one — and the
+        /// symptom is simply that prediction appears to do nothing. Someone then goes
+        /// looking for a bug in the replay arithmetic, which is correct.
+        /// </para>
+        /// <para>
+        /// So: register it in the DI scope and take it as a constructor dependency. Do not
+        /// let a consumer construct its own alongside an injected one.
+        /// </para>
+        /// </remarks>
         public LocalMovePredictor(PredictionSettings settings)
         {
             _settings = settings;

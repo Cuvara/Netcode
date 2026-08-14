@@ -339,20 +339,46 @@ There, the predictor is driven from the DOTS side instead:
 var binder = new WorldViewBinder(view);
 
 // in a DOTS system, per snapshot, for the local entity:
-predictor.Reconcile(anchorInServerSpace, world.AckTick);   // position + tick, paired here
-localTransform.Position = mapping.ToWorld(predictor.Position);
+var anchor = em.GetComponentData<ReconciliationAnchor>(entity);
+
+predictor.Reconcile(anchor.ServerPosition.ToVec2(), world.AckTick);  // position + tick, paired here
+predictor.Advance(SystemAPI.Time.DeltaTime);
+
+localTransform.Position = mapping.ToWorld(predictor.Position.X, predictor.Position.Y);
 ```
 
-The system claims `LocalTransform` with a `PredictedTransform` marker so the adapter stops
-writing it, and removes the marker when it stops predicting — otherwise the transform has
-no writer at all.
+`ServerPosition` is the raw `(x, y)` the server sent, stored verbatim by the adapter before
+any arithmetic. `Position` on the same component is the world-space projection, which is
+what `LocalTransform` wants and **not** what the predictor wants — see below.
+`ToVec2()` is `SimConversions` in `Cuvara.DOTS.GameLogic`, the one place `float2` and
+`Vec2` meet.
 
-**One conversion the caller owns: `LocalMovePredictor` works in the server's 2D space, not
-the client's world space.** `MovementSystem.TryMove` clamps to `MapBounds`, which the
-server expresses in its own coordinates, so the anchor's world-space position has to be
-recovered as server-space rather than projected back — a round trip through a projection
-is not bit-exact, and bit-exactness is the whole reason replay goes through the shared
-library.
+The system claims `LocalTransform` with a `PredictedTransform` marker so the adapter stops
+writing it, and **removes the marker when it stops predicting** — spectate, death, or
+`IsEnabled == false` — otherwise the transform has no writer at all and the entity freezes.
+That is the marker's own failure mode reached from the opposite direction, and it shows up
+in a build rather than in CI.
+
+**Why the anchor carries the server-space position at all, rather than the system
+projecting the world one back.** `LocalMovePredictor` works in the server's 2D space:
+`MovementSystem.TryMove` clamps to `MapBounds`, which the server expresses in its own
+coordinates, and that clamp is part of the arithmetic the golden vectors pin. A float round
+trip through `SnapshotSpaceMapping` is **not bit-exact**, so recovering the anchor by
+inverse projection would integrate from a position the server never held — a sub-ULP error
+in the one system whose entire justification is bit-exactness, and one that presents as FMA
+contraction and gets debugged as such, in the wrong package. `SnapshotSpaceMapping`
+deliberately has no inverse, so the round trip is out of reach rather than merely
+discouraged, and there is a test on the dots side with a `1e7` origin offset asserting
+`ServerPosition` survives the mapping that would visibly lose precision.
+
+### One predictor instance, owned at the composition root
+
+`RecordInput` is called by whatever sends input; `Reconcile` by whatever consumes snapshots.
+**They must be the same object.** Two instances is silent: the recording one is never
+reconciled and drifts, the reconciling one has an empty buffer, replays nothing, and returns
+the authoritative position every time. Nothing throws and no counter looks wrong — prediction
+simply appears to do nothing, and the search starts in the replay arithmetic, which is fine.
+Register it in the DI scope and inject it into both.
 
 ### Replay runs the server's code, not a copy of it
 
