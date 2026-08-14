@@ -190,6 +190,17 @@ jobs:
             handDeps: false
             sharedGameLogic: true
             required: true
+          # The documented install with VContainer deliberately withheld. VContainer is
+          # optional as of 0.6.0: Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap are gated
+          # behind a versionDefines symbol, so a consumer without it should lose those two
+          # assemblies and keep a working transport. This row is what makes that claim
+          # falsifiable — if the gating is wrong, the package stops compiling here.
+          - name: no-vcontainer
+            registries: true
+            handDeps: false
+            sharedGameLogic: true
+            blockVContainer: true
+            required: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,7 +212,13 @@ jobs:
 
           REGISTRIES=""
           if [ "${{ matrix.probe.registries }}" = "true" ]; then
-            REGISTRIES='"scopedRegistries": [{"name":"OpenUPM","url":"https://package.openupm.com","scopes":["com.cysharp","jp.hadashikick","org.nuget"]}],'
+            SCOPES='"com.cysharp","jp.hadashikick","org.nuget"'
+            # Withhold the VContainer scope entirely, so nothing can pull it in as a
+            # transitive dependency and quietly satisfy what we are testing the absence of.
+            if [ "${{ matrix.probe.blockVContainer }}" = "true" ]; then
+              SCOPES='"com.cysharp","org.nuget"'
+            fi
+            REGISTRIES="\"scopedRegistries\": [{\"name\":\"OpenUPM\",\"url\":\"https://package.openupm.com\",\"scopes\":[$SCOPES]}],"
           fi
 
           SGL=""
@@ -267,6 +284,17 @@ jobs:
             echo "--- $f"
           done
           # Surface the two failure shapes we are distinguishing between.
-          grep -rhoE "Package \[[^]]+\] cannot be found" . 2>/dev/null | sort -u | tee -a $GITHUB_STEP_SUMMARY || true
-          grep -rhoE "error CS0246: The type or namespace name '[^']+' could not be found" . 2>/dev/null | sort -u | tee -a $GITHUB_STEP_SUMMARY || true
-          grep -rhoE "An error occurred while resolving packages:" -A3 . 2>/dev/null | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
+          #
+          # Scan ONLY what Unity produced. Scanning '.' also reads the checked-out package,
+          # whose CHANGELOG quotes these exact error strings verbatim — which reported two
+          # CS0246s from a run that compiled cleanly. A diagnostic that matches its own
+          # documentation is worse than none.
+          SCAN=""
+          for d in artifacts Logs Library/Bee; do [ -d "$d" ] && SCAN="$SCAN $d"; done
+          if [ -z "$SCAN" ]; then
+            echo "no Unity output directories to scan" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            grep -rhoE "Package \[[^]]+\] cannot be found" $SCAN 2>/dev/null | sort -u | tee -a $GITHUB_STEP_SUMMARY || true
+            grep -rhoE "error CS[0-9]+: [^\"]{0,120}" $SCAN 2>/dev/null | sort -u | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
+            grep -rhA3 "An error occurred while resolving packages:" $SCAN 2>/dev/null | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
+          fi

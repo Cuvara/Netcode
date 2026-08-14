@@ -33,10 +33,17 @@ Already embedded in `Packages/com.cuvara.netcode/`.
 package compiles without them.
 
 **Resolved automatically via `package.json`**, provided your project has the OpenUPM
-scoped registry (both live there, not on Unity's registry):
+scoped registry (it lives there, not on Unity's registry):
 
-- **UniTask** (`com.cysharp.unitask`)
-- **VContainer** (`jp.hadashikick.vcontainer`)
+- **UniTask** (`com.cysharp.unitask`) — required; used throughout the transport
+
+**Optional**, and not declared, as of 0.6.0:
+
+- **VContainer** (`jp.hadashikick.vcontainer`) — enables `Cuvara.Netcode.DI`
+  (`NetworkingRegistration`) and `Cuvara.Netcode.Bootstrap` (`NetworkBootstrap`). Without
+  it those two assemblies are excluded by a `versionDefines` constraint and the rest of the
+  package compiles and works unchanged. DI registration is a convenience; the transport is
+  the product. Add it to your manifest if you want them.
 
 ```json
 "scopedRegistries": [
