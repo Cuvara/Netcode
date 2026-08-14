@@ -5,6 +5,45 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-14
+
+Minor rather than patch because the runtime assembly is split: consumers referencing
+`Cuvara.Netcode.Runtime` for `NetworkingRegistration` or `NetworkBootstrap` must add a
+reference to `Cuvara.Netcode.DI` or `Cuvara.Netcode.Bootstrap`. One line per asmdef.
+
+### Changed
+
+- **BREAKING: VContainer is optional, and the two assemblies that need it are gated.**
+  `Runtime/DI/` and `Runtime/Bootstrap/` are now `Cuvara.Netcode.DI` and
+  `Cuvara.Netcode.Bootstrap`, each carrying a `versionDefines` entry on
+  `jp.hadashikick.vcontainer` and a matching `defineConstraints`. A consumer without
+  VContainer loses those two assemblies and keeps a working transport, instead of a
+  package that does not compile. `jp.hadashikick.vcontainer` is therefore no longer
+  declared in `dependencies`; it is recorded under `x-optionalDependencies`.
+
+  VContainer was used in exactly two files — `NetworkingRegistration.cs` and
+  `NetworkBootstrap.cs` — so the split cost is small and the boundary is real: DI
+  registration is a convenience, the transport is the product.
+
+  **What this does not do, measured rather than assumed.** It does not make the package
+  installable without the OpenUPM scoped registry. The `bare` install probe shows
+  `com.cysharp.unitask` failing to resolve alongside VContainer, and UniTask is used
+  across Auth, Client, Connection and Transport — it is not gateable. The benefit is
+  narrower than "absent beats broken" suggests: it helps a consumer who *has* OpenUPM but
+  uses a different DI container, or none. That is a real consumer and the change is worth
+  making; it is not a standalone-install fix.
+
+  `DevJwt.cs` moved from `Runtime/Bootstrap/` to `Runtime/Auth/`, its only consumer.
+  Without that move the core assembly would have had to reference the gated one, which is
+  the wrong direction and would have defeated the gating.
+
+### Added
+
+- **An install probe row for the gating.** `no-vcontainer` runs the documented install with
+  the `jp.hadashikick` scope withheld from the registry entirely, so nothing can satisfy
+  VContainer transitively. It is a required row: if the gating is wrong, the package stops
+  compiling there rather than in a consumer's project.
+
 ## [0.5.0] - 2026-08-14
 
 Client-side prediction and reconciliation for local player **movement**. Minor rather

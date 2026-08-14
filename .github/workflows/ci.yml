@@ -149,3 +149,152 @@ jobs:
         with:
           name: test-results-${{ matrix.unityVersion }}
           path: artifacts/
+
+  # Does the package install on its own declarations alone?
+  #
+  # The 'test' job above hand-writes UniTask, VContainer, Shared.GameLogic AND the OpenUPM
+  # scopedRegistries block into the manifest it bootstraps — so it supplies every single
+  # thing whose absence is in question, and can never answer this. That accident is what
+  # hid three install defects. This job removes the hand-supply, one variable at a time.
+  #
+  # It does not run tests. It asks only whether Unity can resolve and compile the package,
+  # and it reports what happened either way — 'continue-on-error' because the point is the
+  # evidence, not a pass/fail gate, until we know what the answer even is.
+  install-probe:
+    name: Install probe (${{ matrix.probe.name }})
+    runs-on: ubuntu-latest
+    # Only the informational rows are allowed to fail. Leaving this 'true' for every row
+    # would let the documented-install row go red without failing anything — a gate that
+    # cannot fail, which is the exact defect this whole job exists because of.
+    continue-on-error: ${{ !matrix.probe.required }}
+    strategy:
+      fail-fast: false
+      matrix:
+        probe:
+          # Nothing but the package. Its own 'dependencies' are the only thing that can
+          # satisfy it, and no scoped registry exists to resolve OpenUPM-hosted entries.
+          - name: bare
+            registries: false
+            handDeps: false
+          # The package plus the OpenUPM scoped registry, still with no hand-written
+          # dependencies. This is the realistic consumer: they added the registry the
+          # README tells them to, and nothing else.
+          - name: openupm-registry-only
+            registries: true
+            handDeps: false
+          # The package plus exactly what the README tells a consumer to add: the OpenUPM
+          # scoped registry and the Shared.GameLogic git entry. Nothing else. This is the
+          # documented install, so this row is the one that must pass.
+          - name: documented-prereqs
+            registries: true
+            handDeps: false
+            sharedGameLogic: true
+            required: true
+          # The documented install with VContainer deliberately withheld. VContainer is
+          # optional as of 0.6.0: Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap are gated
+          # behind a versionDefines symbol, so a consumer without it should lose those two
+          # assemblies and keep a working transport. This row is what makes that claim
+          # falsifiable — if the gating is wrong, the package stops compiling here.
+          - name: no-vcontainer
+            registries: true
+            handDeps: false
+            sharedGameLogic: true
+            blockVContainer: true
+            required: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: package
+
+      - name: Bootstrap probe project
+        run: |
+          mkdir -p Assets ProjectSettings Packages
+
+          REGISTRIES=""
+          if [ "${{ matrix.probe.registries }}" = "true" ]; then
+            SCOPES='"com.cysharp","jp.hadashikick","org.nuget"'
+            # Withhold the VContainer scope entirely, so nothing can pull it in as a
+            # transitive dependency and quietly satisfy what we are testing the absence of.
+            if [ "${{ matrix.probe.blockVContainer }}" = "true" ]; then
+              SCOPES='"com.cysharp","org.nuget"'
+            fi
+            REGISTRIES="\"scopedRegistries\": [{\"name\":\"OpenUPM\",\"url\":\"https://package.openupm.com\",\"scopes\":[$SCOPES]}],"
+          fi
+
+          SGL=""
+          if [ "${{ matrix.probe.sharedGameLogic }}" = "true" ]; then
+            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.6",'
+          fi
+
+          cat > Packages/manifest.json << JSON
+          {
+            "dependencies": {
+              $SGL
+              "com.cuvara.netcode": "file:../package"
+            },
+            $REGISTRIES
+            "testables": ["com.cuvara.netcode"]
+          }
+          JSON
+
+          echo "--- manifest under test ---"
+          cat Packages/manifest.json
+
+          cat > ProjectSettings/ProjectSettings.asset << 'YML'
+          %YAML 1.1
+          %TAG !u! tag:unity3d.com,2011:
+          --- !u!129 &1
+          PlayerSettings:
+            companyName: Cuvara
+            productName: NetcodeInstallProbe
+          YML
+
+      - name: Compile
+        id: compile
+        continue-on-error: true
+        uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          unityVersion: ${{ matrix.unityVersion || '6000.3.9f1' }}
+          testMode: EditMode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: Install probe ${{ matrix.probe.name }}
+
+      # Only the documented-install row gates. The other two exist to record what a
+      # consumer sees when a prerequisite is missing, and both are expected to fail —
+      # gating them would mean asserting the package installs with no registry at all,
+      # which it has never claimed to do.
+      - name: Required row must compile
+        if: matrix.probe.required && steps.compile.outcome != 'success'
+        run: |
+          echo "::error::The documented install failed. A consumer following the README" \
+               "cannot compile this package."
+          exit 1
+
+      - name: Report what Unity said
+        if: always()
+        run: |
+          echo "### Install probe: ${{ matrix.probe.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "compile step outcome: ${{ steps.compile.outcome }}" >> $GITHUB_STEP_SUMMARY
+          LOG=$(find . -name '*.log' -path '*artifacts*' 2>/dev/null | head -1)
+          for f in $(find . -name 'editmode-results.xml' -o -name '*.log' 2>/dev/null | head -5); do
+            echo "--- $f"
+          done
+          # Surface the two failure shapes we are distinguishing between.
+          #
+          # Scan ONLY what Unity produced. Scanning '.' also reads the checked-out package,
+          # whose CHANGELOG quotes these exact error strings verbatim — which reported two
+          # CS0246s from a run that compiled cleanly. A diagnostic that matches its own
+          # documentation is worse than none.
+          SCAN=""
+          for d in artifacts Logs Library/Bee; do [ -d "$d" ] && SCAN="$SCAN $d"; done
+          if [ -z "$SCAN" ]; then
+            echo "no Unity output directories to scan" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            grep -rhoE "Package \[[^]]+\] cannot be found" $SCAN 2>/dev/null | sort -u | tee -a $GITHUB_STEP_SUMMARY || true
+            grep -rhoE "error CS[0-9]+: [^\"]{0,120}" $SCAN 2>/dev/null | sort -u | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
+            grep -rhA3 "An error occurred while resolving packages:" $SCAN 2>/dev/null | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
+          fi
