@@ -5,6 +5,48 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
+  had been frozen since the first frame of the session.** Observed live at `996ms` in the
+  HUD against `31ms` in the FPS panel, and the panel held `31ms` unchanged across two
+  captures 45 s apart. Both labels read the same `_client.Session.RoundTripMs`, so there
+  was never a second measurement to disagree with; the two caches shared one dirty-flag
+  field. The HUD's own cache check advances `_prevRttMs` to the current sample, and the
+  FPS panel — drawn later in the *same* `OnGUI` pass — then tested `_prevRttMs != rttMs`
+  as its own invalidation condition. That comparison is always false by the time it runs,
+  so `_cachedFpsRttText` was built once and never rebuilt. The HUD number was the honest
+  one throughout. The FPS panel now caches against its own `_prevFpsRttMs`, and
+  `LeaveRoom` resets both previous-value fields along with the strings it was already
+  clearing — without that, the first RTT after a rejoin could match the stale flag and
+  start the freeze over again.
+- **Configuring the DOTS sample with a single map connected to whatever `mapId` held,
+  not to the map that was configured.** `Start`'s `availableMaps.Length <= 1` branch
+  auto-connected by calling `RunAsync` directly, which reads the separate serialized
+  `mapId` field — so a one-entry list of `map_07` connected to `map_01`. The two
+  single-map cases are now split: an empty or null list connects to `mapId` as before,
+  and a one-entry list connects to *that entry*, through the same `StartConnection` path
+  the selector uses, so the map indicator and status text are set the same way in both.
+
+### Added
+
+- **`availableMaps` on `DOTSSceneSetup`, and `DOTSNetworkBridge.ConfigureMaps`.**
+  `DOTSSceneSetup` adds the bridge from `Awake`, and a component added at runtime can
+  only carry its field initializers — never a scene's inspector values. The bridge
+  therefore always started with the two-map default, always drew the selector, and the
+  sample could never auto-connect no matter what the scene said. The setup component now
+  carries the map list itself and hands it to the bridge it creates, in the same frame,
+  before the bridge's `Start` reads it. `ConfigureMaps` ignores a null or empty array,
+  and the setup component only configures a bridge it created — a bridge placed on the
+  GameObject by hand keeps its own inspector values.
+
+  The shipped scene still lists `map_01` and `map_02`, so the selector remains the
+  out-of-the-box behaviour; the point is that a consumer can now change it. The list is
+  written into `Scenes/DOTSSample.unity` explicitly rather than left to the field
+  initializer, so it is visible and editable in the Inspector on first open.
+
 ## [0.3.2] - 2026-08-14
 
 ### Fixed
