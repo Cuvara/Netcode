@@ -5,6 +5,41 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-14
+
+Documentation only. Three sentences that **0.8.0 itself made false**, in the places
+someone goes for authority on exactly this parameter.
+
+### Documentation
+
+- **`PredictionSettings` still said speed is "a per-entity server stat that no message on
+  the wire carries today".** 0.8.0 put it on the wire and made
+  `LocalMovePredictor.SetServerSpeed` consume it. Left alone, the next reader concludes
+  they must maintain the value by hand and never looks for `SetServerSpeed` — in the
+  class whose entire job is to warn about this parameter.
+
+  Rewritten rather than deleted, because the paragraph is load-bearing: "speed is the
+  fragile one, and a wrong value does not fail loudly — it rubber-bands" is still true and
+  still why the type refuses to default anything. What changed is the remedy. `Speed` is
+  now documented as the **fallback**, governing in exactly two situations it must still be
+  right in: before the first snapshot, and against a server predating field 9.
+
+- **`NETCODE.md` still carried 0.7.0's "Not yet consumed by `PredictionSettings`" note.**
+  True when written, falsified by 0.8.0 one release later. Now states what actually
+  happens and that `EffectiveSpeed` reports which value is live.
+
+- **The DOTS sample's `playerSpeed` tooltip** repeated the same stale claim, in the
+  Inspector — the one place a reader is holding the field while they read it.
+
+### Note
+
+All three were mine, written in 0.5.0 and 0.7.0 and falsified by my own 0.8.0. That is the
+failure mode this package keeps finding in other people's code — a stale sentence in an
+authoritative place is worse than no sentence — and shipping the fix that invalidates your
+own documentation without re-reading it is how it happens. Found by `dots-builder`
+checking a sample against the release, not by anything in CI, and nothing in CI could have
+found it.
+
 ## [0.8.0] - 2026-08-14
 
 Requires `com.rpgmmo.shared-gamelogic` **`sgl-v0.1.7`** or newer — that tag is what adds

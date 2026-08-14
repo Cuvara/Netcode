@@ -435,11 +435,13 @@ including handle-only ones.
 > actually lives. Trusting the wire value unconditionally means an old server pins the
 > predicted speed to zero and the local player stops moving.
 
-**Not yet consumed by `PredictionSettings`.** The remaining hop is
-`WorldState` → `Shared.GameLogic.EntitySnapshotData`, which needs a `Speed` field on
-that type. It exists on the backend but reaches this package only through a pinned UPM
-tag, so it lands when that tag moves. Until then `PredictionSettings.Speed` is still the
-caller-stated value and everything above is plumbing waiting for its last connection.
+**Consumed since 0.8.0.** `WorldState` carries speed into
+`Shared.GameLogic.EntitySnapshotData` (needs `sgl-v0.1.7` or newer), the binder calls
+`LocalMovePredictor.SetServerSpeed` for the local entity on every snapshot, and replay
+integrates at the server's value. `PredictionSettings.Speed` is now the **fallback**: it
+governs before the first snapshot and against a server predating field 9, and is
+superseded as soon as a positive speed arrives. `LocalMovePredictor.EffectiveSpeed`
+reports which is live.
 
 ### Corrections: smoothed small, snapped large
 
