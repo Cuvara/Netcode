@@ -36,5 +36,18 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// The JSON encoding never sets it.
         /// </summary>
         public uint Handle { get; set; }
+
+        /// <summary>
+        /// Movement speed in world units per second, as the server is integrating it
+        /// for this entity right now — not the spawn default.
+        /// </summary>
+        /// <remarks>
+        /// <b>Zero means "not sent", not "immobile".</b> proto3 elides a zero float, so a
+        /// server predating this field (anything before the field-9 change) is
+        /// indistinguishable from a stationary entity. Treat a non-positive value as
+        /// absent and fall back to a configured default: trusting it outright means an
+        /// old server pins a predicted speed to zero and the local player stops moving.
+        /// </remarks>
+        public float Speed { get; set; }
     }
 }
