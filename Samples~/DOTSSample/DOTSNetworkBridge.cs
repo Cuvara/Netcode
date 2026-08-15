@@ -37,7 +37,18 @@ namespace DOTSSample
         [Tooltip("Inputs sent per second. Must equal the server's simulation tick rate: " +
                  "the server integrates one step per accepted input at 1/tickRate, and " +
                  "applies only the newest when several land in one tick.")]
-        [SerializeField] private int inputRateHz = 15;
+        // Defaulted from the shared constant rather than a literal, so this cannot drift
+        // from the rate the server actually integrates at. The two are compiled from the
+        // same Shared.GameLogic, and a mismatch does not fail — the client is simply
+        // wrong by a little on every tick, corrected by every snapshot, which reads to a
+        // player as rubber-banding rather than as a misconfiguration.
+        //
+        // This is a field initializer and it is load-bearing here BECAUSE nothing
+        // serializes it: DOTSSceneSetup adds this component at runtime, so the scene
+        // carries no DOTSNetworkBridge and no stored value to override it. Author the
+        // component into a scene and the serialized number wins instead — at which point
+        // this default stops applying and the scene has to be updated too.
+        [SerializeField] private int inputRateHz = GameConstants.DefaultTickRate;
 
         [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
                  "sine-wave walk, which is what this sample did before and is still what " +
