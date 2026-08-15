@@ -60,6 +60,40 @@ the server are unaffected — pinned by `SmoothingDoesNotTouchTheSimulatedPositi
   remainder deliberately: it belongs to a step taken from a position the server has just
   ruled out, and replaying it would add a second, smaller wrong movement after the snap.
 
+### Relationship to #25
+
+`#25` landed the same feature independently while this was in CI, by a different route:
+it renders `_predicted + _renderOffset + _renderStep`, with `_renderStep` growing in the
+**last input's direction** between inputs. That is forward extrapolation — it renders
+positions ahead of the last submitted input, predicting the next one before it exists. The
+`_sinceInput > _dt` clamp bounds it to one step; it does not prevent it.
+
+Run against this release's tests, that implementation fails four:
+
+```
+WhenInputStopsThePositionConvergesAndDoesNotOvershoot
+StoppingInputLeavesThePositionCompletelyStill
+TheStepIsFullyShownAfterOneInputInterval
+ASnapClearsTheUnshownRemainder
+```
+
+The consequence in play: on key release the avatar has already travelled up to a full step
+(0.333 units at the default speed) past where the player stopped, and has to come back.
+**A snap-back on every key release is a strong candidate for the "occasional jerk" the
+user reported** — and one caused by the smoothing fix, so it would read as the fix having
+failed.
+
+`#25` also had to weaken an existing assertion from `Position == SimulatedPosition` to one
+on the offset alone, with a comment stating that the rendered position now *leads* the
+simulated one. **This release restores the stronger form**, because interpolating within
+the step converges exactly. A test a change forces you to weaken is telling you something
+about the change.
+
+`SmoothingOffset` from #25 is kept — it is a useful diagnostic and costs nothing.
+
+**The trade this release accepts instead:** motion begins a frame later. That is stated
+above and is the honest cost of not extrapolating.
+
 ### Added
 
 - **`RenderSmoothingTests`** — 9 cases. Both properties are mutation-checked: removing the
