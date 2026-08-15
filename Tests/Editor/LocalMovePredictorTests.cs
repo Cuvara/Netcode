@@ -250,20 +250,21 @@ namespace Cuvara.Netcode.Tests.Editor
             predictor.RecordInput(1, 1f, 0f);
             predictor.Reconcile(new Vec2(0.05f, 0f), 1);
 
-            Assert.That(predictor.SmoothingOffset, Is.Not.EqualTo(Vec2.Zero));
+            Assert.That(predictor.Position, Is.Not.EqualTo(predictor.SimulatedPosition));
 
             for (var frame = 0; frame < 60; frame++)
             {
                 predictor.Advance(1f / 60f);
             }
 
-            // Asserted on the offset itself rather than on Position == SimulatedPosition.
-            // That equality used to be a sound proxy, and stopped being one when the
-            // rendered position started leading the simulated one by the fraction of the
-            // pending step already drawn — with input held the two now coincide only at
-            // each input tick. The intent under test is unchanged and this states it
-            // directly: the correction settles at exactly zero rather than approaching it.
-            Assert.That(predictor.SmoothingOffset, Is.EqualTo(Vec2.Zero),
+            // Restored to the stronger form. #25 had to weaken this to an assertion on
+            // the offset alone, because that implementation left the rendered position
+            // LEADING the simulated one by the fraction of the pending step already drawn
+            // — its own comment said so. This implementation interpolates within the step
+            // instead, so the rendered position converges on the simulated one exactly and
+            // the original equality holds again. A test that a change forces you to
+            // weaken is telling you something about the change.
+            Assert.That(predictor.Position, Is.EqualTo(predictor.SimulatedPosition),
                 "the offset must settle exactly, not approach zero forever");
         }
 
