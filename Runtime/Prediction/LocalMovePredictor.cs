@@ -165,6 +165,20 @@ namespace Cuvara.Netcode.Prediction
         private Vec2 _renderOffset;   // predicted-minus-corrected, decayed to zero
         private bool _seeded;
 
+        // --- Render-rate smoothing of the predicted position ---
+        //
+        // '_predicted' only moves inside RecordInput, which runs at the input rate. At
+        // 15 Hz input and 350 fps that is ~23 identical frames followed by a jump of a
+        // whole step — the local avatar visibly stutters 15 times a second. Prediction
+        // fixed WHERE the avatar is; it did nothing for how often it is updated.
+        //
+        // These carry a fraction of the next step so the rendered position crosses the
+        // same ground continuously instead of in jumps.
+        private float _lastMoveX;
+        private float _lastMoveY;
+        private float _sinceInput;    // seconds since the last RecordInput, clamped to _dt
+        private Vec2 _renderStep;     // fraction of the pending step already shown
+
         /// <summary>
         /// Creates a predictor. Check <see cref="IsEnabled"/> before using the result:
         /// unusable settings produce a predictor that refuses to predict rather than one
@@ -226,8 +240,8 @@ namespace Cuvara.Netcode.Prediction
         /// remains of the last smoothed correction.
         /// </summary>
         public Vec2 Position => new Vec2(
-            _predicted.X + _renderOffset.X,
-            _predicted.Y + _renderOffset.Y);
+            _predicted.X + _renderOffset.X + _renderStep.X,
+            _predicted.Y + _renderOffset.Y + _renderStep.Y);
 
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
         public Vec2 SimulatedPosition => _predicted;
@@ -300,7 +314,22 @@ namespace Cuvara.Netcode.Prediction
             _pending[slot] = new PendingInput(tick, moveX, moveY);
             _count++;
 
-            _predicted = Step(_predicted, moveX, moveY);
+            var stepped = Step(_predicted, moveX, moveY);
+
+            // Whatever fraction of this step was already shown must not be shown twice.
+            // V = predicted + offset + renderStep, and the visual has to stay continuous
+            // across the instant '_predicted' jumps, so fold (renderStep - actual step)
+            // into the offset the existing decay already retires. With input held and
+            // frames arriving on time the two are equal and nothing is folded in at all.
+            _renderOffset = new Vec2(
+                _renderOffset.X + _renderStep.X - (stepped.X - _predicted.X),
+                _renderOffset.Y + _renderStep.Y - (stepped.Y - _predicted.Y));
+
+            _predicted = stepped;
+            _lastMoveX = moveX;
+            _lastMoveY = moveY;
+            _sinceInput = 0f;
+            _renderStep = Vec2.Zero;
         }
 
         /// <summary>
@@ -390,6 +419,8 @@ namespace Cuvara.Netcode.Prediction
                 return;
             }
 
+            AdvanceRenderStep(deltaTime);
+
             if (_renderOffset.X == 0f && _renderOffset.Y == 0f)
             {
                 return;
@@ -461,6 +492,10 @@ namespace Cuvara.Netcode.Prediction
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
             _seeded = false;
+            _lastMoveX = 0f;
+            _lastMoveY = 0f;
+            _sinceInput = 0f;
+            _renderStep = Vec2.Zero;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
             _speed = _settings.Speed;
@@ -481,6 +516,53 @@ namespace Cuvara.Netcode.Prediction
         /// returns early for one, and predicting movement for a corpse would be a
         /// prediction guaranteed to be corrected.
         /// </remarks>
+        /// <summary>
+        /// Carries the rendered position forward through the gap between input ticks.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The extrapolation is a fraction of <b>the very step that RecordInput will
+        /// apply next</b>, computed with the same <see cref="Step"/> call — so it inherits
+        /// the shared movement model's normalisation and its map-bounds clamp for free,
+        /// and cannot walk the avatar somewhere the simulation would not have gone. With
+        /// the input vector held it traces exactly the path the staircase would have
+        /// jumped along, continuously instead of 15 times a second.
+        /// </para>
+        /// <para>
+        /// Clamped to one step. Beyond that the client would be guessing at input it has
+        /// not sampled yet — a late frame should stall the avatar, not launch it.
+        /// </para>
+        /// <para>
+        /// <b>This adds no latency and changes nothing on the wire.</b> It is a smoothing
+        /// of what is drawn between two predicted positions the client already computed;
+        /// the input rate, the sent packets and the reconciliation are untouched. Raising
+        /// the input rate instead would be worse than useless: the server coalesces to
+        /// "at most one integration step per player per tick, using the newest input", so
+        /// a client sending faster predicts N steps where the server applies one, and
+        /// every tick ends in a correction.
+        /// </para>
+        /// </remarks>
+        private void AdvanceRenderStep(float deltaTime)
+        {
+            if (_lastMoveX == 0f && _lastMoveY == 0f)
+            {
+                _renderStep = Vec2.Zero;
+                return;
+            }
+
+            _sinceInput += deltaTime;
+            if (_sinceInput > _dt)
+            {
+                _sinceInput = _dt;
+            }
+
+            float t = _dt > 0f ? _sinceInput / _dt : 0f;
+            Vec2 next = Step(_predicted, _lastMoveX, _lastMoveY);
+            _renderStep = new Vec2(
+                (next.X - _predicted.X) * t,
+                (next.Y - _predicted.Y) * t);
+        }
+
         private Vec2 Step(Vec2 from, float moveX, float moveY)
         {
             var probe = new EntityState
