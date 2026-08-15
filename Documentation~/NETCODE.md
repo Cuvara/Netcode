@@ -443,6 +443,26 @@ governs before the first snapshot and against a server predating field 9, and is
 superseded as soon as a positive speed arrives. `LocalMovePredictor.EffectiveSpeed`
 reports which is live.
 
+### Rendering: the step is spread across the interval
+
+`_predicted` only advances inside `RecordInput`, at the input rate. At 15 Hz input and a
+high frame rate that is ~23 identical frames then a jump of a whole step — the avatar
+arrives correctly and stutters getting there. Prediction fixed *where*, not *how often*.
+
+`Position` walks back the unshown fraction of the latest step, so motion is continuous
+between inputs. `SimulatedPosition` is the unsmoothed value and is what replay and the
+server agree on bit-for-bit; rendering never perturbs it.
+
+**Interpolation within the step, never past it.** The rendered position is bounded by a
+step actually taken from an input actually submitted. When input stops the avatar arrives
+at the predicted position and stops — carrying motion forward on the last direction would
+move it somewhere the player never asked for, and the snap back would land exactly as they
+released the key.
+
+It costs a frame of onset, not an interval: motion begins on the frame after the input
+instead of teleporting on it, so `input -> visible` is ~1 frame rather than ~0.1 ms. That
+is not the round trip 0.4.0 removed.
+
 ### Corrections: smoothed small, snapped large
 
 Threshold is **0.5 world units**, derived from the movement model rather than taste:

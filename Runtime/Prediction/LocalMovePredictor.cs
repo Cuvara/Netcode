@@ -163,6 +163,8 @@ namespace Cuvara.Netcode.Prediction
 
         private Vec2 _predicted;      // simulated position: authoritative + replayed inputs
         private Vec2 _renderOffset;   // predicted-minus-corrected, decayed to zero
+        private Vec2 _step;           // displacement the most recent input produced
+        private float _sinceInput;    // seconds since it, for spreading that step over frames
         private bool _seeded;
 
         /// <summary>
@@ -225,12 +227,49 @@ namespace Cuvara.Netcode.Prediction
         /// Position to render the local player at: the predicted position plus whatever
         /// remains of the last smoothed correction.
         /// </summary>
-        public Vec2 Position => new Vec2(
-            _predicted.X + _renderOffset.X,
-            _predicted.Y + _renderOffset.Y);
+        public Vec2 Position
+        {
+            get
+            {
+                // Walk back the part of the latest step that has not been shown yet, so
+                // the step is spread across the frames of an input interval instead of
+                // landing on one of them. See the class remarks.
+                float remaining = 1f - StepProgress;
+                return new Vec2(
+                    _predicted.X - _step.X * remaining + _renderOffset.X,
+                    _predicted.Y - _step.Y * remaining + _renderOffset.Y);
+            }
+        }
+
+        /// <summary>
+        /// How much of the latest input's step has been rendered, 0..1. Saturates at 1 —
+        /// which is what stops this from extrapolating; see the class remarks.
+        /// </summary>
+        private float StepProgress
+        {
+            get
+            {
+                if (_dt <= 0f) return 1f;
+                float t = _sinceInput / _dt;
+                return t >= 1f ? 1f : t < 0f ? 0f : t;
+            }
+        }
 
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
         public Vec2 SimulatedPosition => _predicted;
+
+        /// <summary>
+        /// The outstanding correction still being blended out. Zero when the rendered and
+        /// simulated positions have converged.
+        /// </summary>
+        /// <remarks>
+        /// Kept from the parallel implementation in #25 — it is a genuinely useful
+        /// diagnostic and costs nothing. Note that under this implementation
+        /// <see cref="Position"/> also converges on <see cref="SimulatedPosition"/> once
+        /// the step is fully shown, so the stronger assertion is available again and is
+        /// what the tests use.
+        /// </remarks>
+        public Vec2 SmoothingOffset => _renderOffset;
 
         /// <summary>Inputs sent but not yet acknowledged.</summary>
         public int PendingCount => _count;
@@ -300,7 +339,20 @@ namespace Cuvara.Netcode.Prediction
             _pending[slot] = new PendingInput(tick, moveX, moveY);
             _count++;
 
+            // Whatever of the previous step was still unshown would otherwise vanish
+            // when the new step replaces it. Carry it into the render offset so the
+            // visible position does not jump on an input boundary.
+            Vec2 before = Position;
+
+            Vec2 previous = _predicted;
             _predicted = Step(_predicted, moveX, moveY);
+            _step = new Vec2(_predicted.X - previous.X, _predicted.Y - previous.Y);
+            _sinceInput = 0f;
+
+            Vec2 after = Position;
+            _renderOffset = new Vec2(
+                _renderOffset.X + (before.X - after.X),
+                _renderOffset.Y + (before.Y - after.Y));
         }
 
         /// <summary>
@@ -324,6 +376,7 @@ namespace Cuvara.Netcode.Prediction
             {
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
                 return;
             }
 
@@ -332,6 +385,8 @@ namespace Cuvara.Netcode.Prediction
                 _seeded = true;
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
+                _sinceInput = 0f;
                 LastCorrection = 0f;
                 return;
             }
@@ -359,7 +414,12 @@ namespace Cuvara.Netcode.Prediction
             {
                 // Too far to hide. Showing the avatar gliding from a place the server has
                 // already ruled out is worse than one honest jump.
+                //
+                // The in-step remainder goes too: it belongs to a step taken from a
+                // position that has just been ruled out, so replaying it from the
+                // corrected one would add a second, smaller wrong movement after the snap.
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
                 Snaps++;
             }
             else if (LastCorrection > 0f)
@@ -367,7 +427,13 @@ namespace Cuvara.Netcode.Prediction
                 // Carry the whole error as a render offset and retire it over the next few
                 // frames, so the simulated position is authoritative-correct immediately
                 // while the visible one catches up.
-                _renderOffset = new Vec2(dx, dy);
+                //
+                // Added to the existing offset rather than replacing it: with in-step
+                // smoothing there can be an outstanding remainder from an input boundary,
+                // and overwriting it would discard part of a step mid-flight — a small
+                // jump at snapshot rate, which is the exact artefact this release is
+                // removing.
+                _renderOffset = new Vec2(_renderOffset.X + dx, _renderOffset.Y + dy);
                 SmoothedCorrections++;
             }
         }
@@ -389,6 +455,10 @@ namespace Cuvara.Netcode.Prediction
             {
                 return;
             }
+
+            // Always advanced, even with no correction outstanding: this is what makes
+            // the rendered position move between inputs at all.
+            _sinceInput += deltaTime;
 
             if (_renderOffset.X == 0f && _renderOffset.Y == 0f)
             {
@@ -460,6 +530,8 @@ namespace Cuvara.Netcode.Prediction
             _lastRecordedTick = 0;
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
+            _step = Vec2.Zero;
+            _sinceInput = 0f;
             _seeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.

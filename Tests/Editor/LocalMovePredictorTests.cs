@@ -257,6 +257,13 @@ namespace Cuvara.Netcode.Tests.Editor
                 predictor.Advance(1f / 60f);
             }
 
+            // Restored to the stronger form. #25 had to weaken this to an assertion on
+            // the offset alone, because that implementation left the rendered position
+            // LEADING the simulated one by the fraction of the pending step already drawn
+            // — its own comment said so. This implementation interpolates within the step
+            // instead, so the rendered position converges on the simulated one exactly and
+            // the original equality holds again. A test that a change forces you to
+            // weaken is telling you something about the change.
             Assert.That(predictor.Position, Is.EqualTo(predictor.SimulatedPosition),
                 "the offset must settle exactly, not approach zero forever");
         }
