@@ -434,6 +434,60 @@ namespace Cuvara.Netcode.Tests.Editor
                 "took was mid-flight and is now discarded.");
         }
 
+        /// <summary>
+        /// At a frame rate far above the tick rate, essentially every frame must move.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The existing evenness case runs 300 fps against a 15 Hz send rate, where the
+        /// frames divide the tick exactly. A real client runs at whatever it runs at — a
+        /// player build measured ~500 fps against a 60 Hz tick, 8.3 frames per tick, which
+        /// divides into nothing. If the rendered position advances once per tick rather
+        /// than once per frame, 7 of every 8.3 frames show nothing: 87.5% still, and a
+        /// burstiness of about 8 from the ratio alone.
+        /// </para>
+        /// <para>
+        /// That is a different assertion from "the endpoint is right", and it is the one
+        /// the player is reporting. Asserted as a percentage because the percentage names
+        /// its own cause: a figure near <c>(F-1)/F</c> is a per-tick render, whatever F is.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AlmostEveryFrameMovesAtAFrameRateThatDoesNotDivideTheTick()
+        {
+            var p = Predictor();
+
+            const float fps = 500f;                     // 8.33 frames per 60 Hz tick
+            float frame = 1f / fps;
+            int framesPerSend = (int)(fps / SendHz);
+
+            float previous = p.Position.X;
+            var still = 0;
+            var counted = 0;
+
+            for (var i = 1; i <= 10; i++)
+            {
+                p.RecordInput(i, 1f, 0f);
+                for (var f = 0; f < framesPerSend; f++)
+                {
+                    p.Advance(frame);
+                    if (i == 1) { previous = p.Position.X; continue; }
+
+                    counted++;
+                    if (p.Position.X - previous <= 1e-7f) still++;
+                    previous = p.Position.X;
+                }
+            }
+
+            float percent = 100f * still / counted;
+
+            Assert.That(percent, Is.LessThan(25f),
+                $"{percent:F1}% of {counted} frames showed no movement at {fps:F0} fps " +
+                $"against a {BaseHz} Hz tick. Near {100f * (fps / BaseHz - 1f) / (fps / BaseHz):F0}% " +
+                "would mean the rendered position advances once per tick rather than once " +
+                "per frame, and the avatar is teleporting between still poses.");
+        }
+
         [Test]
         public void NoHoldMeasuredMeansTheOldOneStepBehaviour()
         {

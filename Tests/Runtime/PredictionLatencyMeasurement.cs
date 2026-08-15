@@ -401,6 +401,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "raise Repeats or reduce what else is running on the machine.");
             }
 
+            // The most direct statement of "the avatar is frozen most of the time", and
+            // unlike burstiness it needs no noise floor to interpret: a still frame is
+            // either a frame the avatar did not move on or it is not.
+            //
+            // The number identifies its own cause. At F frames per simulation tick, a
+            // rendered position that only changes once per tick leaves (F-1)/F of frames
+            // still — 87.5% at 500 fps against 60 Hz, which is what a build measured at
+            // 82.7%. Prediction that interpolates within the tick leaves close to none.
+            //
+            // 25% is chosen well above the few percent a correctly interpolating
+            // predictor produces at any sane frame rate, and far below the (F-1)/F a
+            // per-tick render produces at every frame rate above the tick rate.
+            const float StillFrameBudget = 25f;
+
+            Assert.That(withPrediction.StillFramePercent, Is.LessThan(StillFrameBudget),
+                $"{withPrediction.StillFramePercent:F1}% of frames showed no movement at " +
+                $"all while an input was in flight. At {withPrediction.ObservedFps:F0} fps " +
+                $"against {withPrediction.TickRateInUse} Hz there are " +
+                $"{withPrediction.ObservedFps / Math.Max(1, withPrediction.TickRateInUse):F1} " +
+                "frames per tick, so a figure near that ratio means the rendered position " +
+                "is advancing once per tick rather than once per frame — the avatar is " +
+                "teleporting between still poses, which is what a player calls stutter " +
+                "and what no correction counter can see.");
+
             Assert.That(withPrediction.TickRateDisagrees, Is.False,
                 $"predicting at {withPrediction.TickRateInUse} Hz while the wire measures " +
                 $"{withPrediction.MeasuredTickRate:F1} Hz. Every predicted step is wrong by " +

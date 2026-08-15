@@ -21,6 +21,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immutable `Library/PackageCache`, where Unity will not generate one. This is the third
   time a missing or stub `.meta` has silently disabled shipped content here.
 
+## [0.15.1] - 2026-08-15
+
+Assertions only. No runtime change — and the measurement below is the reason there is no
+runtime change.
+
+### Measured before changing anything
+
+A player build reported **82.7% of frames with no movement**, at ~500 fps against a 60 Hz
+tick. That is 8.3 frames per tick, so a rendered position advancing once per tick leaves
+`(F-1)/F` = 87.5% still — the figure identifies its own cause.
+
+The predictor was measured at those exact parameters before touching it, and it is **not**
+the source: per-frame deltas came out `0.01012, 0.01011, 0.01011, 0.01010, ...` against a
+step of `0.08333`, eight even frames per tick. It interpolates within the tick correctly.
+A per-tick figure therefore comes from a consumer sampling `Position` once per tick, which
+is exactly what `AdvanceFrame` was added in 0.15.0 to fix — and the build measured predates
+it.
+
+A candidate change was also tested and rejected on the same run: restarting the
+interpolation only on an input that moved made still frames **worse**, 10.8% to 16.2%,
+leaving burstiness untouched. Second time that change has been proposed and measured away.
+
+### Added
+
+- **The live measurement asserts still frames below 25%.** More direct than burstiness and
+  it needs no noise floor: a still frame either is one or is not. The failure message
+  computes frames-per-tick from the run's own observed fps and tick rate, so a reader sees
+  immediately whether the figure matches a per-tick render.
+- **`AlmostEveryFrameMovesAtAFrameRateThatDoesNotDivideTheTick`** — 500 fps against 60 Hz,
+  8.33 frames per tick. Every existing evenness case used frame rates that divide the tick
+  exactly, so the awkward case, which is the only one a real client ever runs, was not
+  covered.
+
 ## [0.15.0] - 2026-08-15
 
 **Consumers must now call `WorldViewBinder.AdvanceFrame(deltaTime)` once per rendered
