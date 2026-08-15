@@ -37,7 +37,18 @@ namespace DOTSSample
         [Tooltip("Inputs sent per second. Must equal the server's simulation tick rate: " +
                  "the server integrates one step per accepted input at 1/tickRate, and " +
                  "applies only the newest when several land in one tick.")]
-        [SerializeField] private int inputRateHz = 15;
+        // Defaulted from the shared constant rather than a literal, so this cannot drift
+        // from the rate the server actually integrates at. The two are compiled from the
+        // same Shared.GameLogic, and a mismatch does not fail — the client is simply
+        // wrong by a little on every tick, corrected by every snapshot, which reads to a
+        // player as rubber-banding rather than as a misconfiguration.
+        //
+        // This is a field initializer and it is load-bearing here BECAUSE nothing
+        // serializes it: DOTSSceneSetup adds this component at runtime, so the scene
+        // carries no DOTSNetworkBridge and no stored value to override it. Author the
+        // component into a scene and the serialized number wins instead — at which point
+        // this default stops applying and the scene has to be updated too.
+        [SerializeField] private int inputRateHz = GameConstants.DefaultTickRate;
 
         [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
                  "sine-wave walk, which is what this sample did before and is still what " +
@@ -69,6 +80,7 @@ namespace DOTSSample
         // cadence, so the two are deliberately decoupled through these fields.
         private float _moveX;
         private float _moveY;
+        private bool _inputFailureReported;
 
         // --- Status for OnGUI ---
         private string _status = "Initializing...";
@@ -412,9 +424,84 @@ namespace DOTSSample
                 return;
             }
 
-            _moveX = Input.GetAxisRaw("Horizontal");
-            _moveY = Input.GetAxisRaw("Vertical");
+            // Never let an input failure take the bridge down with it. This method is the
+            // first statement of Update(), so an exception here stops the connection, the
+            // spawn and the render — the sample does not degrade, it dies, and it reads to
+            // a user as "nothing works" rather than "input does nothing". That is exactly
+            // what happened when this read the legacy API in a project configured for the
+            // Input System package.
+            try
+            {
+                ReadKeyboard(out _moveX, out _moveY);
+            }
+            catch (Exception ex)
+            {
+                _moveX = 0f;
+                _moveY = 0f;
+
+                if (!_inputFailureReported)
+                {
+                    _inputFailureReported = true;
+                    Debug.LogWarning(
+                        "[DOTSNet] Keyboard input is unavailable, continuing without it: " +
+                        ex.Message + ". The client will still connect and render; the local " +
+                        "player just will not move. Set 'useKeyboardInput' false to use the " +
+                        "scripted walk instead.");
+                }
+            }
         }
+
+        /// <summary>
+        /// Reads WASD / arrows through whichever input backend this project actually has.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A sample shipped in a package cannot dictate a consumer's Player Settings.</b>
+        /// Unity defines <c>ENABLE_INPUT_SYSTEM</c> and <c>ENABLE_LEGACY_INPUT_MANAGER</c>
+        /// from the project's active input handling precisely so code can support both, and
+        /// under "Input System Package (New)" the legacy <c>UnityEngine.Input</c> class
+        /// throws rather than returning zero.
+        /// </para>
+        /// <para>
+        /// The new backend is preferred when both are available, because that is the
+        /// configuration a Unity 6 project is most likely to be in and it exercises the
+        /// path most consumers will take.
+        /// </para>
+        /// </remarks>
+        private static void ReadKeyboard(out float x, out float y)
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = UnityEngine.InputSystem.Keyboard.current;
+            if (keyboard == null)
+            {
+                // No keyboard device — a headless or automated run. Not an error.
+                x = 0f;
+                y = 0f;
+                return;
+            }
+
+            x = Axis(keyboard.dKey.isPressed || keyboard.rightArrowKey.isPressed,
+                     keyboard.aKey.isPressed || keyboard.leftArrowKey.isPressed);
+            y = Axis(keyboard.wKey.isPressed || keyboard.upArrowKey.isPressed,
+                     keyboard.sKey.isPressed || keyboard.downArrowKey.isPressed);
+#elif ENABLE_LEGACY_INPUT_MANAGER
+            // Raw, not smoothed: GetAxis applies an acceleration curve, which would put a
+            // second client-only easing in front of a change whose purpose is removing
+            // delay, and would make the predicted vector differ from what the player
+            // would say they pressed.
+            x = Input.GetAxisRaw("Horizontal");
+            y = Input.GetAxisRaw("Vertical");
+#else
+            // Neither backend is enabled. Nothing to read, and nothing to throw about.
+            x = 0f;
+            y = 0f;
+#endif
+        }
+
+#if ENABLE_INPUT_SYSTEM
+        private static float Axis(bool positive, bool negative) =>
+            (positive ? 1f : 0f) - (negative ? 1f : 0f);
+#endif
 
         private void Update()
         {

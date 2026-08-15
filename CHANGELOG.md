@@ -5,6 +5,112 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-08-15
+
+**The DOTS sample threw on its first frame in any project using the Input System package,
+which is most Unity 6 projects.** It reached a user as *"I don't see any player or enemy
+spawned"* — not degraded input, a dead sample.
+
+### Fixed
+
+- **`SampleMovementInput` read the legacy `UnityEngine.Input` API unconditionally.** Under
+  `activeInputHandler: 1` (Input System package only) that class **throws** rather than
+  returning zero, and the read is the first statement of `Update()` — so the exception
+  took the connection, the spawn and the render down with it. The sample did not degrade,
+  it died, and it failed as "nothing works" rather than "input does nothing", which cost
+  two builds to diagnose.
+
+  Now reads through whichever backend the project actually has, using the
+  `ENABLE_INPUT_SYSTEM` / `ENABLE_LEGACY_INPUT_MANAGER` defines Unity provides for exactly
+  this. The new backend is preferred when both are present. **A sample shipped in a package
+  cannot dictate a consumer's Player Settings**, and requiring `activeInputHandler: 2` was
+  doing precisely that — a project-wide setting with consequences well beyond this sample.
+
+- **The input read can no longer take the bridge down.** It is wrapped, and a failure logs
+  once and continues with zero movement: the client still connects, spawns and renders,
+  and the local player simply does not move. Correct API selection should make this
+  unreachable; it exists because the observed failure mode was *total*, and a sample whose
+  input fails should still be a working sample.
+
+- **`DOTSSample.asmdef` references `Unity.InputSystem`.** The sample now needs that package
+  when the project uses the new handler.
+
+### Added
+
+- **A CI job that compiles the samples**, with the project set to `activeInputHandler: 1` —
+  deliberately the strictest setting, because that is where the legacy API throws.
+
+  **`Samples~/` is excluded from Unity's import, so nothing else in the workflow compiles a
+  line of it.** 206 tests passed around a file that was read and never built. That gap is
+  what let this ship. The job does not *run* the sample, so it would not have caught this
+  particular runtime throw — but it closes the structural hole, and it catches every
+  compile-time break from here on. Stated plainly rather than oversold.
+
+### Honest note on what this means for earlier feedback
+
+**No build anyone has tested has ever had working keyboard input.** The legacy call arrived
+with the WASD wiring in 0.5.0 and has thrown in this project ever since; earlier builds were
+driven by the scripted walk, which needs no input at all, so nothing surfaced. The user's
+"less stuttering when moving" was therefore about autopilot motion, not about their own
+input — worth knowing before reading that feedback as a verdict on responsiveness. The
+~72 ms measurement is unaffected: it came from the PlayMode harness, which drives the
+predictor directly and never touches the sample.
+
+## [0.10.1] - 2026-08-15
+
+Two things that should have been in 0.10.0 and were lost when it merged mid-edit.
+
+### Fixed
+
+- **The DOTS sample's `inputRateHz` defaulted to a literal `15` instead of
+  `GameConstants.DefaultTickRate`.** It has to equal the server's simulation tick rate —
+  the server integrates one step per accepted input at `1/tickRate` and applies only the
+  newest when several land in one tick — so a drift between the two is not a preference,
+  it is a desync. `NetworkBootstrapConfig` already defaulted from the constant; the
+  sample did not, which made it the copy most likely to be wrong and the one a client
+  team actually builds from.
+
+  The mismatch does not fail loudly. The client is wrong by a little on every tick, is
+  corrected by every snapshot, and the player sees rubber-banding rather than a
+  misconfiguration — the failure `PredictionSettings` documents and refuses to guess its
+  way into.
+
+  **The field initializer is load-bearing here precisely because nothing serializes it.**
+  `DOTSSceneSetup` adds `DOTSNetworkBridge` at runtime, so the scene carries no component
+  and no stored value to override the default. Author the component into a scene instead
+  and the serialized number wins, at which point this default stops applying and the
+  scene has to be updated too — noted in the code so the next reader does not trust the
+  initializer in a situation where it does not apply.
+
+  The matching server-side half is `rpg-mmo-server#94`: `Program.cs` fell back to a
+  literal `15` while its neighbours used `GameConstants`, so bumping the shared constant
+  moved the client and left the server behind. Neither fix makes the rate observable —
+  that is `rpg-mmo-server#93`, which proposes `tick_rate` on `JoinTokenResponse`.
+
+  *(Moved here from `[Unreleased]` — this release tags it, so filing it as unreleased
+  would be a heading that disagrees with what shipped. Entry unchanged; authored with
+  `#27`.)*
+
+- **Restored `#25`'s `SmoothingOffset` assertion in `SmoothedOffsetDecaysToExactlyZero`.**
+  I had reverted it to the older `Position == SimulatedPosition` form on the grounds that
+  interpolation makes that equality true again. That was half right: the equality does hold
+  now, but `#25` replaced it for a better reason than the one I was answering — the intent
+  under test is *"the correction settles at exactly zero"*, and the equality was a proxy
+  that happened to coincide with it. **Both assertions now stand together**: the offset one
+  states the intent, the equality additionally proves the step is fully shown. Losing a
+  test improvement while replacing the implementation it came with is not a trade anyone
+  chose; it was an accident of the swap.
+
+### Documentation
+
+- **The interpolation-vs-extrapolation trade is now on the record, with credit.** 0.10.0
+  merged before the fuller version of that section landed, so the CHANGELOG explained the
+  outcome without explaining the choice. It now states what each approach costs, why the
+  user picked this one, and that `sample-runner`'s implementation did not lose on quality —
+  it was measured, honest about its trade, and its author independently nominated its own
+  overshoot as the likely cause of the user's symptom while investigating something
+  unrelated.
+
 ## [0.10.0] - 2026-08-15
 
 The other half of the user's complaint. `v0.9.x` made the avatar respond ~72 ms sooner;
@@ -60,39 +166,88 @@ the server are unaffected — pinned by `SmoothingDoesNotTouchTheSimulatedPositi
   remainder deliberately: it belongs to a step taken from a position the server has just
   ruled out, and replaying it would add a second, smaller wrong movement after the snap.
 
-### Relationship to #25
+### Why interpolation rather than extrapolation — the trade, on the record
 
-`#25` landed the same feature independently while this was in CI, by a different route:
-it renders `_predicted + _renderOffset + _renderStep`, with `_renderStep` growing in the
-**last input's direction** between inputs. That is forward extrapolation — it renders
-positions ahead of the last submitted input, predicting the next one before it exists. The
-`_sinceInput > _dt` clamp bounds it to one step; it does not prevent it.
+**Two reasonable implementations existed and one was chosen. This is the reasoning, so
+nobody has to re-derive it.**
 
-Run against this release's tests, that implementation fails four:
+The step exists in full the moment `RecordInput` runs, so you cannot have all three of
+*motion starts on the input frame*, *motion is continuous*, and *the rendered position
+never leads the truth*:
 
-```
-WhenInputStopsThePositionConvergesAndDoesNotOvershoot
-StoppingInputLeavesThePositionCompletelyStill
-TheStepIsFullyShownAfterOneInputInterval
-ASnapClearsTheUnshownRemainder
-```
+| Approach | Onset | Continuous | Leads truth |
+|---|---|---|---|
+| show the step at once (pre-0.10.0) | immediate | **no** — 15 Hz stepping | no |
+| spread it from where you **were** (this release) | one frame | yes | **no** |
+| spread it from where you **are** (#25) | immediate | yes | **yes**, up to one step |
 
-The consequence in play: on key release the avatar has already travelled up to a full step
-(0.333 units at the default speed) past where the player stopped, and has to come back.
-**A snap-back on every key release is a strong candidate for the "occasional jerk" the
-user reported** — and one caused by the smoothing fix, so it would read as the fix having
-failed.
+**`#25`, by `sample-runner`, took the third** and was honest about it: its own comment
+records that the rendered position "started leading the simulated one". It renders ahead
+of the last submitted input, so on **key release or direction change** it over-travels up
+to a full step — 0.333 world units at the default speed — and eases back over ~250 ms
+through the decay channel.
 
-`#25` also had to weaken an existing assertion from `Position == SimulatedPosition` to one
-on the offset alone, with a comment stating that the rendered position now *leads* the
-simulated one. **This release restores the stronger form**, because interpolating within
-the step converges exactly. A test a change forces you to weaken is telling you something
-about the change.
+**This release takes the second.** The rendered position is bounded by a step actually
+taken from an input actually submitted, so it never passes one and there is nothing to
+come back from.
 
-`SmoothingOffset` from #25 is kept — it is a useful diagnostic and costs nothing.
+**Measured afterwards, the onset cost I claimed for this does not exist.** Both
+implementations take exactly one frame (2.86 ms at 350 fps) to first visible movement,
+because #25 also restarts its render step from zero at each input. I had asserted
+interpolation cost a frame that extrapolation did not; it does not, and the "median must
+not move" requirement is satisfied by both. Correcting it here rather than leaving a
+favourable-sounding trade on the record that measurement does not support.
 
-**The trade this release accepts instead:** motion begins a frame later. That is stated
-above and is the honest cost of not extrapolating.
+**A rejection worth correcting for the record**: extrapolation was justified partly on the
+grounds that the alternative "would hand back ~66 ms of the latency prediction had just
+bought". That is true of a *different* alternative — interpolating between the last two
+predicted positions, which renders a whole interval in the past. It is not true of this
+one, which spreads a step already taken across the frames that consume it. The cost is a
+frame, not an interval.
+
+**The user chose this one**, on the grounds that their complaint is jerkiness rather than
+lag, and a systematic artefact at every key release and direction change is jerkiness. With
+WASD, direction changes are constant.
+
+**`sample-runner`'s version did not lose on quality.** It was measured, honest about its
+trade, and — while investigating tick cadence for an unrelated reason — its author
+independently nominated its own overshoot as the most likely cause of the user's
+"occasionally jerks", which is the same suspect these tests were built to catch, reached
+from the opposite direction. Its `SmoothingOffset` accessor and its correction to
+`SmoothedOffsetDecaysToExactlyZero` are both kept here: the latter replaced a proxy
+assertion with the intent it stood for, which is the better test whichever smoothing wins.
+
+**Measured, both implementations driven through identical input at 350 fps** (client-side
+only — no server, so no reconcile; see the caveat below):
+
+| | interpolation (this) | extrapolation (#25) |
+|---|---|---|
+| onset to first visible movement | 1 frame, 2.86 ms | 1 frame, 2.86 ms |
+| still frames during steady movement | 0.0% | 0.0% |
+| **largest single-frame jump** | **0.0143 u** | 0.0305 u |
+| **frame-delta std dev** | **0.00191** | 0.00367 |
+| **overshoot past the last input on release** | **0.0000 u** | **0.3333 u — one whole step** |
+| **wrong-direction excursion on reversal** | **none** | **0.2849 u** |
+
+Both remove the 15 Hz stutter. **Interpolation is additionally about twice as smooth in
+ordinary movement** — half the largest frame jump and half the jitter — which was not the
+expected result and is the opposite of the concern that extrapolation might be smoother in
+the common case.
+
+The reversal number is the one that matters for the reported symptom: with WASD, direction
+changes are constant, and extrapolation carries **0.285 world units in the direction the
+player has already stopped asking for**.
+
+*Caveat: these are client-side measurements with no server attached, so the release
+overshoot has nothing to correct it and never settles here. In the live system a snapshot
+reconciles it — `sample-runner` measured that recovery at ~250 ms. The overshoot magnitude
+and the reversal excursion are pure client-side arithmetic and hold regardless.*
+
+Run against this release's tests, the extrapolating implementation fails four:
+`WhenInputStopsThePositionConvergesAndDoesNotOvershoot`,
+`StoppingInputLeavesThePositionCompletelyStill`,
+`TheStepIsFullyShownAfterOneInputInterval`, `ASnapClearsTheUnshownRemainder`. Those encode
+the defended property and are the reason this replaced that.
 
 ### Added
 
