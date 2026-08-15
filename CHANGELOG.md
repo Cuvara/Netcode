@@ -5,6 +5,46 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-08-15
+
+Measurement and tests. No runtime change.
+
+### Added
+
+- **Each configuration is measured three times, interleaved, and the spread is reported.**
+  A single sample per configuration cannot distinguish a regression from a noisy metric,
+  and this metric is noisy: between two runs where nothing in the non-predicting path had
+  changed, its burstiness moved by a third. Interleaved rather than batched, because the
+  machine and the backend drift over the length of a run and batching puts that drift
+  entirely into whichever configuration went last. The median run is reported whole rather
+  than figures averaged across runs, so the relationships between the numbers still belong
+  to a run that actually happened.
+
+- **Predicted motion must be more even than unpredicted motion** — asserted, because
+  smoothing that makes motion less even than no smoothing is not earning its place, and
+  evenness is the metric closest to what a player reports.
+
+  **The assertion is gated on the spread.** It fires only when the gap between the two
+  configurations exceeds the disagreement between runs of a single configuration;
+  otherwise it warns and says the metric cannot resolve a difference that small.
+  Asserting through a noisy metric manufactures regressions and fixes in equal measure.
+
+- **Two evenness cases in `HeldMovementParityTests`**, measuring the same max/mean frame
+  delta the live harness reports. Every existing case asserted *where* the avatar is; none
+  asserted how evenly it gets there, which is the thing actually being complained about.
+
+### A hypothesis that did not survive
+
+A candidate mechanism for the reported burstiness increase — that an input moving nothing
+(coalesced under rule 1, or a deadzone) restarts the interpolation with a zero step and
+snaps the rendered position onto the simulated one — **was tested and is wrong.** The
+compensation added in 0.10.x already folds that discontinuity into the render offset, so
+the rendered position stays continuous. The code change was reverted; the tests written to
+catch it are kept, and they are what disproved it.
+
+Recorded rather than dropped because the reasoning was sound and someone will have it
+again.
+
 ## [0.14.0] - 2026-08-15
 
 Prediction now implements **all three** rules of the server's movement model. 0.13.0 added

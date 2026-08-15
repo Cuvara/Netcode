@@ -84,6 +84,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// </remarks>
         private const int Samples = 20;
 
+        /// <summary>
+        /// Times each configuration is measured. The median run is reported and the
+        /// spread printed beside it.
+        /// </summary>
+        /// <remarks>
+        /// Three, because two cannot distinguish an outlier from a trend and the run
+        /// already takes long enough that the backend's own state drifts across it. The
+        /// spread matters more than the middle: a metric whose runs disagree by more than
+        /// the change being investigated cannot settle the question, and reporting one
+        /// number invites exactly that mistake.
+        /// </remarks>
+        private const int Repeats = 3;
+
         /// <summary>Frames of zero input before a sample, to settle.</summary>
         private const int SettleTicks = 6;
 
@@ -262,8 +275,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
                       "\n[Measure] NOTE: the tickRate above is only a FALLBACK. The rate " +
                       "actually predicted with comes from the server and is reported per run below.");
 
-            var withPrediction = await MeasureAsync(predict: true);
-            var withoutPrediction = await MeasureAsync(predict: false);
+            // Each configuration is measured Repeats times, interleaved, and the spread
+            // is reported.
+            //
+            // One sample per configuration cannot tell a regression from a noisy metric,
+            // and this one is noisy: a run where nothing in the non-predicting path had
+            // changed still moved its burstiness by a third. Interleaved rather than
+            // batched because the machine and the backend drift over the length of a run,
+            // and batching would put that drift entirely into whichever configuration
+            // went last.
+            var predictedRuns = new List<Run>();
+            var unpredictedRuns = new List<Run>();
+
+            for (var r = 0; r < Repeats; r++)
+            {
+                predictedRuns.Add(await MeasureAsync(predict: true));
+                unpredictedRuns.Add(await MeasureAsync(predict: false));
+            }
+
+            Run withPrediction = Representative(predictedRuns);
+            Run withoutPrediction = Representative(unpredictedRuns);
+
+            ReportSpread("prediction ON", predictedRuns);
+            ReportSpread("prediction OFF", unpredictedRuns);
 
             // A third run whose only purpose is to make the predictor WRONG, so the
             // correction machinery has something to correct. Without it the healthy run's
@@ -332,6 +366,40 @@ namespace Cuvara.Netcode.Tests.PlayMode
             //
             // On localhost with matched rates and bit-exact shared logic, a healthy run
             // should correct essentially never.
+
+            // Smoothing has to earn its place. Predicted motion being LESS even than
+            // unpredicted motion is a regression in the one metric closest to what the
+            // user reports, whatever the latency numbers say.
+            //
+            // Gated on the spread: this comparison is only meaningful when the runs of a
+            // single configuration agree more closely than the two configurations differ.
+            // Asserting through a noisy metric manufactures both regressions and fixes.
+            float onSpread = Spread(predictedRuns);
+            float offSpread = Spread(unpredictedRuns);
+            float worstSpread = Math.Max(onSpread, offSpread);
+            float gap = Math.Abs(withPrediction.FrameDeltaBurstiness - withoutPrediction.FrameDeltaBurstiness);
+
+            if (!float.IsNaN(worstSpread) && gap > worstSpread)
+            {
+                Assert.That(withPrediction.FrameDeltaBurstiness,
+                    Is.LessThan(withoutPrediction.FrameDeltaBurstiness),
+                    $"predicted motion is LESS even than unpredicted: " +
+                    $"{withPrediction.FrameDeltaBurstiness:F2} against " +
+                    $"{withoutPrediction.FrameDeltaBurstiness:F2}, a gap of {gap:F2} " +
+                    $"against a within-configuration spread of {worstSpread:F2}. The gap " +
+                    "is larger than the noise, so this is real. Smoothing that makes " +
+                    "motion less even than no smoothing is not earning its place.");
+            }
+            else
+            {
+                Debug.LogWarning(
+                    $"[Measure] burstiness comparison NOT asserted: ON " +
+                    $"{withPrediction.FrameDeltaBurstiness:F2} vs OFF " +
+                    $"{withoutPrediction.FrameDeltaBurstiness:F2} differ by {gap:F2}, " +
+                    $"within the {worstSpread:F2} spread between runs of one " +
+                    "configuration. The metric cannot resolve a difference this small; " +
+                    "raise Repeats or reduce what else is running on the machine.");
+            }
 
             Assert.That(withPrediction.TickRateDisagrees, Is.False,
                 $"predicting at {withPrediction.TickRateInUse} Hz while the wire measures " +
@@ -787,6 +855,59 @@ namespace Cuvara.Netcode.Tests.PlayMode
             float ratio = run.MaxFrameDelta / run.ExpectedStep;
             return $"   observed/expected = {ratio:F2}" +
                    (ratio > 1.5f ? "  <<< more movement per frame than one server step" : "");
+        }
+
+        /// <summary>
+        /// The run whose burstiness is the median, so the reported figures all come from
+        /// one coherent run rather than being averaged across runs.
+        /// </summary>
+        /// <remarks>
+        /// Averaging across runs would produce a set of numbers no single run ever
+        /// produced, and the relationships between them — visible latency against
+        /// authoritative latency, corrections against burstiness — are the point. The
+        /// median is chosen on burstiness because that is the metric under investigation.
+        /// </remarks>
+        /// <summary>
+        /// Range of burstiness across runs of one configuration — the resolution floor of
+        /// any comparison between configurations.
+        /// </summary>
+        private static float Spread(List<Run> runs)
+        {
+            var b = runs.Select(r => r.FrameDeltaBurstiness).Where(x => !float.IsNaN(x)).ToList();
+            return b.Count < 2 ? float.NaN : b.Max() - b.Min();
+        }
+
+        private static Run Representative(List<Run> runs)
+        {
+            if (runs.Count == 1) return runs[0];
+
+            var ordered = runs
+                .OrderBy(r => float.IsNaN(r.FrameDeltaBurstiness) ? float.MaxValue : r.FrameDeltaBurstiness)
+                .ToList();
+
+            return ordered[ordered.Count / 2];
+        }
+
+        private static void ReportSpread(string label, List<Run> runs)
+        {
+            var burst = runs.Select(r => r.FrameDeltaBurstiness).ToList();
+            var steps = runs.Select(r => r.ExpectedStep > 0f ? r.MaxCorrection / r.ExpectedStep : float.NaN).ToList();
+            var visible = runs.Select(r => Median(r.Samples.Where(x => !x.VisibleTimedOut).Select(x => x.InputToVisibleMs).ToList())).ToList();
+
+            float lo = burst.Min(), hi = burst.Max();
+            float mid = burst.Average();
+            float relative = mid > 0f ? (hi - lo) / mid : float.NaN;
+
+            Debug.Log(
+                $"[Measure] SPREAD over {runs.Count} runs — {label}\n" +
+                $"  burstiness        {string.Join(", ", burst.Select(b => b.ToString("F2")))}" +
+                $"   range {lo:F2}..{hi:F2}, spread {relative:P0} of mean\n" +
+                $"  correction steps  {string.Join(", ", steps.Select(x => x.ToString("F2")))}\n" +
+                $"  input->visible ms {string.Join(", ", visible.Select(x => x.ToString("F1")))}\n" +
+                (relative > 0.25f
+                    ? "  <<< the runs disagree by more than a quarter of their mean. Do not " +
+                      "read a change smaller than this spread as a regression or a fix.\n"
+                    : "  (runs agree closely; a change larger than this spread is real)\n"));
         }
 
         private static string Describe(IReadOnlyCollection<float> xs)
