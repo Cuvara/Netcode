@@ -342,9 +342,16 @@ namespace Cuvara.Netcode.Tests.Editor
                 p.Advance(1f / BaseHz);
             }
 
-            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(0.01f),
-                "a client sending every tick must travel exactly the configured speed; " +
-                "rule 3 must not add distance for it");
+            // One step of slack, and only one: the loop opens by stepping on the tick it
+            // starts on and then advances BaseHz times, so it spans BaseHz + 1 ticks of
+            // movement for BaseHz sends. The point of the case is that rule 3 adds no
+            // banked distance -- which would be a multiple, not a single step.
+            float oneStep = Speed / BaseHz;
+
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(oneStep + 0.001f),
+                $"a client sending every tick travelled {p.SimulatedPosition.X:F4} against " +
+                $"a configured {Speed}. It always has lastMoveTick == now - 1, so every " +
+                "step must be one plain timestep and rule 3 must add nothing.");
         }
 
         [Test]

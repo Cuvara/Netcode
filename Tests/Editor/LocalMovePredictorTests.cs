@@ -47,18 +47,46 @@ namespace Cuvara.Netcode.Tests.Editor
         /// What the server would do with this input sequence: one
         /// <see cref="MovementSystem.TryMove"/> per accepted input, at the fixed timestep.
         /// </summary>
-        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs)
+        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs) =>
+            ServerWalk(from, inputs, Speed);
+
+        /// <summary>
+        /// The server's movement model, restated at a given speed. One copy: a second
+        /// inline copy of this loop is how a test kept asserting the pre-rule-3 model
+        /// after the shared one had moved on.
+        /// </summary>
+        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs, float speed)
         {
             float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
+            int cap = GameConstants.MaxBankedMovementTicks(TickRate);
             Vec2 pos = from;
+
+            // One input per tick, and a step covers the time since this entity last
+            // actually moved (rule 3), bounded by the shared cap. A fixed dt here would
+            // model a server that predates the rule -- and because clearing the
+            // last-moved tick reproduces a fixed dt exactly, that difference is invisible
+            // unless a walk contains an input that does not move, which this one does.
+            long tick = 0;
+            long lastMove = 0;
 
             foreach (var (x, y) in inputs)
             {
-                var probe = new EntityState { Position = pos, Speed = Speed, Dead = false };
-                var result = MovementSystem.TryMove(in probe, x, y, dt, Bounds, out var moved);
+                tick++;
+
+                float stepDt = dt;
+                if (lastMove != 0 && tick > lastMove)
+                {
+                    long elapsed = tick - lastMove;
+                    if (elapsed > cap) elapsed = cap;
+                    stepDt = dt * elapsed;
+                }
+
+                var probe = new EntityState { Position = pos, Speed = speed, Dead = false };
+                var result = MovementSystem.TryMove(in probe, x, y, stepDt, Bounds, out var moved);
                 if (result is MoveResult.Accepted or MoveResult.Clamped)
                 {
                     pos = moved;
+                    lastMove = tick;
                 }
             }
 
@@ -468,18 +496,8 @@ namespace Cuvara.Netcode.Tests.Editor
                 predictor.Advance(Dt);
             }
 
-            // Same reference walk, integrated at the server's speed.
-            float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
-            Vec2 pos = Vec2.Zero;
-            foreach (var (x, y) in Walk)
-            {
-                var probe = new EntityState { Position = pos, Speed = serverSpeed, Dead = false };
-                if (MovementSystem.TryMove(in probe, x, y, dt, Bounds, out var moved)
-                    is MoveResult.Accepted or MoveResult.Clamped)
-                {
-                    pos = moved;
-                }
-            }
+            // Same reference walk, through the one server model, at the server's speed.
+            Vec2 pos = ServerWalk(Vec2.Zero, Walk, serverSpeed);
 
             Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(pos.X),
                 "bit-exact at the server's speed, not merely close");

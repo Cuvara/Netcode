@@ -418,6 +418,11 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int CoalescedInputs { get; private set; }
 
+        // TEMPORARY diagnostic - remove before merge.
+        public long DebugBaseTick => _baseTick;
+        public long DebugLastMoveTick => _lastMoveTick;
+        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick);
+
         /// <summary>
         /// Records an input that has just been sent and applies it to the predicted
         /// position immediately. Call with the same tick and vector handed to
@@ -506,8 +511,14 @@ namespace Cuvara.Netcode.Prediction
             {
                 // An explicit stop. A Rejected vector deliberately leaves the hold alone,
                 // matching the server, which logs and drops it without disturbing state.
+                //
+                // Clears the hold ONLY. LastMoveTick is deliberately untouched, exactly as
+                // server-side: a stop ends the held direction, it does not reset how long
+                // the entity has been stationary. Clearing it here sent StepDeltaTime down
+                // its "never moved" early return, which yields one plain timestep and so
+                // reproduced the old fixed-dt behaviour precisely — the forward-parity
+                // test stayed green while rule 3 was, in effect, not implemented.
                 _heldFrom = 0;
-            _lastMoveTick = 0;
             }
 
             // Measure the gap to the previous input. A gap far longer than the ones
@@ -803,6 +814,7 @@ namespace Cuvara.Netcode.Prediction
             _heldX = 0f;
             _heldY = 0f;
             _heldFrom = 0;
+            _lastMoveTick = 0;
             _seeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
