@@ -138,7 +138,14 @@ through the decay channel.
 
 **This release takes the second.** The rendered position is bounded by a step actually
 taken from an input actually submitted, so it never passes one and there is nothing to
-come back from. It costs **one frame of onset (~3 ms at 350 fps)**, not one interval.
+come back from.
+
+**Measured afterwards, the onset cost I claimed for this does not exist.** Both
+implementations take exactly one frame (2.86 ms at 350 fps) to first visible movement,
+because #25 also restarts its render step from zero at each input. I had asserted
+interpolation cost a frame that extrapolation did not; it does not, and the "median must
+not move" requirement is satisfied by both. Correcting it here rather than leaving a
+favourable-sounding trade on the record that measurement does not support.
 
 **A rejection worth correcting for the record**: extrapolation was justified partly on the
 grounds that the alternative "would hand back ~66 ms of the latency prediction had just
@@ -158,6 +165,32 @@ independently nominated its own overshoot as the most likely cause of the user's
 from the opposite direction. Its `SmoothingOffset` accessor and its correction to
 `SmoothedOffsetDecaysToExactlyZero` are both kept here: the latter replaced a proxy
 assertion with the intent it stood for, which is the better test whichever smoothing wins.
+
+**Measured, both implementations driven through identical input at 350 fps** (client-side
+only — no server, so no reconcile; see the caveat below):
+
+| | interpolation (this) | extrapolation (#25) |
+|---|---|---|
+| onset to first visible movement | 1 frame, 2.86 ms | 1 frame, 2.86 ms |
+| still frames during steady movement | 0.0% | 0.0% |
+| **largest single-frame jump** | **0.0143 u** | 0.0305 u |
+| **frame-delta std dev** | **0.00191** | 0.00367 |
+| **overshoot past the last input on release** | **0.0000 u** | **0.3333 u — one whole step** |
+| **wrong-direction excursion on reversal** | **none** | **0.2849 u** |
+
+Both remove the 15 Hz stutter. **Interpolation is additionally about twice as smooth in
+ordinary movement** — half the largest frame jump and half the jitter — which was not the
+expected result and is the opposite of the concern that extrapolation might be smoother in
+the common case.
+
+The reversal number is the one that matters for the reported symptom: with WASD, direction
+changes are constant, and extrapolation carries **0.285 world units in the direction the
+player has already stopped asking for**.
+
+*Caveat: these are client-side measurements with no server attached, so the release
+overshoot has nothing to correct it and never settles here. In the live system a snapshot
+reconciles it — `sample-runner` measured that recovery at ~250 ms. The overshoot magnitude
+and the reversal excursion are pure client-side arithmetic and hold regardless.*
 
 Run against this release's tests, the extrapolating implementation fails four:
 `WhenInputStopsThePositionConvergesAndDoesNotOvershoot`,
