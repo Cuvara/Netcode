@@ -2,7 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
 using Cuvara.Netcode.Client;
@@ -151,6 +153,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
         [UnityTest]
         public IEnumerator InputToVisibleMovement_WithAndWithoutPrediction() => UniTask.ToCoroutine(async () =>
         {
+            // Skip, loudly, when there is nothing to measure against.
+            //
+            // The [Category] attribute is not enough on its own: a consuming project runs
+            // the whole PlayMode suite without filtering by category, so the gate does
+            // nothing there and this failed their CI with "Cannot connect to destination
+            // host". A package cannot rely on a consumer's runner passing the right
+            // filter — correctness has to live in the test.
+            //
+            // Ignore, not silent-pass: an ignored test with a reason is visible in the
+            // report and names what is missing. A test that quietly goes green by doing
+            // nothing is the failure this repository has spent two days eliminating, and
+            // it is not being reintroduced in the one place whose job is honest numbers.
+            string unreachable = await FirstUnreachableAsync();
+            if (unreachable != null)
+            {
+                Assert.Ignore(
+                    unreachable + ". This measurement needs a live backend and does not " +
+                    "run in CI; start the stack and run it locally, or select/exclude it " +
+                    "by its 'LiveBackend' category. " + LiveBackendConfig.Describe());
+            }
+
             Debug.Log("[Measure] " + LiveBackendConfig.Describe());
 
             var withPrediction = await MeasureAsync(predict: true);
@@ -237,6 +260,69 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// applied it. Forces a real disagreement; see the note above on why a wrong speed
         /// no longer works for this.
         /// </param>
+        /// <summary>
+        /// Names the first backend endpoint that cannot be reached, or null when both can.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Cheap and bounded on purpose</b> — a TCP connect with a short timeout, not
+        /// the auth flow. The point is to decide whether to run at all, and a probe that
+        /// took as long as the thing it guards would be its own problem.
+        /// </para>
+        /// <para>
+        /// <b>Any exception here is treated as "unreachable", never as a failure.</b> A
+        /// throw from the probe is the same situation as a refused connection — no
+        /// backend — and surfacing it as a test failure would recreate exactly the bug
+        /// this method exists to fix.
+        /// </para>
+        /// </remarks>
+        private static async UniTask<string> FirstUnreachableAsync()
+        {
+            string gateway = await ProbeAsync(
+                LiveBackendConfig.GatewayHost, LiveBackendConfig.GatewayPort, "gateway");
+            if (gateway != null) return gateway;
+
+            // Nakama is contacted first by the run, so an unreachable one fails earlier
+            // and more confusingly than the gateway. Both are checked.
+            return await ProbeAsync(
+                LiveBackendConfig.NakamaHost, LiveBackendConfig.NakamaPort, "Nakama");
+        }
+
+        private const int ProbeTimeoutMs = 1500;
+
+        private static async UniTask<string> ProbeAsync(string host, int port, string what)
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    Task connect = client.ConnectAsync(host, port);
+                    Task finished = await Task.WhenAny(connect, Task.Delay(ProbeTimeoutMs)).AsUniTask();
+
+                    if (finished != connect)
+                    {
+                        return $"no {what} at {host}:{port} — connect timed out after {ProbeTimeoutMs} ms";
+                    }
+
+                    if (connect.IsFaulted)
+                    {
+                        // Observed deliberately: an unobserved faulted Task would surface
+                        // later as an unrelated error in whatever test runs next.
+                        string why = connect.Exception?.GetBaseException().Message ?? "connect failed";
+                        return $"no {what} at {host}:{port} — {why}";
+                    }
+
+                    return client.Connected
+                        ? null
+                        : $"no {what} at {host}:{port} — the socket did not open";
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"no {what} at {host}:{port} — {ex.Message}";
+            }
+        }
+
         private static async UniTask<Run> MeasureAsync(bool predict, bool dropSampleInput = false)
         {
             var run = new Run
