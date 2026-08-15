@@ -26,6 +26,9 @@ namespace Cuvara.Netcode.Tests.Editor
     public sealed class LocalMovePredictorTests
     {
         private const int TickRate = 15;
+
+        /// <summary>The base timestep, for advancing a tick between inputs.</summary>
+        private static float Dt => MovementSystem.DeltaTimeForTickRate(TickRate);
         private const float Speed = 5f;
 
         private static MapBounds Bounds => MapBounds.Default;
@@ -78,6 +81,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                predictor.Advance(Dt);
             }
 
             Vec2 expected = ServerWalk(Vec2.Zero, Walk);
@@ -96,6 +103,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 forward.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                forward.Advance(Dt);
             }
 
             // Path B: same inputs, but the server acknowledges the first four midway, so
@@ -104,6 +115,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 replayed.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                replayed.Advance(Dt);
             }
 
             var ackedThrough4 = ServerWalk(Vec2.Zero, new[] { Walk[0], Walk[1], Walk[2], Walk[3] });
@@ -126,7 +141,15 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 a.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                a.Advance(Dt);
                 b.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                b.Advance(Dt);
             }
 
             var anchor = ServerWalk(new Vec2(3f, -2f), new[] { Walk[0], Walk[1] });
@@ -439,6 +462,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                predictor.Advance(Dt);
             }
 
             // Same reference walk, integrated at the server's speed.

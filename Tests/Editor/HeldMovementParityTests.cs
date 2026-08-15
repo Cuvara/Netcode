@@ -240,6 +240,113 @@ namespace Cuvara.Netcode.Tests.Editor
                 "stutter, and they are invisible to every correction counter.");
         }
 
+        // ── Rule 3: a step covers the time since the entity last moved ──
+
+        /// <summary>
+        /// A gap longer than the hold window must be paid for by the next step, not lost.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The third rule of the server's movement model: <c>dt</c> is
+        /// <c>min(now - last_move_tick, cap) / tick_rate</c>. A client sending every tick
+        /// never sees it, because <c>last_move_tick == now - 1</c> always. A client
+        /// sending at 15 Hz into a 60 Hz base tick sees it whenever arrival jitter opens
+        /// a gap past the hold window — and the harness measured send burstiness of 12 to
+        /// 49, so those gaps are the normal case, not the exception.
+        /// </para>
+        /// <para>
+        /// This is the defect that survived three releases of hold work at an unchanged
+        /// magnitude. The hold fixed how many steps are taken; this fixes how much time
+        /// each one covers, and the two are independent. A structural difference produces
+        /// a constant correction, which is exactly what a constant 0.1667 was.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AGapLongerThanTheHoldIsPaidForByTheNextStep()
+        {
+            var p = Predictor();
+
+            // One input, its hold runs out, then a long silence, then one more input.
+            p.RecordInput(1, 1f, 0f);
+            for (var k = 0; k < HoldTicks; k++) p.Advance(1f / BaseHz);
+
+            float afterFirst = p.SimulatedPosition.X;
+
+            const int silentTicks = 5;
+            for (var k = 0; k < silentTicks; k++) p.Advance(1f / BaseHz);
+
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(afterFirst).Within(1e-5f),
+                "the hold must have expired during the silence");
+
+            p.RecordInput(2, 1f, 0f);
+
+            // The step that lands after the silence covers every tick since the entity
+            // last moved -- the hold's final tick -- not one tick.
+            float banked = p.SimulatedPosition.X - afterFirst;
+            float oneStep = Speed / BaseHz;
+
+            Assert.That(banked, Is.GreaterThan(oneStep * 1.5f),
+                $"the step after a {silentTicks}-tick silence moved {banked:F4}, about one " +
+                $"step of {oneStep:F4}. The simulated time the gap represents was dropped, " +
+                "so the client falls behind a server that banks it -- by a constant, on " +
+                "every gap, which no rate fix can reach.");
+        }
+
+        [Test]
+        public void BankedTimeIsCappedSoASilentClientCannotTeleport()
+        {
+            var p = Predictor();
+            p.RecordInput(1, 1f, 0f);
+            for (var k = 0; k < HoldTicks; k++) p.Advance(1f / BaseHz);
+
+            float afterFirst = p.SimulatedPosition.X;
+
+            // Ten seconds of silence -- far past the cap.
+            for (var k = 0; k < BaseHz * 10; k++) p.Advance(1f / BaseHz);
+
+            p.RecordInput(2, 1f, 0f);
+
+            float banked = p.SimulatedPosition.X - afterFirst;
+            float capped = (Speed / BaseHz) * p.MaxBankedTicks;
+
+            Assert.That(banked, Is.EqualTo(capped).Within(1e-4f),
+                $"a step after ten seconds of silence moved {banked:F4}; the cap allows " +
+                $"{capped:F4}. The bound is part of the movement model, not a server-side " +
+                "valve -- a client banking unbounded time reconciles against a server " +
+                "that does not, on exactly the frames where the network was worst.");
+        }
+
+        [Test]
+        public void TheCapMatchesTheSharedConstant()
+        {
+            var p = Predictor();
+
+            Assert.That(p.MaxBankedTicks,
+                Is.EqualTo(GameConstants.MaxBankedMovementTicks(BaseHz)),
+                "the cap must come from Shared.GameLogic and not from a second copy on " +
+                "the client. A client-side copy of a server constant is the defect this " +
+                "package has now shipped four times.");
+        }
+
+        [Test]
+        public void EvenSendsAtTheBaseRateAreUnaffectedByRuleThree()
+        {
+            var p = Predictor();
+
+            // A client sending every base tick always has lastMoveTick == now - 1, so
+            // every step is exactly one timestep and rule 3 is invisible to it. This is
+            // why the server could add it without regenerating the golden vectors.
+            for (var i = 1; i <= BaseHz; i++)
+            {
+                p.RecordInput(i, 1f, 0f);
+                p.Advance(1f / BaseHz);
+            }
+
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(0.01f),
+                "a client sending every tick must travel exactly the configured speed; " +
+                "rule 3 must not add distance for it");
+        }
+
         [Test]
         public void NoHoldMeasuredMeansTheOldOneStepBehaviour()
         {
