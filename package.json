@@ -1,6 +1,6 @@
 {
     "name": "com.cuvara.netcode",
-    "version": "0.10.0",
+    "version": "0.10.1",
     "displayName": "Cuvara Netcode",
     "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
     "unity": "6000.3",
