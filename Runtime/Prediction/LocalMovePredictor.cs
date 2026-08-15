@@ -791,7 +791,10 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         /// <remarks>
         /// Measured, not configured: consecutive snapshots are emitted one world tick
-        /// apart, so the gap between the base ticks they carry <i>is</i> this number.
+        /// apart, so the gap between the base ticks they carry <i>is</i> this number —
+        /// but only while the server holds for the same interval it sends on. See
+        /// <c>TickRateEstimator.SnapshotTickGap</c>, which states that coupling and what
+        /// happens if it ever stops holding.
         /// Falls back to 1 — no hold — until it has been observed, which makes an
         /// unmeasured hold behave exactly like the pre-0.13.0 predictor rather than
         /// guessing a window and being wrong in a new way.

@@ -5,6 +5,24 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-08-15
+
+Documentation only. No behaviour change.
+
+### Changed
+
+- **`TickRateEstimator.SnapshotTickGap` now states the coupling it rests on** instead of
+  presenting the derivation as safe. It measures the snapshot cadence and is *used* as
+  the hold window; those are two separate facts about the server, equal only because
+  `ApplyHeldMovement` is passed `_rates.WorldEvery` and snapshots also go once per world
+  tick. Nothing on the wire couples them. If the server ever holds for a window it does
+  not send on, the derived value is wrong by a fixed ratio — which smooths rather than
+  snaps and no counter can see, the signature of all four defects this package has hit.
+
+  The note also says where it would surface: the live measurement's near-zero-corrections
+  assertion, which is what found the missing hold. If that fires while the tick rate
+  agrees, this coupling is the thing to suspect.
+
 ## [0.13.0] - 2026-08-15
 
 Prediction reproduces the server's **held movement**. Until now the client took one step
