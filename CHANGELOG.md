@@ -5,6 +5,69 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-08-15
+
+**A guard added in 0.9.0 was wrong, failed on the first live run, and is replaced here
+with one that can actually distinguish the two cases it was conflating.** The measurement
+it was gating stands: prediction removes **~72 ms** from input-to-visible on localhost.
+
+### The determination
+
+0.9.0 asserted `MaxCorrection > 0`, calling an exact `0.000` *"the signature of the
+predictor reconciling against its own output"*. The first live run failed it — and the
+same run disproved the diagnosis: `replayed steps 3` means `Reconcile` fired and replay
+ran, which is exactly what open-loop cannot do.
+
+Settled by experiment rather than argument, against the real `Shared.GameLogic`:
+
+| Condition | Correction | Replay |
+|---|---|---|
+| matched speed, all acked | **0.000000** | — |
+| matched speed, **replay ran** | **0.000000** | 2 steps |
+| client speed 4 vs server 5 | **0.235702** | — |
+| input superseded by the server | **0.235702** | — |
+
+Row 2 is the one that decides it: it reproduces the live condition — replay ran *and* the
+correction was zero — in isolation, and shows that combination is healthy. On localhost,
+with no loss and the shared library bit-exact on both sides, **zero divergence is the
+designed outcome**; it is what ADR-10, the FMA-denying split in `Integrate` and the golden
+vectors exist to produce. Rows 3 and 4 show the mechanism produces a correction the moment
+the two sides genuinely disagree.
+
+So `LastCorrection` never answered "is reconciliation alive?" — it answers "do the two
+sides disagree?", whose healthy answer on a lossless link is *no*.
+`ReplayedSteps` answers the first question, and already did.
+
+### Changed
+
+- **The `MaxCorrection > 0` assertion is removed from the healthy run** and replaced by a
+  **third measurement configuration that deliberately diverges**: it predicts a sample
+  input locally and never sends it, so the server cannot have applied it, and asserts a
+  correction appears. That keeps the property the old guard was reaching for —
+  corrections are provably not stuck at zero — without misreading agreement as failure.
+
+  **A deliberately wrong *speed* would not have worked**, and that is worth recording: the
+  wire carries per-entity speed since 0.8.0 and the binder feeds it to `SetServerSpeed`
+  every snapshot, so a wrong configured speed is corrected back within one snapshot and no
+  divergence survives. Dropping an input cannot be undone that way.
+
+  The divergence run's timings are **not** comparable with the other two and are excluded
+  from the comparison — dropping inputs delays acknowledgement by design. Only its
+  correction is read.
+
+### Added
+
+- **`ReconciliationDivergenceTests`** — the four rows above, as EditMode tests that need no
+  backend and run in CI. They pin both readings so the distinction cannot be lost again,
+  including the case the old assertion misread.
+
+### Note
+
+The guard did its job by refusing to pass quietly, and then had to be shown wrong on
+evidence rather than relaxed because it was inconvenient. Weakening it without the
+experiment would have been indistinguishable, from the outside, from weakening it because
+it failed.
+
 ## [0.9.0] - 2026-08-15
 
 A PlayMode harness that measures what prediction actually removes, against a live
