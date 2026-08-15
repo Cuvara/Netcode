@@ -5,6 +5,67 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-15
+
+A PlayMode harness that measures what prediction actually removes, against a live
+backend. Minor rather than patch because it adds a test assembly
+(`Cuvara.Netcode.Tests.PlayMode`); no runtime code changed.
+
+### Added
+
+- **`PredictionLatencyMeasurement` — the measurement everything since 0.4.0 has been
+  waiting on.** Connects to a live gateway + game server, runs the same scenario with the
+  predictor enabled and disabled, and reports both with median, min, max, p90 and mean
+  over 20 samples per configuration.
+
+  Per sample: settle on zero input so movement is attributable to one input, submit a
+  single input at tick `T` and stamp the clock, then record when the **view** is told a
+  changed local position and when the first snapshot with `AckTick >= T` arrives.
+
+  **Written here, run elsewhere.** The obvious route — build a player, press WASD, watch —
+  is unavailable: driving it needs someone to click a map button and type, and the machine
+  that can run the backend cannot do either. An in-engine harness is the only honest path
+  left, and it has the side benefit of one driver on the Editor.
+
+- **Guards that make the numbers mean something**, and the test fails without them:
+  `PendingCount > 0`, `ReplayedSteps > 0`, `MaxCorrection > 0`, and `EffectiveSpeed`
+  matching the server. **A predictor that never reconciles is indistinguishable by
+  position alone from one that is perfectly accurate** — both look right — so timings
+  alone would prove only that numbers were collected. An exact `0.000` correction across
+  a whole run is the signature of reconciling against its own output rather than the
+  server's.
+
+- **`LiveBackendConfig`** — every endpoint overridable by environment variable, so a run
+  can be pointed elsewhere without editing and recompiling.
+
+### Naming, deliberately
+
+**This does not measure keypress-to-visible and does not claim to.** That figure includes
+the keyboard, the OS input stack and the display pipeline; it needs external capture and
+nothing in-engine can see those legs. What is measured is **input-submitted → local avatar
+moves on screen**, which is the whole of the interval prediction can affect. Those excluded
+legs are constant between the two configurations, so the **difference** is unaffected by
+their absence — the absolute figures are not a player-felt latency and must not be quoted
+as one.
+
+### Not covered by CI, stated rather than hidden
+
+The CI job runs `testMode: EditMode` and never executes PlayMode tests. This assembly is
+**compiled** there — which catches breakage and is worth having — but nothing in it runs.
+
+**With no backend the test fails; it does not skip.** A test that turns green when its
+dependency is missing is this repository's signature failure, paid for four times in two
+days, and it is not being reintroduced in the one place whose entire job is producing an
+honest number.
+
+### Note
+
+`NakamaDeviceAuth` duplicates `Samples~/DOTSSample/SampleNakamaAuth`. A `Samples~` folder
+is excluded from Unity's import so its code cannot be referenced, and promoting it into
+`Runtime/` would put a test convenience into the shipped package. The RPC body shape
+(`"{}"`, not an empty string) was copied from the working sample rather than
+reconstructed — it is the one part of the flow no compiler can check.
+
 ## [0.8.1] - 2026-08-14
 
 Documentation only. Three sentences that **0.8.0 itself made false**, in the places

@@ -472,6 +472,59 @@ for the rest). The client predicted both, so it runs one step ahead until the ne
 snapshot pulls it back. Bounded, self-correcting, and the reason a client's input rate
 should **match** the server tick rate rather than exceed it.
 
+## Measuring what prediction removes
+
+`Tests/Runtime/PredictionLatencyMeasurement.cs` is a **PlayMode** test that connects to a
+live backend and measures the interval prediction removes, running the same scenario with
+the predictor enabled and disabled and reporting both.
+
+```bash
+# backend up first: gateway :8000, game server :9000, Nakama :7350
+# then run PlayMode tests, category LiveBackend
+```
+
+Every endpoint is overridable by environment variable (`CUVARA_GATEWAY_HOST`,
+`CUVARA_TICK_RATE`, `CUVARA_PLAYER_SPEED`, …) so a run can be pointed elsewhere without
+editing code. Defaults match the local compose stack.
+
+### What it measures, and what it does not
+
+It measures **input-submitted → local avatar moves on screen**: from the frame the client
+hands an input to the network layer, to the frame the view is told a changed position for
+the local entity.
+
+**It is not keypress-to-visible.** That figure includes the keyboard, the OS input stack
+and the display pipeline; measuring it honestly needs external capture — a high-speed
+camera or a hardware probe — and nothing inside the engine can see those legs. A number
+that quietly folded them in would be a guess wearing a measurement's clothes. Those legs
+are constant between the two configurations, so the **difference** the test reports is
+unaffected by their absence; the absolute figures are not a player-felt latency and
+should not be quoted as one.
+
+### Why the guards matter more than the timings
+
+A predictor that never reconciles is **indistinguishable by position alone** from one
+that is perfectly accurate — both simply look right. So the test fails unless:
+
+| Guard | What its absence would mean |
+|---|---|
+| `PendingCount > 0` | inputs never reached the buffer; nothing ran ahead of the server |
+| `ReplayedSteps > 0` | prediction ran open-loop, never rewound to an authoritative position |
+| `MaxCorrection > 0` | every correction was exactly `0.000` — the signature of reconciling against its own output, not the server's |
+| `EffectiveSpeed == server speed` | replay integrated at the wrong speed, so every step is wrong by the ratio |
+
+Without those, a green result would prove only that the numbers were collected.
+
+### It cannot run in CI, and it does not skip
+
+The CI job runs `testMode: EditMode` and never executes PlayMode tests, so this assembly
+is **compiled** there — worth having, it catches breakage — but nothing in it runs. That
+is a deliberate gap, stated rather than hidden.
+
+**With no backend the test fails; it does not skip.** A test that turns green when its
+dependency is missing is the failure this repository has paid for repeatedly, and a
+suite that reports success while executing nothing is worse than no suite.
+
 ## Not implemented
 
 | | Status |
