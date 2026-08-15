@@ -555,9 +555,16 @@ The CI job runs `testMode: EditMode` and never executes PlayMode tests, so this 
 is **compiled** there — worth having, it catches breakage — but nothing in it runs. That
 is a deliberate gap, stated rather than hidden.
 
-**With no backend the test fails; it does not skip.** A test that turns green when its
-dependency is missing is the failure this repository has paid for repeatedly, and a
-suite that reports success while executing nothing is worse than no suite.
+**With no backend the test is IGNORED with a reason, not failed and not silently passed.**
+A cheap bounded TCP probe checks the gateway and Nakama first; if either is unreachable it
+calls `Assert.Ignore` naming which one and where it looked.
+
+The distinction matters in both directions. Failing would break any consumer who runs the
+whole PlayMode suite — which is what happened, because `[Category]` only helps a runner
+that filters by it, and a package cannot assume that. Passing silently would be worse
+still: a suite reporting success while executing nothing is the failure mode this
+repository has paid for repeatedly. **An Ignore with a reason is visible in the report and
+says what is missing**, which is the only honest option of the three.
 
 ## Not implemented
 
