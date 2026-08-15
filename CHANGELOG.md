@@ -5,6 +5,59 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-08-15
+
+Fixing the tick rate in 0.12.0 made the visible stutter worse, and this is the repair.
+
+Render smoothing spread each step over the integration timestep. Until 0.12.0 that was
+also the interval between inputs, because the predictor was built from the client's own
+rate, so the two were the same number and nothing distinguished them. Once the timestep
+came from the server's 60 Hz base tick while the client kept sending at 15, the whole
+step was shown in the first 16.7 ms and the avatar then sat still for the remaining 50.
+Measured at 300 fps: **150 of 200 render frames frozen**.
+
+No counter could have shown this. The simulation was exactly right — the predicted
+positions matched the server bit for bit and no correction was ever raised. Only the
+rendering was wrong, and the only symptom was a user saying it did not feel smooth.
+
+### Fixed
+
+- **The smoothing span is now the observed interval between inputs**, not the integration
+  timestep. It is measured rather than declared: the alternative is for the client to
+  announce its send rate, which is one more constant free to drift from the truth, and
+  drifting constants are the failure this area has now produced three times. Clamped
+  below at the timestep so a burst cannot drive the span to zero; a gap longer than four
+  intervals is treated as a pause and restarts the measurement rather than smearing the
+  next step across the length of the idle.
+
+  This remains interpolation. The span changes, the bound does not — progress still
+  saturates at 1, so the rendered position never passes the step an input actually
+  produced, however late the next one is. A longer span makes the avatar arrive later,
+  never further.
+
+  The first input after a connect or a pause is still shown over the timestep, because no
+  interval has been observed yet and nothing can be measured from one sample.
+
+### Added
+
+- `LocalMovePredictor.ObservedInputInterval` — the measured cadence, for diagnostics. A
+  value far from the client's intended send period means inputs are not being submitted
+  at the rate the client believes.
+- `RenderSmoothingTests.EveryFrameMovesWhenInputsAreSlowerThanTheIntegrationStep`, which
+  is the test that was missing. Every other test in that fixture used one constant for
+  both the integration timestep and the input interval, so the two were equal by
+  construction and the entire class of defect was invisible to it.
+
+### Not fixed here
+
+One accepted input displaces `speed / tickRate`, and the server applies one step per
+input received. A client sending at 15 Hz against a 60 Hz base tick therefore moves at
+**1.25 u/s against a configured 5** — and client and server agree perfectly while doing
+it, so no correction is raised and nothing in the package can detect it. The fix is for
+the client to send at the server's base tick rate, which is four times the input traffic
+per client and lands on the bandwidth budget in ADR-7. That is a project decision, not a
+package one, and it is open.
+
 ## [0.12.2] - 2026-08-15
 
 The instrument that exists to catch a tick-rate mismatch was itself running at the wrong
