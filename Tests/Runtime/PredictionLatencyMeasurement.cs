@@ -150,6 +150,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public int DistinctPositions;
 
+            /// <summary>Hold window the predictor derived, for reading the clock error.</summary>
+            public int HoldTicksInUse;
+
             /// <summary>Times SetState was called for any entity.</summary>
             public int SetStateCalls;
 
@@ -400,6 +403,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "configuration. The metric cannot resolve a difference this small; " +
                     "raise Repeats or reduce what else is running on the machine.");
             }
+
+            // The most direct statement of "the avatar is frozen most of the time", and
+            // unlike burstiness it needs no noise floor to interpret: a still frame is
+            // either a frame the avatar did not move on or it is not.
+            //
+            // The number identifies its own cause. At F frames per simulation tick, a
+            // rendered position that only changes once per tick leaves (F-1)/F of frames
+            // still — 87.5% at 500 fps against 60 Hz, which is what a build measured at
+            // 82.7%. Prediction that interpolates within the tick leaves close to none.
+            //
+            // 25% is chosen well above the few percent a correctly interpolating
+            // predictor produces at any sane frame rate, and far below the (F-1)/F a
+            // per-tick render produces at every frame rate above the tick rate.
+            const float StillFrameBudget = 25f;
+
+            Assert.That(withPrediction.StillFramePercent, Is.LessThan(StillFrameBudget),
+                $"{withPrediction.StillFramePercent:F1}% of frames showed no movement at " +
+                $"all while an input was in flight. At {withPrediction.ObservedFps:F0} fps " +
+                $"against {withPrediction.TickRateInUse} Hz there are " +
+                $"{withPrediction.ObservedFps / Math.Max(1, withPrediction.TickRateInUse):F1} " +
+                "frames per tick, so a figure near that ratio means the rendered position " +
+                "is advancing once per tick rather than once per frame — the avatar is " +
+                "teleporting between still poses, which is what a player calls stutter " +
+                "and what no correction counter can see.");
 
             Assert.That(withPrediction.TickRateDisagrees, Is.False,
                 $"predicting at {withPrediction.TickRateInUse} Hz while the wire measures " +
@@ -672,6 +699,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             }
 
             run.DistinctPositions = view.DistinctTrackedPositions;
+            run.HoldTicksInUse = predictor?.HoldTicks ?? 0;
             run.SetStateCalls = view.SetStateCalls;
 
             if (run.FrameSeconds.Count > 0)
@@ -856,11 +884,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
             float nearest = (float)Math.Round(steps);
             bool whole = nearest >= 1f && Math.Abs(steps - nearest) < 0.05f;
 
+            if (steps < 0.05f)
+            {
+                return "   (zero — client and server agree, which is the only healthy value)";
+            }
+
+            // Read the clock error straight off the correction.
+            //
+            // A client whose clock is right disagrees with the server by nothing at all;
+            // a client whose clock runs fast accrues extra base ticks and disagrees by
+            // exactly (factor - 1) * holdTicks steps, linearly, pinned in
+            // HeldMovementParityTests.TheCorrectionMeasuresTheClockError. So the
+            // correction is not merely a symptom, it is a reading — and this line spares
+            // the next person the arithmetic that took several releases to arrive at.
+            int hold = run.HoldTicksInUse > 0 ? run.HoldTicksInUse : 0;
+            string clock = hold > 0
+                ? $" — implies a predictor clock at {1f + steps / hold:F2}x real time"
+                : string.Empty;
+
             return whole
-                ? $"   <<< {nearest:F0} whole steps — a PHASE error (hold remainder dropped " +
-                  "at ack), not a rate error"
-                : "   (not a whole number of steps — look at the rate or the arithmetic, " +
-                  "not the hold)";
+                ? $"   <<< {nearest:F0} whole steps{clock}"
+                : $"   <<< {steps:F2} steps{clock}";
         }
 
         private static string ExpectedStepNote(Run run)

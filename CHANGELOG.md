@@ -5,7 +5,7 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.3] - 2026-08-15
+## [0.15.5] - 2026-08-15
 
 ### Fixed — the local avatar stuttered at every frame rate
 
@@ -53,6 +53,133 @@ snapshot advance".
   against the defect: with the fix reverted the suite reports 1 failure, with it
   restored 372/372 pass. It asserts `ObservedInputInterval`, not travel, because travel
   is unchanged by the defect.
+
+### A note on the version number
+
+0.15.3 was reserved for this and is being skipped. 0.15.4 is already tagged, so
+publishing a lower number afterwards would make the changelog read backwards and any
+"latest" resolution ambiguous. A reserved number stops being free once something else
+ships past it.
+
+## [0.15.4] - 2026-08-15
+
+Tests and measurement. No runtime change — and the point of it is that **no runtime change
+was needed**, which is not what the previous release said was coming.
+
+`0.15.3` is deliberately skipped: it is reserved for the frame-clock fix described below,
+which is not in this repository.
+
+### A planned change, withdrawn on evidence
+
+0.15.2 announced a `Reconcile` contract change to fix a "phase error" — an input
+acknowledged on receipt while its hold keeps stepping, so replay drops steps the server
+has not yet taken. The reasoning was sound and the constant `2.00` fitted it exactly.
+
+**It is wrong.** Running client and server against each other end to end, over thirty
+snapshots, with the real server rules on the other side:
+
+```
+clock=1.00x   correction: 0.00 steps
+clock=1.25x   correction: 1.00 steps
+clock=1.50x   correction: 2.00 steps
+clock=2.00x   correction: 4.00 steps
+```
+
+**A predictor whose clock is right disagrees with the server by nothing at all.** There is
+no inherent hold-remainder defect, and the cross-package `Reconcile` change — which
+`PredictionSurfaceContractTests` pins and which would have been expensive to reverse — is
+not needed and is not being made.
+
+The `2.00` was real, but it was a reading of something else.
+
+### The correction is an instrument
+
+`correction_steps = (clockFactor - 1) * holdTicks`, exactly, at every factor measured. So a
+live run reporting `2.00` steps against a 4-tick hold is reporting **a predictor clock
+running at 1.5x real time**, and one reporting `0.00` is reporting a clock that is right.
+
+The measurement now prints that reading beside the correction, so the next person does not
+have to derive it — this took several releases to arrive at.
+
+### Added
+
+- **`ACorrectClockProducesNoCorrectionAtAll`** — the property the whole prediction path
+  exists to have, and nothing asserted it end to end. The pieces were pinned individually
+  (the step, the hold, replay parity) but client and server were never run against each
+  other over many snapshots with the answer required to be exactly zero. **This is the
+  guard that catches a clock defect**, and it would have caught the one this release was
+  chasing.
+- **`TheCorrectionMeasuresTheClockError`** at 1.25x, 1.5x and 2.0x, so the reading above
+  stays trustworthy rather than becoming folklore.
+
+Both go into an existing fixture with an existing `.meta`, per 0.15.1.
+
+### Correcting 0.15.2 again
+
+That release said a sub-threshold correction is invisible and the user cannot feel it.
+Wrong, and it cost several builds. Below the snap threshold a correction is *smoothed*,
+which means a decaying offset injected on every snapshot — fifteen times a second — and
+that reads as jerk at any frame rate. It is also local-only, because remote entities are
+never reconciled. "Smoothed" is not "unseen".
+
+## [0.15.2] - 2026-08-15
+
+Assertions only. No runtime change — and the measurement below is the reason there is no
+runtime change.
+
+### Measured before changing anything
+
+A player build reported **82.7% of frames with no movement**, at ~500 fps against a 60 Hz
+tick. That is 8.3 frames per tick, so a rendered position advancing once per tick leaves
+`(F-1)/F` = 87.5% still — the figure identifies its own cause.
+
+The predictor was measured at those exact parameters before touching it, and it is **not**
+the source: per-frame deltas came out `0.01012, 0.01011, 0.01011, 0.01010, ...` against a
+step of `0.08333`, eight even frames per tick. It interpolates within the tick correctly.
+A per-tick figure therefore comes from a consumer sampling `Position` once per tick, which
+is exactly what `AdvanceFrame` was added in 0.15.0 to fix — and the build measured predates
+it.
+
+A candidate change was also tested and rejected on the same run: restarting the
+interpolation only on an input that moved made still frames **worse**, 10.8% to 16.2%,
+leaving burstiness untouched. Second time that change has been proposed and measured away.
+
+### Added
+
+- **The live measurement asserts still frames below 25%.** More direct than burstiness and
+  it needs no noise floor: a still frame either is one or is not. The failure message
+  computes frames-per-tick from the run's own observed fps and tick rate, so a reader sees
+  immediately whether the figure matches a per-tick render.
+- **`AlmostEveryFrameMovesAtAFrameRateThatDoesNotDivideTheTick`** — 500 fps against 60 Hz,
+  8.33 frames per tick. Every existing evenness case used frame rates that divide the tick
+  exactly, so the awkward case, which is the only one a real client ever runs, was not
+  covered.
+
+### On the assertions added here
+
+Both live in files that already have their `.meta`, and both were added to existing
+fixtures rather than new files, deliberately: 0.15.1 records that
+`HeldMovementParityTests.cs` shipped in 0.14.0 without one and therefore never ran in
+Unity — not here and not in any consumer — while passing out of Unity, where `.meta` files
+are irrelevant. Every mutation result quoted for that fixture in 0.14.0 was true of the
+out-of-Unity run and vacuous in Unity. A green out-of-Unity suite says nothing about
+whether Unity can see the file.
+
+## [0.15.1] - 2026-08-15
+
+### Fixed
+
+- **`HeldMovementParityTests.cs` shipped in 0.14.0 without its `.meta`, so Unity ignored
+  the asset entirely — the parity test has never run, in this repository or in any
+  consumer.** Worse for consumers than for us: Unity logs
+  `has no meta file, but it's in an immutable folder`, and the test framework turns an
+  unexpected log error into an exception, so **the error fails the whole test run of any
+  project that installs the package**. Found by `com.cuvara.dots`' CI, whose job reported
+  failure with 137/137 EditMode and 29/29 PlayMode passing and not one test failed.
+
+  A `.meta` is load-bearing for a git-installed package: the package lands in the
+  immutable `Library/PackageCache`, where Unity will not generate one. This is the third
+  time a missing or stub `.meta` has silently disabled shipped content here.
 
 ## [0.15.0] - 2026-08-15
 
