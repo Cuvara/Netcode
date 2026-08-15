@@ -5,6 +5,55 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-08-15
+
+### Fixed — the local avatar stuttered at every frame rate
+
+`WorldViewBinder` advanced the predictor **twice per frame**, so its clock ran at about
+**2x real time**.
+
+0.15.0 added `AdvanceFrame(deltaTime)` as the per-frame driver but left the existing
+advance inside the snapshot pass in place. That pass is not once per arriving snapshot:
+a real client calls `Tick(world, localId)` **every rendered frame**, whether or not a
+snapshot landed. Both drivers therefore ran on every frame, each covering the same span.
+
+The doubling does not show up as the avatar running away — reconciliation pins the
+position to the server's every snapshot — so it is spent on base ticks instead. The
+server holds a direction for `WorldEvery` base ticks and stops the entity when that
+window expires. At double rate the client's copy of the window expired in **half the
+real time it should**, so the predicted avatar moved for the first part of each send
+period and stood still for the rest.
+
+Three things about the symptom follow from that and made it hard to place:
+
+- **Frame rate is irrelevant.** Capping to 60 fps changed nothing, which wrongly ruled
+  out the render path as the location.
+- **Only the local player is affected.** Remote entities are driven by the
+  interpolator's own clock and stayed smooth throughout — "everyone else moves fine,
+  only the character I control stutters" is the exact signature.
+- **Distance is correct.** Nothing about total travel or final position is wrong, so no
+  positional assertion catches it.
+
+Measured on a live client at 15 input sends per real second: the predictor read the
+interval between them as **0.133 s** where 0.067 s was sent, and **85-100% of frames**
+rendered no movement with worst-frame jumps of **1.1-1.25 units**. After the fix, the
+same build reads **0.0669 s**, with **0-0.3% still frames** and a worst-frame jump of
+**0.027 units** while moving.
+
+The frame loop now owns the clock: `AdvanceFrame` claims each span it advances, and the
+snapshot pass advances only when no frame loop is running at all — a headless harness
+that pumps snapshots and renders nothing, which must still see prediction move. That
+second case is covered by its own test, so the fix cannot decay into "delete the
+snapshot advance".
+
+### Added
+
+- `PredictorClockAdvancesOnceTests` — asserts the predictor's clock matches real time
+  with both drivers running, driving `Tick` every frame as a real client does. Verified
+  against the defect: with the fix reverted the suite reports 1 failure, with it
+  restored 372/372 pass. It asserts `ObservedInputInterval`, not travel, because travel
+  is unchanged by the defect.
+
 ## [0.15.0] - 2026-08-15
 
 **Consumers must now call `WorldViewBinder.AdvanceFrame(deltaTime)` once per rendered
