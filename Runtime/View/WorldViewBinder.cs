@@ -98,6 +98,9 @@ namespace Cuvara.Netcode.View
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
         private double _lastRenderMs;
+        private int _localHp;
+        private int _localMaxHp;
+        private bool _localSeen;
         private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
         private bool _firstSnapshot = true;
 
@@ -308,6 +311,12 @@ namespace Cuvara.Netcode.View
 
                     _predictor.Advance((float)((nowMs - _lastRenderMs) / 1000.0));
 
+                    // Kept so AdvanceFrame can re-render between snapshots. Only movement
+                    // is predicted, so HP stays whatever the server last said.
+                    _localHp = e.Hp;
+                    _localMaxHp = e.MaxHp;
+                    _localSeen = true;
+
                     var predicted = _predictor.Position;
                     _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
 
@@ -399,6 +408,47 @@ namespace Cuvara.Netcode.View
             }
         }
 
+        /// <summary>
+        /// Advances prediction and re-renders the local entity. Call once per rendered
+        /// frame, from <c>Update</c> or equivalent — not from snapshot handling.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Without this the smoothing does nothing observable.</b> Prediction used to
+        /// be advanced, and the local entity re-rendered, only inside snapshot
+        /// processing — so the rendered position changed at the <i>world</i> rate, 15 Hz,
+        /// however fast the client was drawing. Every frame between snapshots showed the
+        /// avatar perfectly still, and the frame a snapshot landed on showed the whole
+        /// interval's movement at once. Spreading a step across an interval is worthless
+        /// when nothing samples the position during that interval: the interpolation was
+        /// only ever read at its endpoints.
+        /// </para>
+        /// <para>
+        /// It shows up in frame-delta burstiness as roughly <i>frames per snapshot
+        /// interval</i> — about 20 at 300 fps against 15 Hz — which is the band the live
+        /// measurement reported on the predicting and non-predicting paths alike. That
+        /// the two were similar was the clue: a number that does not care whether
+        /// prediction is on is not measuring prediction.
+        /// </para>
+        /// <para>
+        /// Safe before a local entity exists and safe without a predictor — it no-ops in
+        /// both cases, and ignores a non-positive delta.
+        /// </para>
+        /// </remarks>
+        /// <param name="deltaTime">Seconds since the previous call.</param>
+        public void AdvanceFrame(float deltaTime)
+        {
+            if (_predictor == null || !_localSeen || deltaTime <= 0f)
+            {
+                return;
+            }
+
+            _predictor.Advance(deltaTime);
+
+            var predicted = _predictor.Position;
+            _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
+        }
+
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
         public void Reset()
         {
@@ -413,6 +463,9 @@ namespace Cuvara.Netcode.View
             _predictor?.Reset();
             TickRate.Reset();
             _localId = string.Empty;
+            _localHp = 0;
+            _localMaxHp = 0;
+            _localSeen = false;
             _firstSnapshot = true;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;

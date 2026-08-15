@@ -665,6 +665,13 @@ namespace DOTSSample
             }
 
             _binder.Tick(_client.World, _client.UserId);
+
+            // Per frame, and separately from the snapshot pass above. Snapshot processing
+            // advances prediction once per arriving snapshot — the world rate — so a
+            // client that renders only from it shows the avatar still between snapshots
+            // and jumping on the frame one lands, however fast it is drawing. This is what
+            // makes the smoothing observable rather than merely computed.
+            _binder.AdvanceFrame(Time.deltaTime);
             _entityCount = _view.Count;
 
             // Verify the advertised rate against one measured off the wire. The protocol
