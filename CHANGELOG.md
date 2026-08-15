@@ -5,6 +5,36 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-08-15
+
+The smoothness figure was not comparable between runs, and the way that surfaced is worth
+recording: two runs of the same build reported a largest single-frame jump of **0.0149**
+and **0.0244** world units — a 60% spread that looks like measurement noise.
+
+**It is not noise. It is frame rate.** Those values imply **336 fps and 205 fps**, and a
+smoothed step necessarily divides into larger pieces when there are fewer frames to divide
+it across. The metric was frame-rate dependent by construction, so it could not be compared
+between runs, between machines, or between a developer's Editor and a player's build.
+
+### Added
+
+- **`FrameDeltaBurstiness` — worst frame ÷ average frame.** **1.0 is perfect**: every frame
+  moved the same distance. Unsmoothed motion puts a whole step on one frame and nothing on
+  the rest, so the ratio becomes the number of frames per input interval. This is the
+  number to quote; the raw distances are kept for context and now print the frame rate
+  beside them so nobody compares two of them without noticing.
+
+- **`ObservedFps`**, measured over the sampled frames.
+
+### Note
+
+The harness has now produced two figures that needed explaining rather than reporting —
+this one, and a "forced divergence" that forced none. Both were caught by someone asking
+why a number looked odd rather than by anything automatic. **A measurement tool needs its
+own scepticism applied to it**, and the useful habit is checking whether a suspicious value
+has a mechanical explanation before treating it as data: 0.0149 versus 0.0244 was one
+division away from being obvious.
+
 ## [0.12.0] - 2026-08-15
 
 0.11.0 read the advertised tick rate. This makes the client **verify** it, and makes the
