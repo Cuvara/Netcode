@@ -45,6 +45,111 @@ jobs:
             echo "  $f → $NAME"
           done
 
+  # ---------------------------------------------------------------------------
+  # Compile the samples.
+  #
+  # Samples~/ is excluded from Unity's import by design, so NOTHING else in this
+  # workflow compiles a line of it — 206 tests pass around files that are read and
+  # never built. That gap shipped a DOTS sample calling the legacy UnityEngine.Input
+  # API in a project configured for the Input System package, where it throws every
+  # frame out of Update() and takes the whole bridge down with it: no connection, no
+  # spawn, nothing. It reached a user as "nothing works".
+  #
+  # This job gives the samples a compiler. It does not run them, so it would not have
+  # caught that specific throw — but it is the structural hole that let sample code
+  # ship unexamined, and it catches every compile-time break from here on.
+  # ---------------------------------------------------------------------------
+  samples:
+    name: Compile samples (${{ matrix.unityVersion }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        unityVersion:
+          - 6000.3.9f1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: package
+
+      - name: Bootstrap a project with the samples imported
+        run: |
+          mkdir -p Assets ProjectSettings Packages
+
+          # Samples~ is invisible to Unity where it sits; importing a sample means
+          # copying it under Assets/, which is exactly what the Package Manager does.
+          mkdir -p "Assets/Samples"
+          cp -r "package/Samples~/DOTSSample" "Assets/Samples/DOTSSample"
+
+          cat > Packages/manifest.json << 'JSON'
+          {
+            "dependencies": {
+              "com.cuvara.netcode": "file:../package",
+              "com.cysharp.unitask": "2.5.10",
+              "jp.hadashikick.vcontainer": "1.16.8",
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.7",
+              "com.unity.entities": "1.4.8",
+              "com.unity.entities.graphics": "1.4.21",
+              "com.unity.burst": "1.8.30",
+              "com.unity.collections": "2.6.8",
+              "com.unity.mathematics": "1.3.2",
+              "com.unity.inputsystem": "1.18.0",
+              "com.unity.render-pipelines.universal": "17.3.0"
+            },
+            "scopedRegistries": [
+              {
+                "name": "OpenUPM",
+                "url": "https://package.openupm.com",
+                "scopes": ["com.cysharp", "jp.hadashikick"]
+              }
+            ]
+          }
+          JSON
+
+          cat > ProjectSettings/ProjectVersion.txt << 'TXT'
+          m_EditorVersion: ${{ matrix.unityVersion }}
+          TXT
+
+          # activeInputHandler: 1 = Input System package ONLY. Deliberately the strictest
+          # setting: it is where the legacy API throws, and it is what a Unity 6 project
+          # is most likely to be on. A sample that only compiles under "Both" is a sample
+          # that breaks for most consumers.
+          cat > ProjectSettings/ProjectSettings.asset << 'YAML'
+          %YAML 1.1
+          %TAG !u! tag:unity3d.com,2011:
+          --- !u!129 &1
+          PlayerSettings:
+            companyName: Cuvara
+            productName: NetcodeSampleCompile
+            activeInputHandler: 1
+          YAML
+
+      - name: Compile
+        id: compile
+        continue-on-error: true
+        uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          unityVersion: ${{ matrix.unityVersion }}
+          testMode: EditMode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: Sample compile results
+
+      - name: Samples must compile
+        run: |
+          if [ "${{ steps.compile.outcome }}" != "success" ]; then
+            echo "::error::The samples did not compile. Samples~/ is not built by any" \
+                 "other job, so this is the only thing standing between a broken sample" \
+                 "and a consumer importing it."
+            for d in artifacts Logs; do
+              [ -d "$d" ] && grep -rhoE "error CS[0-9]+: [^\"]{0,160}" "$d" 2>/dev/null | sort -u | head -20
+            done
+            exit 1
+          fi
+          echo "samples compiled"
+
   test:
     name: Unity Tests (${{ matrix.unityVersion }})
     runs-on: ubuntu-latest

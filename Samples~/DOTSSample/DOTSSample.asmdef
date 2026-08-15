@@ -11,6 +11,7 @@
         "Unity.Entities.Graphics",
         "Cuvara.Netcode.Runtime",
         "Shared.GameLogic",
+        "Unity.InputSystem",
         "UniTask"
     ],
     "includePlatforms": [],
