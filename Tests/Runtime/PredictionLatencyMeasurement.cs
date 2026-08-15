@@ -116,6 +116,36 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float MaxCorrection;
             public float EffectiveSpeed;
             public bool Predicting;
+
+            /// <summary>
+            /// Per-render-frame movement of the rendered local position, while an input
+            /// is in flight. This is the stutter, quantified: at 15 Hz input and a high
+            /// frame rate, unsmoothed motion is a long run of exact zeros punctuated by
+            /// one whole step, so <see cref="StillFramePercent"/> near 100 and a large
+            /// <see cref="MaxFrameDelta"/> are the signature. Smooth motion is a small,
+            /// near-constant delta every frame.
+            /// </summary>
+            public List<float> FrameDeltas = new List<float>();
+
+            public float StillFramePercent =>
+                FrameDeltas.Count == 0 ? float.NaN
+                    : 100f * FrameDeltas.Count(d => d <= 1e-6f) / FrameDeltas.Count;
+
+            public float MaxFrameDelta => FrameDeltas.Count == 0 ? float.NaN : FrameDeltas.Max();
+
+            public float MeanFrameDelta => FrameDeltas.Count == 0 ? float.NaN : FrameDeltas.Average();
+
+            /// <summary>Standard deviation of the per-frame movement — flat when smooth.</summary>
+            public float FrameDeltaStdDev
+            {
+                get
+                {
+                    if (FrameDeltas.Count < 2) return float.NaN;
+                    float mean = MeanFrameDelta;
+                    double sum = FrameDeltas.Sum(d => (d - mean) * (double)(d - mean));
+                    return (float)System.Math.Sqrt(sum / (FrameDeltas.Count - 1));
+                }
+            }
         }
 
         [UnityTest]
@@ -285,10 +315,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 var sample = new Sample { VisibleTimedOut = true, AuthoritativeTimedOut = true };
                 bool sawVisible = false, sawAuthoritative = false;
 
+                var previousRendered = settled;
+
                 while (Time.realtimeSinceStartup - t0 < SampleTimeoutSeconds &&
                        !(sawVisible && sawAuthoritative))
                 {
                     binder.Tick(client.World, localId);
+
+                    // One reading per render frame: how far the avatar moved since the
+                    // last frame. The distribution of these IS the stutter.
+                    if (view.TryGet(localId, out var rendered))
+                    {
+                        run.FrameDeltas.Add((rendered - previousRendered).magnitude);
+                        previousRendered = rendered;
+                    }
 
                     if (!sawVisible && view.TryGet(localId, out var now) &&
                         (now - settled).sqrMagnitude > MoveEpsilon * MoveEpsilon)
@@ -360,7 +400,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  corrections smoothed     {run.SmoothedCorrections}\n" +
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
-                $"  effective speed          {run.EffectiveSpeed}");
+                $"  effective speed          {run.EffectiveSpeed}\n" +
+                $"  --- smoothness (per render frame, while moving) ---\n" +
+                $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
+                    "high means the avatar teleports once per input and is frozen between\n" +
+                $"  largest single-frame jump {run.MaxFrameDelta:F4} world units\n" +
+                $"  mean frame delta         {run.MeanFrameDelta:F4}\n" +
+                $"  frame delta std dev      {run.FrameDeltaStdDev:F4}   <- flat when smooth");
         }
 
         private static void ReportComparison(Run on, Run off)
@@ -373,6 +419,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  median input -> visible, OFF   {Median(offVisible):F1} ms\n" +
                 $"  median input -> visible, ON    {Median(onVisible):F1} ms\n" +
                 $"  median interval removed        {Median(offVisible) - Median(onVisible):F1} ms\n" +
+                "\n" +
+                $"  still frames, OFF              {off.StillFramePercent:F1}%\n" +
+                $"  still frames, ON               {on.StillFramePercent:F1}%\n" +
+                $"  largest frame jump, OFF        {off.MaxFrameDelta:F4}\n" +
+                $"  largest frame jump, ON         {on.MaxFrameDelta:F4}\n" +
                 "\n" +
                 "  This is input-submitted to avatar-moves, measured in-engine.\n" +
                 "  It is NOT keypress-to-visible: the keyboard, OS input stack and display\n" +

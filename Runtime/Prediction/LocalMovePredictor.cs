@@ -163,21 +163,9 @@ namespace Cuvara.Netcode.Prediction
 
         private Vec2 _predicted;      // simulated position: authoritative + replayed inputs
         private Vec2 _renderOffset;   // predicted-minus-corrected, decayed to zero
+        private Vec2 _step;           // displacement the most recent input produced
+        private float _sinceInput;    // seconds since it, for spreading that step over frames
         private bool _seeded;
-
-        // --- Render-rate smoothing of the predicted position ---
-        //
-        // '_predicted' only moves inside RecordInput, which runs at the input rate. At
-        // 15 Hz input and 350 fps that is ~23 identical frames followed by a jump of a
-        // whole step — the local avatar visibly stutters 15 times a second. Prediction
-        // fixed WHERE the avatar is; it did nothing for how often it is updated.
-        //
-        // These carry a fraction of the next step so the rendered position crosses the
-        // same ground continuously instead of in jumps.
-        private float _lastMoveX;
-        private float _lastMoveY;
-        private float _sinceInput;    // seconds since the last RecordInput, clamped to _dt
-        private Vec2 _renderStep;     // fraction of the pending step already shown
 
         /// <summary>
         /// Creates a predictor. Check <see cref="IsEnabled"/> before using the result:
@@ -239,22 +227,47 @@ namespace Cuvara.Netcode.Prediction
         /// Position to render the local player at: the predicted position plus whatever
         /// remains of the last smoothed correction.
         /// </summary>
-        public Vec2 Position => new Vec2(
-            _predicted.X + _renderOffset.X + _renderStep.X,
-            _predicted.Y + _renderOffset.Y + _renderStep.Y);
+        public Vec2 Position
+        {
+            get
+            {
+                // Walk back the part of the latest step that has not been shown yet, so
+                // the step is spread across the frames of an input interval instead of
+                // landing on one of them. See the class remarks.
+                float remaining = 1f - StepProgress;
+                return new Vec2(
+                    _predicted.X - _step.X * remaining + _renderOffset.X,
+                    _predicted.Y - _step.Y * remaining + _renderOffset.Y);
+            }
+        }
+
+        /// <summary>
+        /// How much of the latest input's step has been rendered, 0..1. Saturates at 1 —
+        /// which is what stops this from extrapolating; see the class remarks.
+        /// </summary>
+        private float StepProgress
+        {
+            get
+            {
+                if (_dt <= 0f) return 1f;
+                float t = _sinceInput / _dt;
+                return t >= 1f ? 1f : t < 0f ? 0f : t;
+            }
+        }
 
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
         public Vec2 SimulatedPosition => _predicted;
 
         /// <summary>
-        /// What remains of the last correction, decaying to exactly zero. Diagnostics and
-        /// tests.
+        /// The outstanding correction still being blended out. Zero when the rendered and
+        /// simulated positions have converged.
         /// </summary>
         /// <remarks>
-        /// Asserting this is zero is not the same as asserting
-        /// <see cref="Position"/> equals <see cref="SimulatedPosition"/>: with input held,
-        /// <see cref="Position"/> also leads by the fraction of the pending step already
-        /// rendered, and the two coincide only at the instant of each input tick.
+        /// Kept from the parallel implementation in #25 — it is a genuinely useful
+        /// diagnostic and costs nothing. Note that under this implementation
+        /// <see cref="Position"/> also converges on <see cref="SimulatedPosition"/> once
+        /// the step is fully shown, so the stronger assertion is available again and is
+        /// what the tests use.
         /// </remarks>
         public Vec2 SmoothingOffset => _renderOffset;
 
@@ -326,22 +339,20 @@ namespace Cuvara.Netcode.Prediction
             _pending[slot] = new PendingInput(tick, moveX, moveY);
             _count++;
 
-            var stepped = Step(_predicted, moveX, moveY);
+            // Whatever of the previous step was still unshown would otherwise vanish
+            // when the new step replaces it. Carry it into the render offset so the
+            // visible position does not jump on an input boundary.
+            Vec2 before = Position;
 
-            // Whatever fraction of this step was already shown must not be shown twice.
-            // V = predicted + offset + renderStep, and the visual has to stay continuous
-            // across the instant '_predicted' jumps, so fold (renderStep - actual step)
-            // into the offset the existing decay already retires. With input held and
-            // frames arriving on time the two are equal and nothing is folded in at all.
-            _renderOffset = new Vec2(
-                _renderOffset.X + _renderStep.X - (stepped.X - _predicted.X),
-                _renderOffset.Y + _renderStep.Y - (stepped.Y - _predicted.Y));
-
-            _predicted = stepped;
-            _lastMoveX = moveX;
-            _lastMoveY = moveY;
+            Vec2 previous = _predicted;
+            _predicted = Step(_predicted, moveX, moveY);
+            _step = new Vec2(_predicted.X - previous.X, _predicted.Y - previous.Y);
             _sinceInput = 0f;
-            _renderStep = Vec2.Zero;
+
+            Vec2 after = Position;
+            _renderOffset = new Vec2(
+                _renderOffset.X + (before.X - after.X),
+                _renderOffset.Y + (before.Y - after.Y));
         }
 
         /// <summary>
@@ -365,6 +376,7 @@ namespace Cuvara.Netcode.Prediction
             {
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
                 return;
             }
 
@@ -373,6 +385,8 @@ namespace Cuvara.Netcode.Prediction
                 _seeded = true;
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
+                _sinceInput = 0f;
                 LastCorrection = 0f;
                 return;
             }
@@ -400,7 +414,12 @@ namespace Cuvara.Netcode.Prediction
             {
                 // Too far to hide. Showing the avatar gliding from a place the server has
                 // already ruled out is worse than one honest jump.
+                //
+                // The in-step remainder goes too: it belongs to a step taken from a
+                // position that has just been ruled out, so replaying it from the
+                // corrected one would add a second, smaller wrong movement after the snap.
                 _renderOffset = Vec2.Zero;
+                _step = Vec2.Zero;
                 Snaps++;
             }
             else if (LastCorrection > 0f)
@@ -408,7 +427,13 @@ namespace Cuvara.Netcode.Prediction
                 // Carry the whole error as a render offset and retire it over the next few
                 // frames, so the simulated position is authoritative-correct immediately
                 // while the visible one catches up.
-                _renderOffset = new Vec2(dx, dy);
+                //
+                // Added to the existing offset rather than replacing it: with in-step
+                // smoothing there can be an outstanding remainder from an input boundary,
+                // and overwriting it would discard part of a step mid-flight — a small
+                // jump at snapshot rate, which is the exact artefact this release is
+                // removing.
+                _renderOffset = new Vec2(_renderOffset.X + dx, _renderOffset.Y + dy);
                 SmoothedCorrections++;
             }
         }
@@ -431,7 +456,9 @@ namespace Cuvara.Netcode.Prediction
                 return;
             }
 
-            AdvanceRenderStep(deltaTime);
+            // Always advanced, even with no correction outstanding: this is what makes
+            // the rendered position move between inputs at all.
+            _sinceInput += deltaTime;
 
             if (_renderOffset.X == 0f && _renderOffset.Y == 0f)
             {
@@ -503,11 +530,9 @@ namespace Cuvara.Netcode.Prediction
             _lastRecordedTick = 0;
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
-            _seeded = false;
-            _lastMoveX = 0f;
-            _lastMoveY = 0f;
+            _step = Vec2.Zero;
             _sinceInput = 0f;
-            _renderStep = Vec2.Zero;
+            _seeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
             _speed = _settings.Speed;
@@ -528,53 +553,6 @@ namespace Cuvara.Netcode.Prediction
         /// returns early for one, and predicting movement for a corpse would be a
         /// prediction guaranteed to be corrected.
         /// </remarks>
-        /// <summary>
-        /// Carries the rendered position forward through the gap between input ticks.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// The extrapolation is a fraction of <b>the very step that RecordInput will
-        /// apply next</b>, computed with the same <see cref="Step"/> call — so it inherits
-        /// the shared movement model's normalisation and its map-bounds clamp for free,
-        /// and cannot walk the avatar somewhere the simulation would not have gone. With
-        /// the input vector held it traces exactly the path the staircase would have
-        /// jumped along, continuously instead of 15 times a second.
-        /// </para>
-        /// <para>
-        /// Clamped to one step. Beyond that the client would be guessing at input it has
-        /// not sampled yet — a late frame should stall the avatar, not launch it.
-        /// </para>
-        /// <para>
-        /// <b>This adds no latency and changes nothing on the wire.</b> It is a smoothing
-        /// of what is drawn between two predicted positions the client already computed;
-        /// the input rate, the sent packets and the reconciliation are untouched. Raising
-        /// the input rate instead would be worse than useless: the server coalesces to
-        /// "at most one integration step per player per tick, using the newest input", so
-        /// a client sending faster predicts N steps where the server applies one, and
-        /// every tick ends in a correction.
-        /// </para>
-        /// </remarks>
-        private void AdvanceRenderStep(float deltaTime)
-        {
-            if (_lastMoveX == 0f && _lastMoveY == 0f)
-            {
-                _renderStep = Vec2.Zero;
-                return;
-            }
-
-            _sinceInput += deltaTime;
-            if (_sinceInput > _dt)
-            {
-                _sinceInput = _dt;
-            }
-
-            float t = _dt > 0f ? _sinceInput / _dt : 0f;
-            Vec2 next = Step(_predicted, _lastMoveX, _lastMoveY);
-            _renderStep = new Vec2(
-                (next.X - _predicted.X) * t,
-                (next.Y - _predicted.Y) * t);
-        }
-
         private Vec2 Step(Vec2 from, float moveX, float moveY)
         {
             var probe = new EntityState

@@ -5,6 +5,81 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-15
+
+The other half of the user's complaint. `v0.9.x` made the avatar respond ~72 ms sooner;
+this makes it move *continuously* while it does. Their words after the last build: *"I
+feel less stuttering when moving now, but it is still not smooth — it still jerks
+occasionally."*
+
+### Fixed
+
+- **The predicted position only advanced at the input rate, so the avatar stepped 15 times
+  a second.** `_predicted` moves only inside `RecordInput`. At 15 Hz input and 350 fps that
+  is ~23 identical frames followed by a jump of a whole step (0.333 world units at the
+  default speed). Prediction fixed *where* the avatar is; nothing had addressed *how often*
+  that is updated. It is the residue of removing local interpolation in 0.4.0 — that
+  removal was right for latency and took the frame-rate smoothing with it.
+
+  `Position` now walks back the unshown fraction of the latest step, spreading it across
+  the frames of the interval.
+
+### Interpolation within the step, never past it
+
+The rendered position is bounded by **a step that was actually taken from an input that
+was actually submitted**. It is interpolation, and that is the entire safety argument.
+
+**When input stops, the avatar arrives at the predicted position and stops.** Carrying
+motion forward on the last known direction would move it somewhere the player never asked
+for, and the correction would land exactly when they released the key and were watching —
+a worse artefact than the one being removed, at a more noticeable moment. Pinned by
+`WhenInputStopsThePositionConvergesAndDoesNotOvershoot`, which asserts the bound on every
+one of 100 frames across ten intervals of silence, and by
+`StoppingInputLeavesThePositionCompletelyStill`.
+
+### This does not give back the latency 0.4.0 removed
+
+Motion now **begins** on the frame after the input rather than teleporting on it — a frame,
+not an interval, and not a round trip. **Expect `input -> visible` to move from ~0.1 ms to
+roughly one frame (~3 ms at 350 fps)** when the harness is next run. That is a real if
+tiny regression in that metric and it is stated here rather than discovered: at 350 fps
+the first frame already shows ~0.014 units of movement, well past the harness's detection
+threshold. Against 72 ms it is not a trade anyone would decline, but it is a trade.
+
+`SimulatedPosition` is untouched, so replay determinism and the bit-exact agreement with
+the server are unaffected — pinned by `SmoothingDoesNotTouchTheSimulatedPosition`.
+
+### Continuity, in the two places it can break
+
+- **An input boundary that does not land exactly on time.** The unshown remainder of the
+  previous step is carried into the render offset instead of being discarded, so a late or
+  early input does not jump the avatar.
+- **A reconcile mid-step.** The correction is now *added* to the outstanding offset rather
+  than replacing it; overwriting would discard part of a step in flight — a small jump at
+  snapshot rate, which is the exact artefact this release removes. A **snap** clears the
+  remainder deliberately: it belongs to a step taken from a position the server has just
+  ruled out, and replaying it would add a second, smaller wrong movement after the snap.
+
+### Added
+
+- **`RenderSmoothingTests`** — 9 cases. Both properties are mutation-checked: removing the
+  smoothing fails 2, allowing extrapolation past the step fails 3.
+- **Smoothness measurement in the PlayMode harness.** Per-render-frame movement of the
+  rendered position, reported as **percentage of frames with no movement at all**, largest
+  single-frame jump, mean, and standard deviation. That is the stutter quantified — before,
+  a long run of exact zeros punctuated by one whole step; after, a small near-constant
+  delta every frame. **"Looks smooth" is not measurable and is not claimed.**
+
+### Still open
+
+The user said it jerks **occasionally**, which is a different signature from a steady 15 Hz
+step and is probably a second cause. The harness already reports `corrections snapped`
+versus `smoothed`; non-zero snaps during ordinary play would name it. Candidates, in the
+order worth checking: a dropped or superseded input causing a snap, the `t = 1.2`
+extrapolation cap on *remote* entities when a snapshot is late, client-side GC or
+frame-time spikes, and the correction smoothing threshold being too coarse. **Measure
+before fixing** — this release addresses the steady stepping only.
+
 ## [0.9.1] - 2026-08-15
 
 **A guard added in 0.9.0 was wrong, failed on the first live run, and is replaced here
