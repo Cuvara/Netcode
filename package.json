@@ -1,56 +1,56 @@
 {
-    "name": "com.cuvara.netcode",
-    "version": "0.15.0",
-    "displayName": "Cuvara Netcode",
-    "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
-    "unity": "6000.3",
-    "documentationUrl": "",
-    "license": "MIT",
-    "keywords": [
-        "netcode",
-        "networking",
-        "transport",
-        "mmo",
-        "rpg"
-    ],
-    "author": {
-        "name": "Cuvara",
-        "email": "duycuong2k3@gmail.com"
+  "name": "com.cuvara.netcode",
+  "version": "0.15.1",
+  "displayName": "Cuvara Netcode",
+  "description": "Client wire transport, codec, two-hop handshake (gateway \u2192 game server), snapshot resolution and world state management for the RPG MMO.",
+  "unity": "6000.3",
+  "documentationUrl": "",
+  "license": "MIT",
+  "keywords": [
+    "netcode",
+    "networking",
+    "transport",
+    "mmo",
+    "rpg"
+  ],
+  "author": {
+    "name": "Cuvara",
+    "email": "duycuong2k3@gmail.com"
+  },
+  "dependencies": {
+    "com.cysharp.unitask": "2.5.10",
+    "com.unity.modules.unitywebrequest": "1.0.0",
+    "com.unity.modules.physics": "1.0.0"
+  },
+  "x-optionalDependencies": {
+    "jp.hadashikick.vcontainer": "1.16.8 \u2014 enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
+  },
+  "x-manualDependencies": {
+    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
+  },
+  "samples": [
+    {
+      "displayName": "Demo Bootstrap",
+      "description": "Dev harness scene that runs the full gateway \u2192 game server \u2192 enter world \u2192 input/snapshot loop against a local backend.",
+      "path": "Samples~/DemoBootstrap"
     },
-    "dependencies": {
-        "com.cysharp.unitask": "2.5.10",
-        "com.unity.modules.unitywebrequest": "1.0.0",
-        "com.unity.modules.physics": "1.0.0"
+    {
+      "displayName": "World View",
+      "description": "Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. No interpolation and no prediction, on purpose.",
+      "path": "Samples~/WorldView"
     },
-    "x-optionalDependencies": {
-        "jp.hadashikick.vcontainer": "1.16.8 — enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
+    {
+      "displayName": "E2E Certification",
+      "description": "Client-driven certification rig: Nakama device auth and the gateway_token RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Needs a running backend and no signing secret.",
+      "path": "Samples~/E2ECertification"
     },
-    "x-manualDependencies": {
-        "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
-    },
-    "samples": [
-        {
-            "displayName": "Demo Bootstrap",
-            "description": "Dev harness scene that runs the full gateway → game server → enter world → input/snapshot loop against a local backend.",
-            "path": "Samples~/DemoBootstrap"
-        },
-        {
-            "displayName": "World View",
-            "description": "Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. No interpolation and no prediction, on purpose.",
-            "path": "Samples~/WorldView"
-        },
-        {
-            "displayName": "E2E Certification",
-            "description": "Client-driven certification rig: Nakama device auth and the gateway_token RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Needs a running backend and no signing secret.",
-            "path": "Samples~/E2ECertification"
-        },
-        {
-            "displayName": "DOTS Sample",
-            "description": "Full client against a live backend, presented with DOTS/ECS: Nakama device auth, the gateway hop, a direct game-server join, and replicated entities reconciled into Burst-compiled ISystem simulation with Entities.Graphics rendering. Includes auto-attack combat, a gold/leaderboard economy, a map selector, and an on-screen HUD for connection state, RTT and server health. Needs a running backend.",
-            "path": "Samples~/DOTSSample"
-        }
-    ],
-    "testables": [
-        "com.cuvara.netcode"
-    ]
+    {
+      "displayName": "DOTS Sample",
+      "description": "Full client against a live backend, presented with DOTS/ECS: Nakama device auth, the gateway hop, a direct game-server join, and replicated entities reconciled into Burst-compiled ISystem simulation with Entities.Graphics rendering. Includes auto-attack combat, a gold/leaderboard economy, a map selector, and an on-screen HUD for connection state, RTT and server health. Needs a running backend.",
+      "path": "Samples~/DOTSSample"
+    }
+  ],
+  "testables": [
+    "com.cuvara.netcode"
+  ]
 }
