@@ -24,9 +24,17 @@ namespace Cuvara.Netcode.Tests.PlayMode
         public static string MapId => Env("CUVARA_MAP_ID", "map_01");
 
         /// <summary>
-        /// Server tick rate. Must match the game server's, because it is the <c>dt</c>
-        /// both sides integrate with.
+        /// Fallback tick rate, used only when the server advertises none in its join
+        /// response. Not the rate the measurement predicts at.
         /// </summary>
+        /// <remarks>
+        /// This constant used to be the rate, and it was wrong: the server moved to a
+        /// 60 Hz base tick and this still read 15, so the harness predicted a step four
+        /// times too long and reported the result as a measurement. Every configuration
+        /// now builds its <c>PredictionSettings</c> from <c>client.TickRate</c> after
+        /// connecting, and prints whether it fell back to this. Leave it alone unless
+        /// testing the fallback path itself.
+        /// </remarks>
         public static int TickRate => EnvInt("CUVARA_TICK_RATE", 15);
 
         /// <summary>
@@ -38,7 +46,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         public static string Describe() =>
             $"gateway {GatewayHost}:{GatewayPort}, nakama {NakamaScheme}://{NakamaHost}:{NakamaPort}, " +
-            $"map {MapId}, tickRate {TickRate}, fallbackSpeed {PlayerSpeed}";
+            $"map {MapId}, fallbackTickRate {TickRate}, fallbackSpeed {PlayerSpeed}";
 
         private static string Env(string key, string fallback)
         {

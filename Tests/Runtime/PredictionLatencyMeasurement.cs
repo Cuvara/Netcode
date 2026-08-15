@@ -124,6 +124,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public int PendingPeak;
             public int ReplayedSteps;
             public int Reconciles;
+            public int TickRateInUse;
+            public bool TickRateIsFallback;
+            public float MeasuredTickRate;
+            public bool TickRateDisagrees;
+
+            /// <summary>Displacement one accepted input produces on the server.</summary>
+            public float ExpectedStep =>
+                TickRateInUse > 0 ? EffectiveSpeed / TickRateInUse : 0f;
             public int Snaps;
             public int SmoothedCorrections;
             public float MaxCorrection;
@@ -215,7 +223,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "by its 'LiveBackend' category. " + LiveBackendConfig.Describe());
             }
 
-            Debug.Log("[Measure] " + LiveBackendConfig.Describe());
+            Debug.Log("[Measure] endpoints: " + LiveBackendConfig.Describe() +
+                      "\n[Measure] NOTE: the tickRate above is only a FALLBACK. The rate " +
+                      "actually predicted with comes from the server and is reported per run below.");
 
             var withPrediction = await MeasureAsync(predict: true);
             var withoutPrediction = await MeasureAsync(predict: false);
@@ -276,6 +286,36 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"server's ({LiveBackendConfig.PlayerSpeed}). Either the server's default " +
                 "changed or the wire speed is not being adopted — both make every predicted " +
                 "step wrong by the ratio.");
+
+            // ---- The other half of the correction guard ----
+            //
+            // The divergence check below proves corrections CAN happen. Nothing proved they
+            // do NOT happen when nothing should diverge, and that missing half let the
+            // harness report `corrections smoothed 20` out of 20 samples — every input
+            // diverging by 0.25 units, under the snap threshold, invisible — while
+            // measuring a 4x tick-rate mismatch it had introduced itself.
+            //
+            // On localhost with matched rates and bit-exact shared logic, a healthy run
+            // should correct essentially never.
+
+            Assert.That(withPrediction.TickRateDisagrees, Is.False,
+                $"predicting at {withPrediction.TickRateInUse} Hz while the wire measures " +
+                $"{withPrediction.MeasuredTickRate:F1} Hz. Every predicted step is wrong by " +
+                "that ratio, and at these magnitudes it smooths rather than snaps — so it " +
+                "reads as soft movement, not as an error.");
+
+            Assert.That(withPrediction.Snaps, Is.Zero,
+                "a snap in ordinary localhost play means the client and server disagreed by " +
+                "more than half a step, which nothing in a healthy configuration should do.");
+
+            int correctionBudget = Samples / 4;
+            Assert.That(withPrediction.SmoothedCorrections, Is.LessThanOrEqualTo(correctionBudget),
+                $"{withPrediction.SmoothedCorrections} of {Samples} samples needed a " +
+                "correction. On localhost with matched rates and the same shared logic on " +
+                "both sides, agreement should be the rule and a correction the exception — " +
+                "a correction on nearly every input means a systematic disagreement, and " +
+                "the last time this fired it was a 4x tick-rate mismatch that no other " +
+                "counter showed.");
 
             var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
                 .Select(s => s.InputToVisibleMs));
@@ -396,21 +436,39 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 },
                 new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
 
-            LocalMovePredictor predictor = predict
-                ? new LocalMovePredictor(new PredictionSettings(
-                    LiveBackendConfig.TickRate, LiveBackendConfig.PlayerSpeed, MapBounds.Default))
-                : null;
-
-            var view = new ProbeView();
-            var binder = new WorldViewBinder(view, predictor);
-            run.Predicting = binder.IsPredicting;
-
+            // CONNECT FIRST. The prediction timestep comes from the server's join
+            // response, so the predictor cannot exist until the join has happened.
+            //
+            // This ordering is the fix for a defect in this file: the harness used to build
+            // PredictionSettings from CUVARA_TICK_RATE before connecting, so against the
+            // multi-rate backend it measured a client predicting at 15 against a server
+            // integrating at 60 — and reported `corrections smoothed 20` out of 20 samples
+            // while every other counter read healthy. The instrument had its own copy of
+            // the constant the instrument exists to check.
             await client.ConnectAsync(jwt, LiveBackendConfig.MapId, ct);
 
             string localId = client.UserId;
             Assert.That(localId, Is.Not.Empty, "joined without a user id");
 
+            var settings = PredictionSettings.FromServer(
+                client.TickRate,
+                fallbackTickRate: LiveBackendConfig.TickRate,
+                LiveBackendConfig.PlayerSpeed,
+                MapBounds.Default);
+
+            run.TickRateInUse = settings.TickRate;
+            run.TickRateIsFallback = settings.TickRateIsFallback;
+
+            LocalMovePredictor predictor = predict ? new LocalMovePredictor(settings) : null;
+
+            var view = new ProbeView();
+            var binder = new WorldViewBinder(view, predictor);
+            run.Predicting = binder.IsPredicting;
+
             long tick = 0;
+
+            // The SEND cadence, which is a client choice and deliberately not the server's
+            // integration rate. Conflating the two is what produced the defect above.
             float dt = 1f / LiveBackendConfig.TickRate;
 
             // Let the world arrive and the local entity spawn before measuring.
@@ -501,6 +559,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.ObservedFps = mean > 0f ? 1f / mean : 0f;
             }
 
+            run.MeasuredTickRate = binder.TickRate.HasEstimate ? binder.TickRate.EstimatedHz : 0f;
+            run.TickRateDisagrees = binder.TickRate.Disagrees(run.TickRateInUse);
+
             if (predictor != null)
             {
                 run.ReplayedSteps = predictor.ReplayedSteps;
@@ -508,6 +569,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.Snaps = predictor.Snaps;
                 run.SmoothedCorrections = predictor.SmoothedCorrections;
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
+            }
+            else
+            {
+                // No predictor to ask; use the configured speed purely so the expected
+                // step can be printed for comparison.
+                run.EffectiveSpeed = LiveBackendConfig.PlayerSpeed;
             }
 
             client.Disconnect();
@@ -547,6 +614,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
                 $"  effective speed          {run.EffectiveSpeed}\n" +
+                $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
+                    (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
+                $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
+                    (run.TickRateDisagrees ? "   <<< DISAGREES with the rate in use" : "   (agrees)") + "\n" +
                 $"  --- smoothness (per render frame, while moving) ---\n" +
                 $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
                     "high means the avatar teleports once per input and is frozen between\n" +
@@ -555,6 +626,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  frame delta std dev      {run.FrameDeltaStdDev:F4}\n" +
                 $"  BURSTINESS (max/mean)    {run.FrameDeltaBurstiness:F2}   <- 1.00 is perfectly even; " +
                     "THIS is the comparable number\n" +
+                $"  expected jump per input  {run.ExpectedStep:F4}   (speed {run.EffectiveSpeed} / {run.TickRateInUse} Hz)" +
+                    ExpectedStepNote(run) + "\n" +
                 $"  observed frame rate      {run.ObservedFps:F0} fps   (the raw distances above scale with this)");
         }
 
@@ -584,6 +657,32 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "  pipeline are outside the engine and need external capture. Those legs are\n" +
                 "  constant between the two runs, so the DIFFERENCE above is unaffected by\n" +
                 "  their absence, but the absolute figures are not a player-felt latency.");
+        }
+
+        /// <summary>
+        /// Flags a largest-frame-jump that is not a whole number of server steps, or is
+        /// more than one.
+        /// </summary>
+        /// <remarks>
+        /// With prediction off the avatar moves only when a snapshot lands, so the largest
+        /// frame jump should be the displacement the server produced since the previous
+        /// snapshot — one step per input it accepted. A jump that is an exact small
+        /// multiple of a step says more inputs were applied per snapshot than expected; one
+        /// that is not a multiple at all says the step size itself is wrong. Both are worth
+        /// seeing in the output rather than derived afterwards: a run reported 0.2500
+        /// against an expected 0.0833 and neither of us could account for the factor of
+        /// three from the numbers we had printed.
+        /// </remarks>
+        private static string ExpectedStepNote(Run run)
+        {
+            if (run.ExpectedStep <= 0f || float.IsNaN(run.MaxFrameDelta) || run.MaxFrameDelta <= 0f)
+            {
+                return string.Empty;
+            }
+
+            float ratio = run.MaxFrameDelta / run.ExpectedStep;
+            return $"   observed/expected = {ratio:F2}" +
+                   (ratio > 1.5f ? "  <<< more movement per frame than one server step" : "");
         }
 
         private static string Describe(IReadOnlyCollection<float> xs)
