@@ -246,6 +246,18 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
         public Vec2 SimulatedPosition => _predicted;
 
+        /// <summary>
+        /// What remains of the last correction, decaying to exactly zero. Diagnostics and
+        /// tests.
+        /// </summary>
+        /// <remarks>
+        /// Asserting this is zero is not the same as asserting
+        /// <see cref="Position"/> equals <see cref="SimulatedPosition"/>: with input held,
+        /// <see cref="Position"/> also leads by the fraction of the pending step already
+        /// rendered, and the two coincide only at the instant of each input tick.
+        /// </remarks>
+        public Vec2 SmoothingOffset => _renderOffset;
+
         /// <summary>Inputs sent but not yet acknowledged.</summary>
         public int PendingCount => _count;
 

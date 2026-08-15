@@ -250,14 +250,20 @@ namespace Cuvara.Netcode.Tests.Editor
             predictor.RecordInput(1, 1f, 0f);
             predictor.Reconcile(new Vec2(0.05f, 0f), 1);
 
-            Assert.That(predictor.Position, Is.Not.EqualTo(predictor.SimulatedPosition));
+            Assert.That(predictor.SmoothingOffset, Is.Not.EqualTo(Vec2.Zero));
 
             for (var frame = 0; frame < 60; frame++)
             {
                 predictor.Advance(1f / 60f);
             }
 
-            Assert.That(predictor.Position, Is.EqualTo(predictor.SimulatedPosition),
+            // Asserted on the offset itself rather than on Position == SimulatedPosition.
+            // That equality used to be a sound proxy, and stopped being one when the
+            // rendered position started leading the simulated one by the fraction of the
+            // pending step already drawn — with input held the two now coincide only at
+            // each input tick. The intent under test is unchanged and this states it
+            // directly: the correction settles at exactly zero rather than approaching it.
+            Assert.That(predictor.SmoothingOffset, Is.EqualTo(Vec2.Zero),
                 "the offset must settle exactly, not approach zero forever");
         }
 
