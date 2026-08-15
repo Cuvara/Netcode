@@ -5,6 +5,57 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-08-15
+
+**The DOTS sample threw on its first frame in any project using the Input System package,
+which is most Unity 6 projects.** It reached a user as *"I don't see any player or enemy
+spawned"* — not degraded input, a dead sample.
+
+### Fixed
+
+- **`SampleMovementInput` read the legacy `UnityEngine.Input` API unconditionally.** Under
+  `activeInputHandler: 1` (Input System package only) that class **throws** rather than
+  returning zero, and the read is the first statement of `Update()` — so the exception
+  took the connection, the spawn and the render down with it. The sample did not degrade,
+  it died, and it failed as "nothing works" rather than "input does nothing", which cost
+  two builds to diagnose.
+
+  Now reads through whichever backend the project actually has, using the
+  `ENABLE_INPUT_SYSTEM` / `ENABLE_LEGACY_INPUT_MANAGER` defines Unity provides for exactly
+  this. The new backend is preferred when both are present. **A sample shipped in a package
+  cannot dictate a consumer's Player Settings**, and requiring `activeInputHandler: 2` was
+  doing precisely that — a project-wide setting with consequences well beyond this sample.
+
+- **The input read can no longer take the bridge down.** It is wrapped, and a failure logs
+  once and continues with zero movement: the client still connects, spawns and renders,
+  and the local player simply does not move. Correct API selection should make this
+  unreachable; it exists because the observed failure mode was *total*, and a sample whose
+  input fails should still be a working sample.
+
+- **`DOTSSample.asmdef` references `Unity.InputSystem`.** The sample now needs that package
+  when the project uses the new handler.
+
+### Added
+
+- **A CI job that compiles the samples**, with the project set to `activeInputHandler: 1` —
+  deliberately the strictest setting, because that is where the legacy API throws.
+
+  **`Samples~/` is excluded from Unity's import, so nothing else in the workflow compiles a
+  line of it.** 206 tests passed around a file that was read and never built. That gap is
+  what let this ship. The job does not *run* the sample, so it would not have caught this
+  particular runtime throw — but it closes the structural hole, and it catches every
+  compile-time break from here on. Stated plainly rather than oversold.
+
+### Honest note on what this means for earlier feedback
+
+**No build anyone has tested has ever had working keyboard input.** The legacy call arrived
+with the WASD wiring in 0.5.0 and has thrown in this project ever since; earlier builds were
+driven by the scripted walk, which needs no input at all, so nothing surfaced. The user's
+"less stuttering when moving" was therefore about autopilot motion, not about their own
+input — worth knowing before reading that feedback as a verdict on responsiveness. The
+~72 ms measurement is unaffected: it came from the PlayMode harness, which drives the
+predictor directly and never touches the sample.
+
 ## [0.10.1] - 2026-08-15
 
 Two things that should have been in 0.10.0 and were lost when it merged mid-edit.
