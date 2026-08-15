@@ -102,6 +102,14 @@ namespace Cuvara.Netcode.Client
         public string UserId => _session?.UserId ?? _gateway?.UserId ?? string.Empty;
 
         /// <summary>
+        /// The game server's simulation tick rate in Hz, from its join response. Zero
+        /// until joined, and zero from a server that does not advertise one — in both
+        /// cases the caller must fall back to a configured default rather than treating
+        /// zero as a rate.
+        /// </summary>
+        public uint TickRate => _session?.TickRate ?? 0u;
+
+        /// <summary>
         /// True when an <see cref="IAuthProvider"/> was supplied, so
         /// <see cref="ConnectAsync(string, CancellationToken)"/> can be used.
         /// </summary>

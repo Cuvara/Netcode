@@ -1,0 +1,27 @@
+{
+    "name": "Cuvara.Netcode.DI",
+    "rootNamespace": "Cuvara.Netcode",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "UniTask",
+        "VContainer",
+        "Shared.GameLogic"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "CUVARA_NETCODE_VCONTAINER"
+    ],
+    "versionDefines": [
+        {
+            "name": "jp.hadashikick.vcontainer",
+            "expression": "1.0.0",
+            "define": "CUVARA_NETCODE_VCONTAINER"
+        }
+    ],
+    "noEngineReferences": false
+}

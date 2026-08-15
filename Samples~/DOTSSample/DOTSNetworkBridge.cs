@@ -5,8 +5,10 @@ using Cysharp.Threading.Tasks;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
+using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.Transport;
 using Cuvara.Netcode.View;
+using Shared.GameLogic.Components;
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
@@ -32,7 +34,35 @@ namespace DOTSSample
         [SerializeField] private string mapId = "map_01";
 
         [Header("Input")]
-        [SerializeField] private int inputRateHz = 15;
+        [Tooltip("Inputs sent per second. Must equal the server's simulation tick rate: " +
+                 "the server integrates one step per accepted input at 1/tickRate, and " +
+                 "applies only the newest when several land in one tick.")]
+        // Defaulted from the shared constant rather than a literal, so this cannot drift
+        // from the rate the server actually integrates at. The two are compiled from the
+        // same Shared.GameLogic, and a mismatch does not fail — the client is simply
+        // wrong by a little on every tick, corrected by every snapshot, which reads to a
+        // player as rubber-banding rather than as a misconfiguration.
+        //
+        // This is a field initializer and it is load-bearing here BECAUSE nothing
+        // serializes it: DOTSSceneSetup adds this component at runtime, so the scene
+        // carries no DOTSNetworkBridge and no stored value to override it. Author the
+        // component into a scene and the serialized number wins instead — at which point
+        // this default stops applying and the scene has to be updated too.
+        [SerializeField] private int inputRateHz = GameConstants.DefaultTickRate;
+
+        [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
+                 "sine-wave walk, which is what this sample did before and is still what " +
+                 "you want for an unattended soak run.")]
+        [SerializeField] private bool useKeyboardInput = true;
+
+        [Header("Prediction")]
+        [Tooltip("Fallback movement speed, used before the first snapshot and against a " +
+                 "server predating wire.proto field 9. Snapshots now carry per-entity " +
+                 "speed and it supersedes this, so a buff or slow is picked up rather " +
+                 "than desynced. Should still match the server's " +
+                 "ServerDefaults.DefaultPlayerSpeed. Zero disables prediction entirely " +
+                 "rather than guessing.")]
+        [SerializeField] private float playerSpeed = 5f;
 
         [Header("Run")]
         [SerializeField] private float runSeconds = 300f;
@@ -40,9 +70,22 @@ namespace DOTSSample
         private NetworkClient _client;
         private WorldViewBinder _binder;
         private DOTSEntityView _view;
+        private LocalMovePredictor _predictor;
         private CancellationTokenSource _cts;
         private long _inputTick;
         private string _pendingAttackTarget = "";
+
+        // Movement sampled on the main thread each frame, consumed by the input loop.
+        // Input.GetAxisRaw is main-thread only and the send loop is a UniTask on its own
+        // cadence, so the two are deliberately decoupled through these fields.
+        private float _moveX;
+        private float _moveY;
+        private bool _inputFailureReported;
+        private bool _tickRateChecked;
+
+        /// <summary>The timestep replay is using, recovered for the cross-check log.</summary>
+        private float PredictedDt() =>
+            _client != null && _client.TickRate > 0 ? 1f / _client.TickRate : 1f / Mathf.Max(1, inputRateHz);
 
         // --- Status for OnGUI ---
         private string _status = "Initializing...";
@@ -73,10 +116,19 @@ namespace DOTSSample
         private string _cachedFpsText;
         private string _cachedFpsStatsText;
         private string _cachedFpsRttText;
+        // Own dirty-flag for the top-right RTT label. It must NOT share '_prevRttMs'
+        // with the HUD label above: that field is advanced by the HUD's own cache check
+        // earlier in the same OnGUI pass, so a shared flag reads as "unchanged" every
+        // frame and freezes this label on its first sample.
+        private int _prevFpsRttMs = -1;
         private readonly GUIContent _sharedContent = new GUIContent();
 
         // --- Per-entity label cache (rebuilt on entity set change) ---
-        private readonly Dictionary<string, string> _entityLabelTextCache = new Dictionary<string, string>();
+        // Keyed by id, but the locality the text was built with is stored alongside it: the
+        // '★ YOU' prefix is derived from IsLocal, so caching on the id alone renders a stale
+        // star for any entity whose locality changes under it.
+        private readonly Dictionary<string, (bool IsLocal, string Text)> _entityLabelTextCache =
+            new Dictionary<string, (bool, string)>();
 
         // --- Combat stats cache ---
         private string _cachedCombatText;
@@ -108,6 +160,9 @@ namespace DOTSSample
         [Header("Nakama API")]
         [SerializeField] private string nakamaBaseUrl = "http://127.0.0.1:7350";
         [SerializeField] private string leaderboardId = "kills_alltime";
+
+        [Tooltip("Maps offered at startup. One entry connects to it straight away; " +
+                 "two or more draw the map selector and wait for a click.")]
         [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
 
         private GUIStyle _serverPanelStyle;
@@ -199,26 +254,106 @@ namespace DOTSSample
             Application.runInBackground = true;
 
             _view = new DOTSEntityView();
+
+            // Prediction settings are stated, never defaulted. inputRateHz doubles as the
+            // server tick rate because the two must match anyway — the server integrates
+            // one step per accepted input at 1/tickRate, so a client sending at a
+            // different rate predicts a different distance. playerSpeed has to be the
+            // server's spawn default (ServerDefaults.DefaultPlayerSpeed); nothing on the
+            // wire carries it, which is the weakest joint in this setup and is why the
+            // predictor refuses rather than guesses when it is left at zero.
+            // Constructed after the join, because the tick rate comes from the server —
+            // see StartPrediction. Creating it here with a guessed rate is exactly the
+            // defect this release fixes.
+            _predictor = null;
+
+            // A predictor that refused is passed anyway: the binder treats a disabled one
+            // as no predictor at all, so the fallback is 0.4.0's behaviour rather than a
+            // special case anyone has to remember to write.
             _binder = new WorldViewBinder(_view);
 
             _cts = new CancellationTokenSource();
-            // Connection starts when map is selected (see OnGUI map selector)
-            // If only one map configured, auto-select it
-            if (availableMaps == null || availableMaps.Length <= 1)
+            // Connection starts when a map is selected (see the OnGUI map selector).
+            // With a single map there is nothing to choose, so connect to it directly —
+            // taking the id from the list rather than from 'mapId', or configuring one
+            // map would silently connect to whatever 'mapId' happened to hold.
+            if (availableMaps == null || availableMaps.Length == 0)
             {
-                _mapSelected = true;
-                RunAsync(_cts.Token).Forget();
+                StartConnection(mapId);
+            }
+            else if (availableMaps.Length == 1)
+            {
+                StartConnection(availableMaps[0]);
             }
             PollServerStatusAsync(_cts.Token).Forget();
         }
 
+        /// <summary>
+        /// Replaces the map set offered at startup.
+        /// </summary>
+        /// <remarks>
+        /// For callers that add this component from script — <see cref="DOTSSceneSetup"/>
+        /// does — because a component added at runtime can only ever carry its field
+        /// initializers, never a scene's inspector values. Call it in the same frame the
+        /// component is added: <c>Start</c> reads <c>availableMaps</c> to decide between
+        /// connecting directly and drawing the selector, and it runs after the frame's
+        /// <c>Awake</c> pass. A null or empty array is ignored, so a caller that has
+        /// nothing to say leaves the inspector-authored value alone.
+        /// </remarks>
+        public void ConfigureMaps(string[] maps)
+        {
+            if (maps == null || maps.Length == 0)
+                return;
+            availableMaps = maps;
+        }
+
         private void StartConnection(string selectedMap)
         {
+            if (_client != null)
+            {
+                // A second session on one bridge would leave two live clients ticking the
+                // same binder, and the older one's entities would never despawn.
+                Debug.LogWarning("[DOTSNet] Already connected — leave the room before connecting again.");
+                return;
+            }
+
+            // Every join authenticates with a fresh device id and therefore gets a fresh
+            // Nakama user id, so anything the previous session presented is about to be
+            // wrong about which entity is 'you'. Clear it before the first snapshot lands.
+            ResetSessionView();
+
             mapId = selectedMap;
             _cachedMapText = "Map: " + selectedMap;
             _mapSelected = true;
             _status = "Authenticating...";
             RunAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Drops everything the view and the binder hold for the session that just ended.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Not optional, and not merely tidy.</b> <see cref="WorldViewBinder"/> only calls
+        /// <c>Spawn</c> for ids it has not seen, and <c>Spawn</c> is the only place locality is
+        /// decided. An entity carried over from the previous session is therefore never
+        /// re-evaluated: it keeps the <c>IsLocal</c> it was given when it *was* the local
+        /// player, and the next session's own player is spawned local too — two entities
+        /// labelled <c>★ YOU</c>, one of them somebody else.
+        /// </para>
+        /// <para>
+        /// The carry-over is real whenever the old entity is still listed in the world when
+        /// the new session's first snapshot arrives — the server holds a disconnected
+        /// player's entity for ~30 s, so a quick rejoin lands inside that window.
+        /// </para>
+        /// </remarks>
+        private void ResetSessionView()
+        {
+            _binder?.Reset();
+            _tickRateChecked = false;
+            _entityLabelTextCache.Clear();
+            _labelCache.Clear();
+            _entityCount = 0;
         }
 
         private void LeaveRoom()
@@ -247,18 +382,187 @@ namespace DOTSSample
             _cachedEntityText = null;
             _cachedRttText = null;
             _cachedFpsRttText = null;
+            _prevRttMs = -1;
+            _prevFpsRttMs = -1;
+            _prevWorldTick = -1;
             _cachedCombatText = null;
             _prevKills = -1;
             _prevLocalKills = 0;
             _goldOptimistic = 0;
-            _entityLabelTextCache.Clear();
+
+            // Despawns every presented entity and clears the binder's live set, so the next
+            // join starts from an empty world instead of inheriting this one's.
+            ResetSessionView();
 
             // Restart server status polling (doesn't need auth)
             PollServerStatusAsync(_cts.Token).Forget();
         }
 
+        /// <summary>
+        /// Builds the predictor once the server has told us its tick rate, and rebinds the
+        /// view to it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The tick rate comes from the server, not from a local constant.</b> It is the
+        /// cadence the server integrates movement at, so it is the <c>dt</c> prediction must
+        /// use — and it was a value shared by convention across two repositories until the
+        /// server moved movement to a 60 Hz group while this sample still assumed 15. The
+        /// client then predicted four times the distance per input, which at the default
+        /// speed is 0.25 world units: <b>under</b> the correction-smoothing threshold, so
+        /// it produced no visible snap and simply felt soft and wrong.
+        /// </para>
+        /// <para>
+        /// <c>inputRateHz</c> is deliberately NOT reused for this. It is how often this
+        /// client sends, which is a client choice; the integration rate is the server's.
+        /// Conflating them is what made the constant look shareable in the first place.
+        /// </para>
+        /// </remarks>
+        private void StartPrediction()
+        {
+            uint advertised = _client?.TickRate ?? 0u;
+
+            var settings = PredictionSettings.FromServer(
+                advertised, fallbackTickRate: inputRateHz, playerSpeed, MapBounds.Default);
+
+            _predictor = new LocalMovePredictor(settings);
+            _binder = new WorldViewBinder(_view, _predictor);
+
+            // The protocol permits a fallback only if it is OBSERVABLE. A silent one is
+            // behaviourally the code that predated the field.
+            if (settings.TickRateIsFallback)
+            {
+                Debug.LogWarning(
+                    $"[DOTSNet] Server advertised no tick rate; predicting at {settings.TickRate}Hz " +
+                    "from local configuration. If the server integrates at a different rate, every " +
+                    "predicted step is wrong by that ratio — which smooths rather than snaps, so it " +
+                    "will feel soft rather than look broken. The measured rate below is the check.");
+            }
+            else
+            {
+                Debug.Log($"[DOTSNet] Prediction ON — server tick rate {settings.TickRate}Hz " +
+                          $"(advertised), input {inputRateHz}Hz, speed {playerSpeed}");
+            }
+
+            if (!_binder.IsPredicting)
+            {
+                Debug.LogWarning("[DOTSNet] Prediction OFF — settings unusable; rendering server positions");
+            }
+        }
+
+        /// <summary>
+        /// Reads this frame's movement direction into <see cref="_moveX"/> /
+        /// <see cref="_moveY"/> for the input loop to pick up.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why this sample now has real input at all.</b> It used to send
+        /// <c>sin(Time.time * 1.5)</c> / <c>cos(Time.time * 0.8)</c> — an autopilot. That
+        /// is the right thing for an unattended soak run and it is kept behind
+        /// <see cref="useKeyboardInput"/>, but it makes the question this sample exists to
+        /// answer unanswerable: "does moving feel responsive?" has no meaning when nothing
+        /// is pressing anything, and keypress-to-visible latency cannot be measured
+        /// without a keypress to measure from.
+        /// </para>
+        /// <para>
+        /// Raw axes, not smoothed ones. <c>GetAxis</c> applies its own acceleration curve,
+        /// which would put a second, client-only easing in front of a change whose entire
+        /// purpose is removing delay — and it would make the vector the client predicts
+        /// with differ from the one a player would say they pressed.
+        /// </para>
+        /// </remarks>
+        private void SampleMovementInput()
+        {
+            if (!useKeyboardInput)
+            {
+                _moveX = Mathf.Sin(Time.time * 1.5f);
+                _moveY = Mathf.Cos(Time.time * 0.8f);
+                return;
+            }
+
+            // Never let an input failure take the bridge down with it. This method is the
+            // first statement of Update(), so an exception here stops the connection, the
+            // spawn and the render — the sample does not degrade, it dies, and it reads to
+            // a user as "nothing works" rather than "input does nothing". That is exactly
+            // what happened when this read the legacy API in a project configured for the
+            // Input System package.
+            try
+            {
+                ReadKeyboard(out _moveX, out _moveY);
+            }
+            catch (Exception ex)
+            {
+                _moveX = 0f;
+                _moveY = 0f;
+
+                if (!_inputFailureReported)
+                {
+                    _inputFailureReported = true;
+                    Debug.LogWarning(
+                        "[DOTSNet] Keyboard input is unavailable, continuing without it: " +
+                        ex.Message + ". The client will still connect and render; the local " +
+                        "player just will not move. Set 'useKeyboardInput' false to use the " +
+                        "scripted walk instead.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reads WASD / arrows through whichever input backend this project actually has.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A sample shipped in a package cannot dictate a consumer's Player Settings.</b>
+        /// Unity defines <c>ENABLE_INPUT_SYSTEM</c> and <c>ENABLE_LEGACY_INPUT_MANAGER</c>
+        /// from the project's active input handling precisely so code can support both, and
+        /// under "Input System Package (New)" the legacy <c>UnityEngine.Input</c> class
+        /// throws rather than returning zero.
+        /// </para>
+        /// <para>
+        /// The new backend is preferred when both are available, because that is the
+        /// configuration a Unity 6 project is most likely to be in and it exercises the
+        /// path most consumers will take.
+        /// </para>
+        /// </remarks>
+        private static void ReadKeyboard(out float x, out float y)
+        {
+#if ENABLE_INPUT_SYSTEM
+            var keyboard = UnityEngine.InputSystem.Keyboard.current;
+            if (keyboard == null)
+            {
+                // No keyboard device — a headless or automated run. Not an error.
+                x = 0f;
+                y = 0f;
+                return;
+            }
+
+            x = Axis(keyboard.dKey.isPressed || keyboard.rightArrowKey.isPressed,
+                     keyboard.aKey.isPressed || keyboard.leftArrowKey.isPressed);
+            y = Axis(keyboard.wKey.isPressed || keyboard.upArrowKey.isPressed,
+                     keyboard.sKey.isPressed || keyboard.downArrowKey.isPressed);
+#elif ENABLE_LEGACY_INPUT_MANAGER
+            // Raw, not smoothed: GetAxis applies an acceleration curve, which would put a
+            // second client-only easing in front of a change whose purpose is removing
+            // delay, and would make the predicted vector differ from what the player
+            // would say they pressed.
+            x = Input.GetAxisRaw("Horizontal");
+            y = Input.GetAxisRaw("Vertical");
+#else
+            // Neither backend is enabled. Nothing to read, and nothing to throw about.
+            x = 0f;
+            y = 0f;
+#endif
+        }
+
+#if ENABLE_INPUT_SYSTEM
+        private static float Axis(bool positive, bool negative) =>
+            (positive ? 1f : 0f) - (negative ? 1f : 0f);
+#endif
+
         private void Update()
         {
+            SampleMovementInput();
+
             // FPS sampling
             float dt = Time.unscaledDeltaTime;
             _frameTimes[_frameIndex] = dt;
@@ -361,7 +665,38 @@ namespace DOTSSample
             }
 
             _binder.Tick(_client.World, _client.UserId);
+
+            // Per frame, and separately from the snapshot pass above. Snapshot processing
+            // advances prediction once per arriving snapshot — the world rate — so a
+            // client that renders only from it shows the avatar still between snapshots
+            // and jumping on the frame one lands, however fast it is drawing. This is what
+            // makes the smoothing observable rather than merely computed.
+            _binder.AdvanceFrame(Time.deltaTime);
             _entityCount = _view.Count;
+
+            // Verify the advertised rate against one measured off the wire. The protocol
+            // recommends this even when a rate IS advertised, and the reason is that a
+            // wrong rate produces no symptom a player can name — it is wrong by a fixed
+            // ratio on every input, under the correction threshold, forever.
+            if (!_tickRateChecked && _binder.TickRate.HasEstimate)
+            {
+                _tickRateChecked = true;
+                int used = _predictor != null ? (int)Mathf.Round(1f / Mathf.Max(1e-6f, PredictedDt())) : 0;
+
+                if (_binder.TickRate.Disagrees(used))
+                {
+                    Debug.LogError(
+                        $"[DOTSNet] Tick rate mismatch: predicting at {used}Hz but the server's " +
+                        $"snapshots measure {_binder.TickRate.EstimatedHz:F1}Hz. Every predicted step " +
+                        "is wrong by that ratio. This is the failure that reads as soft, laggy " +
+                        "movement rather than as an error.");
+                }
+                else
+                {
+                    Debug.Log($"[DOTSNet] Tick rate verified: predicting at {used}Hz, " +
+                              $"measured {_binder.TickRate.EstimatedHz:F1}Hz off the wire.");
+                }
+            }
         }
 
         private void OnDestroy()
@@ -415,6 +750,7 @@ namespace DOTSSample
                 };
 
                 await _client.ConnectAsync(jwt, mapId, ct);
+                StartPrediction();
                 _status = "In World";
                 Debug.Log($"[DOTSNet] IN WORLD as {_client.UserId}");
 
@@ -428,13 +764,20 @@ namespace DOTSSample
 
                     _inputTick++;
 
-                    var moveX = Mathf.Sin(Time.time * 1.5f);
-                    var moveY = Mathf.Cos(Time.time * 0.8f);
+                    var moveX = _moveX;
+                    var moveY = _moveY;
                     var attackTarget = _pendingAttackTarget;
                     _pendingAttackTarget = "";
                     if (!string.IsNullOrEmpty(attackTarget))
                         Debug.Log($"[Attack] Sending attack on {attackTarget} (tick {_inputTick})");
+
                     _client.Session?.SendInput(_inputTick, moveX, moveY, attackTarget);
+
+                    // Recorded immediately after the send, with the same tick and the same
+                    // vector — the predictor's whole contract is that it saw exactly what
+                    // the server will see. Only the movement half is predicted;
+                    // attackTarget is not passed and combat stays server-authoritative.
+                    _predictor?.RecordInput(_inputTick, moveX, moveY);
 
                     await UniTask.Delay(TimeSpan.FromSeconds(dt), DelayType.Realtime,
                         PlayerLoopTiming.Update, ct);
@@ -844,6 +1187,31 @@ namespace DOTSSample
                 GUI.Label(new Rect(10, y, w, h), _cachedRttText);
             }
 
+            // --- Prediction (below RTT) ---
+            // Deliberately shown even when prediction is OFF. A silently-absent predictor
+            // looks exactly like a working one that is doing nothing, and this sample
+            // exists so behaviour can be looked at instead of assumed.
+            if (_predictor != null)
+            {
+                y += h;
+                if (_binder != null && _binder.IsPredicting)
+                {
+                    // Snaps is the number worth watching: a steady climb means the client
+                    // and the server disagree about speed, tick rate or bounds.
+                    GUI.color = _predictor.Snaps > 0 ? new Color(1f, 0.8f, 0.2f) : new Color(0.4f, 1f, 0.6f);
+                    GUI.Label(new Rect(10, y, w, h),
+                        "Predict: " + _predictor.PendingCount + " pending  err "
+                        + _predictor.LastCorrection.ToString("F3") + "  snaps "
+                        + _predictor.Snaps);
+                }
+                else
+                {
+                    GUI.color = new Color(1f, 0.5f, 0.5f);
+                    GUI.Label(new Rect(10, y, w, h), "Predict: OFF (settings unusable)");
+                }
+                GUI.color = Color.white;
+            }
+
             // --- Combat stats + gold (below network HUD) ---
             if (_cachedCombatText != null)
             {
@@ -902,10 +1270,12 @@ namespace DOTSSample
 
                 if (_client?.Session != null)
                 {
-                    // Reuse RTT value already computed above
+                    // Same source as the HUD label above — one session, one round-trip
+                    // measurement — but cached against its own previous value.
                     var rttMs = (int)_client.Session.RoundTripMs;
-                    if (_cachedFpsRttText == null || _prevRttMs != rttMs)
+                    if (_cachedFpsRttText == null || _prevFpsRttMs != rttMs)
                     {
+                        _prevFpsRttMs = rttMs;
                         _cachedFpsRttText = "RTT: " + rttMs + "ms";
                     }
                     GUI.Label(new Rect(fpsX, fpsY, fpsW, fpsH), _cachedFpsRttText, _fpsStyle);
@@ -955,13 +1325,17 @@ namespace DOTSSample
 
                 float screenY = Screen.height - screenPos.y;
 
-                // Cache label text per entity — only rebuild on first sight
-                if (!_entityLabelTextCache.TryGetValue(label.Id, out var displayText))
+                // Cache label text per entity — rebuilt on first sight, and again when locality changes
+                if (!_entityLabelTextCache.TryGetValue(label.Id, out var cached)
+                    || cached.IsLocal != label.IsLocal)
                 {
                     var shortId = label.Id.Length > 8 ? label.Id.Substring(0, 8) : label.Id;
-                    displayText = label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId;
-                    _entityLabelTextCache[label.Id] = displayText;
+                    cached = (label.IsLocal,
+                        label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId);
+                    _entityLabelTextCache[label.Id] = cached;
                 }
+
+                var displayText = cached.Text;
 
                 var style = label.IsLocal ? _localLabelStyle : _labelStyle;
                 _sharedContent.text = displayText;

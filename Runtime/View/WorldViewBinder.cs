@@ -1,6 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.World;
+using Shared.GameLogic.Components;
 
 namespace Cuvara.Netcode.View
 {
@@ -32,6 +35,45 @@ namespace Cuvara.Netcode.View
     /// measured snapshot interval. HP values are not interpolated — they snap to the
     /// latest value.
     /// </para>
+    /// <para>
+    /// <b>The local player is excluded from interpolation.</b> Interpolating between the
+    /// previous and the newest snapshot renders an entity behind the newest authoritative
+    /// position by up to one snapshot interval — deliberate for remote entities, whose
+    /// smoothness is the entire reason this code exists, and indefensible for the one
+    /// entity whose response delay the player is holding a key to feel. The local id is
+    /// rendered at the newest received position instead.
+    /// </para>
+    /// <para>
+    /// <b>What the local entity does when a snapshot is late:</b> it holds at the last
+    /// received position. It does not extrapolate. There is nothing honest to extrapolate
+    /// from — the client does not simulate the local player, so a guess would be the
+    /// binder inventing motion the server never confirmed, and it would have to be
+    /// visibly undone when the real snapshot lands. Remote entities still extrapolate up
+    /// to <c>t = 1.2</c>, because for them the alternative is a visible stall and the
+    /// correction is somebody else's avatar drifting slightly, not the player's own.
+    /// </para>
+    /// <para>
+    /// <b>Excluding the local entity from interpolation is not prediction.</b> On its own
+    /// it removes the render buffer, not the round trip: keypress-to-visible is still
+    /// input-send quantisation plus RTT plus server tick. Closing the rest needs a
+    /// prediction layer reconciling against <c>WorldState.AckTick</c> — which is what the
+    /// optional <see cref="LocalMovePredictor"/> constructor overload supplies.
+    /// </para>
+    /// <para>
+    /// <b>The predictor overload is for views that render what <c>SetState</c> hands
+    /// them, not for the <c>com.cuvara.dots</c> adapter</b>, which reads that position as
+    /// authoritative and stores it as a reconciliation anchor. See the constructor's own
+    /// remarks — getting this wrong is invisible at runtime.
+    /// </para>
+    /// <para>
+    /// <b>With a predictor, the local entity is driven by prediction instead</b>: the
+    /// snapshot becomes the anchor that prediction rewinds to rather than the thing
+    /// rendered, and <see cref="IsPredicting"/> reports which of the two is live. Without
+    /// one, everything above stands unchanged — passing no predictor is not a degraded
+    /// mode, it is 0.4.0's behaviour, and it is what a client must fall back to when it
+    /// cannot state the server's tick rate, speed and bounds. Only <b>movement</b> is
+    /// predicted; HP always comes from the snapshot.
+    /// </para>
     /// </remarks>
     public sealed class WorldViewBinder
     {
@@ -45,21 +87,100 @@ namespace Cuvara.Netcode.View
         }
 
         private readonly IEntityView _view;
+        private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
         private readonly List<string> _gone = new List<string>();
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
         private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private string _localId = string.Empty;
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
+        private double _lastRenderMs;
+
+        /// <summary>Set once AdvanceFrame is driving the clock, which then owns it.</summary>
+        private bool _frameDriven;
+        private int _localHp;
+        private int _localMaxHp;
+        private bool _localSeen;
         private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
         private bool _firstSnapshot = true;
 
-        public WorldViewBinder(IEntityView view)
+        /// <summary>
+        /// Binds a view with no prediction: the local entity renders at the newest
+        /// received position.
+        /// </summary>
+        public WorldViewBinder(IEntityView view) : this(view, null)
+        {
+        }
+
+        /// <summary>
+        /// Binds a view, driving the local entity from a
+        /// <see cref="LocalMovePredictor"/> instead of from the newest snapshot.
+        /// <b>For views that render what <see cref="IEntityView.SetState"/> hands them —
+        /// NOT for the <c>com.cuvara.dots</c> adapter.</b>
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Do not use this with <c>com.cuvara.dots</c>' <c>DotsEntityView</c>.</b> That
+        /// adapter treats the position it receives from <c>SetState</c> as authoritative
+        /// and stores it in a <c>ReconciliationAnchor</c> component — "what the server
+        /// said", the value a predictor rewinds to. This overload sends it the
+        /// <i>predicted</i> position instead, so the anchor would hold a predicted value
+        /// under a name that promises authority. Nothing detects that: the entity renders
+        /// correctly, and the damage only appears when something finally reads the anchor
+        /// and rewinds to a position its own prediction produced. That reads as float
+        /// divergence and gets debugged as one, in the wrong package.
+        /// </para>
+        /// <para>
+        /// <b>The DOTS path drives the predictor from the other side.</b> A system in that
+        /// package reads <c>ReconciliationAnchor</c>, pairs it with
+        /// <see cref="World.WorldState.AckTick"/>, calls this same
+        /// <see cref="LocalMovePredictor"/>, and writes <c>LocalTransform</c> itself —
+        /// claiming it with a <c>PredictedTransform</c> marker so the adapter stops
+        /// writing it. Construct the binder with the single-argument constructor there and
+        /// hand the predictor to that system instead. <see cref="LocalMovePredictor"/> is
+        /// deliberately free of DOTS types so both paths share one implementation of the
+        /// algorithm.
+        /// </para>
+        /// <para>
+        /// This overload exists for the views where no anchor exists and
+        /// <see cref="IEntityView.SetState"/> is the only channel there is —
+        /// <see cref="GameObjectEntityView"/>, the WorldView sample, and the DOTS sample
+        /// in this package, which uses its own view rather than the adapter.
+        /// </para>
+        /// </remarks>
+        /// <param name="predictor">
+        /// Prediction for the local player's movement, or null for none. A predictor
+        /// reporting <see cref="LocalMovePredictor.IsEnabled"/> false is treated exactly
+        /// like null: it is the predictor's job to refuse when it cannot reproduce the
+        /// server's arithmetic, and the binder's job to believe it rather than to
+        /// second-guess it with an approximation.
+        /// </param>
+        public WorldViewBinder(IEntityView view, LocalMovePredictor predictor)
         {
             _view = view;
+            _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
         }
+
+        /// <summary>
+        /// Whether the local entity is driven by prediction rather than by the newest
+        /// snapshot. False when no predictor was supplied or the one supplied refused.
+        /// </summary>
+        public bool IsPredicting => _predictor != null;
+
+        /// <summary>
+        /// Measures the server's base tick rate from snapshot arrivals, so the advertised
+        /// rate can be verified rather than trusted.
+        /// </summary>
+        /// <remarks>
+        /// Fed here because this is the one place that already sees every snapshot and
+        /// owns a clock. Reading it costs nothing; ignoring it costs what a wrong tick
+        /// rate costs, which is continuous sub-threshold wrongness that never announces
+        /// itself. See <see cref="TickRateEstimator"/>.
+        /// </remarks>
+        public TickRateEstimator TickRate { get; } = new TickRateEstimator();
 
         /// <summary>Entities currently presented.</summary>
         public int LiveCount => _live.Count;
@@ -69,6 +190,12 @@ namespace Cuvara.Netcode.View
 
         /// <summary>Despawns where the entity simply stopped being listed.</summary>
         public int DespawnsFromAbsence { get; private set; }
+
+        /// <summary>
+        /// Entities re-spawned because the local player's id changed under them. Nonzero
+        /// means a session boundary was crossed without <see cref="Reset"/>.
+        /// </summary>
+        public int Relocalizations { get; private set; }
 
         /// <summary>
         /// Records ids a snapshot named in <c>removed</c>, so the next reconcile can
@@ -105,6 +232,8 @@ namespace Cuvara.Netcode.View
                 return;
             }
 
+            RelocalizeIfLocalIdChanged(localId);
+
             double nowMs = _clock.Elapsed.TotalMilliseconds;
             bool newSnapshot = world.Tick > _lastWorldTick;
 
@@ -123,6 +252,16 @@ namespace Cuvara.Netcode.View
                 _firstSnapshot = false;
                 _lastSnapshotTimeMs = nowMs;
                 _lastWorldTick = world.Tick;
+
+                // The tick carried here is a BASE tick, so its rate is the movement
+                // integration rate even though snapshots arrive at the slower world rate.
+                TickRate.Sample(world.Tick, nowMs / 1000.0);
+
+                // The gap between consecutive snapshot ticks is the server's world
+                // interval, which is exactly how long it keeps integrating a held
+                // direction. Handing it to the predictor here means no consumer has to
+                // know the number, and none can configure it wrongly.
+                _predictor?.SetHoldTicks(TickRate.SnapshotTickGap);
             }
 
             // Compute interpolation factor: 0 = at "from", 1 = at "to"
@@ -144,12 +283,78 @@ namespace Cuvara.Netcode.View
                     continue;
                 }
 
+                var e = kv.Value;
+                bool isLocal = id == localId;
+
                 if (_live.Add(id))
                 {
-                    _view.Spawn(id, id == localId);
+                    // Type is carried on every snapshot the entity appears in, keyframe
+                    // and delta alike, so it is already correct on the pass that first
+                    // sees the id. Null-coalesced because the merger stores whatever the
+                    // wire sent and a view should never have to null-check this.
+                    _view.Spawn(id, isLocal, e.Type ?? string.Empty);
                 }
 
-                var e = kv.Value;
+                if (isLocal && _predictor != null)
+                {
+                    // Prediction owns the local entity's position outright. The snapshot
+                    // is still the authority — it is what Reconcile rewinds to — but what
+                    // gets rendered is the predicted result, which is the whole point:
+                    // the server's answer is by definition a round trip old.
+                    if (newSnapshot)
+                    {
+                        // Adopt the server's speed before replaying: a buff, mount or
+                        // slow changes what the server integrates with, and predicting
+                        // at the old value desyncs every tick with no error on either
+                        // side. Non-positive is ignored inside — on the wire that means
+                        // "not sent", so the configured fallback stands.
+                        _predictor.SetServerSpeed(e.Speed);
+                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
+                    }
+
+                    // Only the time no frame has advanced yet. AdvanceFrame is the
+                    // ordinary clock and stamps _lastRenderMs itself, so this is normally
+                    // a residue near zero; it carries the full gap only when nothing is
+                    // driving frames — a headless harness that pumps snapshots and
+                    // nothing else, which must still see prediction move.
+                    //
+                    // It used to pass the whole wall-clock gap unconditionally while
+                    // AdvanceFrame was separately advancing the same span in frame
+                    // slices, so the predictor's clock ran at ~2x real time. Every
+                    // consequence of that lands on the local avatar alone: base ticks
+                    // accrued twice as fast, so the server's hold window (WorldEvery
+                    // ticks) expired in half the real time it should, and the avatar
+                    // stood still between inputs. That is a stutter no frame rate can
+                    // fix, on the one entity the player is looking at, while remotes —
+                    // driven by the interpolator's own clock — stayed smooth.
+                    // Only when nothing else is driving the clock. AdvanceFrame is the
+                    // ordinary driver and sets _frameDriven; this fallback exists for a
+                    // harness that pumps snapshots and renders nothing, which must still
+                    // see prediction move.
+                    if (!_frameDriven)
+                    {
+                        double unadvancedMs = nowMs - _lastRenderMs;
+                        if (unadvancedMs > 0.0)
+                        {
+                            _predictor.Advance((float)(unadvancedMs / 1000.0));
+                        }
+                    }
+
+                    _lastRenderMs = nowMs;
+
+                    // Kept so AdvanceFrame can re-render between snapshots. Only movement
+                    // is predicted, so HP stays whatever the server last said.
+                    _localHp = e.Hp;
+                    _localMaxHp = e.MaxHp;
+                    _localSeen = true;
+
+                    var predicted = _predictor.Position;
+                    _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+
+                    // HP is deliberately still the server's. Only movement is predicted;
+                    // see LocalMovePredictor for why combat is not.
+                    continue;
+                }
 
                 if (newSnapshot)
                 {
@@ -181,7 +386,11 @@ namespace Cuvara.Netcode.View
                 if (_interp.TryGetValue(id, out var entry))
                 {
                     float ix, iy;
-                    if (entry.HasFrom)
+                    // 'id != localId': the local player renders at the newest received
+                    // position, never behind it. See the class remarks — this is a render
+                    // delay removal, not prediction, and a late snapshot holds rather
+                    // than extrapolates.
+                    if (entry.HasFrom && !isLocal)
                     {
                         ix = entry.FromX + (entry.ToX - entry.FromX) * t;
                         iy = entry.FromY + (entry.ToY - entry.FromY) * t;
@@ -198,6 +407,8 @@ namespace Cuvara.Netcode.View
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
                 }
             }
+
+            _lastRenderMs = nowMs;
 
             // Anything we hold that the world no longer lists is gone. Collected first
             // because the view mutates the set.
@@ -228,9 +439,67 @@ namespace Cuvara.Netcode.View
             }
         }
 
+        /// <summary>
+        /// Advances prediction and re-renders the local entity. Call once per rendered
+        /// frame, from <c>Update</c> or equivalent — not from snapshot handling.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Without this the smoothing does nothing observable.</b> Prediction used to
+        /// be advanced, and the local entity re-rendered, only inside snapshot
+        /// processing — so the rendered position changed at the <i>world</i> rate, 15 Hz,
+        /// however fast the client was drawing. Every frame between snapshots showed the
+        /// avatar perfectly still, and the frame a snapshot landed on showed the whole
+        /// interval's movement at once. Spreading a step across an interval is worthless
+        /// when nothing samples the position during that interval: the interpolation was
+        /// only ever read at its endpoints.
+        /// </para>
+        /// <para>
+        /// It shows up in frame-delta burstiness as roughly <i>frames per snapshot
+        /// interval</i> — about 20 at 300 fps against 15 Hz — which is the band the live
+        /// measurement reported on the predicting and non-predicting paths alike. That
+        /// the two were similar was the clue: a number that does not care whether
+        /// prediction is on is not measuring prediction.
+        /// </para>
+        /// <para>
+        /// Safe before a local entity exists and safe without a predictor — it no-ops in
+        /// both cases, and ignores a non-positive delta.
+        /// </para>
+        /// </remarks>
+        /// <param name="deltaTime">Seconds since the previous call.</param>
+        public void AdvanceFrame(float deltaTime)
+        {
+            if (_predictor == null || !_localSeen || deltaTime <= 0f)
+            {
+                return;
+            }
+
+            _predictor.Advance(deltaTime);
+
+            // Claim the clock. Both drivers share it and only one may advance it, or the
+            // predictor runs fast: Tick is called once per rendered frame by a real
+            // client, not once per arriving snapshot, so leaving the snapshot path
+            // advancing too made every frame count twice and the predictor's clock ran at
+            // 2x real time.
+            //
+            // The whole cost of that lands on the local avatar. Base ticks accrued twice
+            // as fast, so the server's hold window (WorldEvery base ticks) expired in half
+            // the real time it should, and the avatar stood still between inputs —
+            // measured at 15 sends per real second being read as one every 0.133s. No
+            // frame rate fixes it, and remote entities, driven by the interpolator's own
+            // clock, stayed smooth throughout. "Only the player I control stutters" is the
+            // signature of exactly this.
+            _frameDriven = true;
+            _lastRenderMs = _clock.Elapsed.TotalMilliseconds;
+
+            var predicted = _predictor.Position;
+            _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
+        }
+
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
         public void Reset()
         {
+            _frameDriven = false;
             foreach (var id in _live)
             {
                 _view.Despawn(id);
@@ -239,10 +508,84 @@ namespace Cuvara.Netcode.View
             _live.Clear();
             _interp.Clear();
             _explicitlyRemoved.Clear();
+            _predictor?.Reset();
+            TickRate.Reset();
+            _localId = string.Empty;
+            _localHp = 0;
+            _localMaxHp = 0;
+            _localSeen = false;
             _firstSnapshot = true;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
+            Relocalizations = 0;
+        }
+
+        /// <summary>
+        /// Drops the presentation of any entity whose locality changed because
+        /// <c>localId</c> did, so the next pass re-spawns it with the right flag.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A backstop, not the mechanism.</b> The DOTS sample's rejoin path resets this
+        /// binder on a session boundary, which is the correct fix and makes this path
+        /// unreachable from there. This exists because the failure it prevents is silent
+        /// and expensive: <c>isLocal</c> is handed to a view once at
+        /// <see cref="IEntityView.Spawn"/> and the view is entitled to keep it — locality
+        /// does not change over an entity's lifetime — but <i>which id is local</i> is a
+        /// session fact, and a client that rejoins as a different user while the server
+        /// still holds the previous session's entity (30 s, 60 s in a dungeon) would leave
+        /// the old avatar presenting itself as the local player forever. Any caller that
+        /// forgets to reset gets a wrong screen with no error.
+        /// </para>
+        /// <para>
+        /// Despawn-then-respawn rather than a fourth <see cref="IEntityView"/> method:
+        /// 0.4.0 already broke every implementation of that interface over one parameter,
+        /// and this needs no new vocabulary — it is the same pair of calls a despawn and
+        /// respawn across the boundary would have produced. At most two entities can flip.
+        /// </para>
+        /// <para>
+        /// Counted in <see cref="Relocalizations"/>, deliberately not in
+        /// <see cref="DespawnsFromAbsence"/>: the entity did not leave, and folding these
+        /// into that counter would make an AOI-churn diagnostic lie in exactly the
+        /// situation someone would be reading it.
+        /// </para>
+        /// </remarks>
+        private void RelocalizeIfLocalIdChanged(string localId)
+        {
+            var incoming = localId ?? string.Empty;
+            if (string.Equals(incoming, _localId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // Only two ids can have changed locality: the one that used to be local and
+            // the one that now is. Every other entity's answer is unchanged, so
+            // re-spawning them would be churn for nothing.
+            Forget(_localId);
+            Forget(incoming);
+
+            // The predicted position belonged to the previous player. Replaying this
+            // player's inputs from that anchor would be prediction about the wrong avatar.
+            _predictor?.Reset();
+
+            _localId = incoming;
+        }
+
+        /// <summary>
+        /// Drops one id from the presentation so the next pass treats it as new. No-op for
+        /// an id that is not currently presented.
+        /// </summary>
+        private void Forget(string id)
+        {
+            if (string.IsNullOrEmpty(id) || !_live.Remove(id))
+            {
+                return;
+            }
+
+            _interp.Remove(id);
+            _view.Despawn(id);
+            Relocalizations++;
         }
     }
 }

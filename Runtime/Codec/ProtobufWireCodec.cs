@@ -166,7 +166,7 @@ namespace Cuvara.Netcode.Codec
                     case MsgType.JoinTokenResp:
                     {
                         var m = Pb.JoinTokenResponse.Parser.ParseFrom(bytes);
-                        return new Msg.JoinTokenResponse { Ok = m.Ok, UserId = m.UserId, Error = m.Error };
+                        return new Msg.JoinTokenResponse { Ok = m.Ok, UserId = m.UserId, Error = m.Error, TickRate = m.TickRate };
                     }
 
                     case MsgType.Snapshot:
@@ -236,6 +236,7 @@ namespace Cuvara.Netcode.Codec
                     Hp = e.Hp,
                     MaxHp = e.MaxHp,
                     Handle = e.Handle,
+                    Speed = e.Speed,
                 });
             }
 
