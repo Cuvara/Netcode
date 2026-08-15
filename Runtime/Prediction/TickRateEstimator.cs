@@ -56,10 +56,33 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public const float DisagreementTolerance = 0.15f;
 
+        private int _minGap;
         private long _firstTick;
         private double _firstSeconds;
         private long _lastTick;
         private double _lastSeconds;
+
+        /// <summary>
+        /// Base ticks between consecutive snapshots — the server's <c>WorldEvery</c>, and
+        /// therefore the length of its held-movement window. Zero until two snapshots
+        /// have been seen.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Snapshots are emitted once per world tick, so the gap between the base ticks
+        /// two consecutive ones carry <i>is</i> the ratio of the two rates. Nothing on the
+        /// wire states it and nothing needs to: it is already implied by data the client
+        /// receives, and deriving it is one fewer field to advertise, one fewer constant
+        /// to configure, and one fewer thing that can be configured wrongly.
+        /// </para>
+        /// <para>
+        /// <b>Minimum, not mean.</b> A dropped or coalesced snapshot only ever widens a
+        /// gap, so the smallest observed gap is the true interval and an average is biased
+        /// upward by exactly the losses. Overstating the window would make the client
+        /// predict motion the server has already stopped.
+        /// </para>
+        /// </remarks>
+        public int SnapshotTickGap => _minGap;
 
         /// <summary>Snapshots sampled since the last <see cref="Reset"/>.</summary>
         public int Samples { get; private set; }
@@ -104,6 +127,12 @@ namespace Cuvara.Netcode.Prediction
                 return;
             }
 
+            long gap = tick - _lastTick;
+            if (gap > 0 && gap < int.MaxValue && (_minGap == 0 || gap < _minGap))
+            {
+                _minGap = (int)gap;
+            }
+
             _lastTick = tick;
             _lastSeconds = nowSeconds;
             Samples++;
@@ -138,6 +167,7 @@ namespace Cuvara.Netcode.Prediction
         public void Reset()
         {
             Samples = 0;
+            _minGap = 0;
             _firstTick = 0;
             _lastTick = 0;
             _firstSeconds = 0;

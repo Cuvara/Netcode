@@ -209,6 +209,84 @@ namespace Cuvara.Netcode.Tests.Editor
                 "smaller wrong movement.");
         }
 
+        // ── The gap between the two rates ──
+
+        /// <summary>
+        /// The step must be spread across the interval until the <b>next input</b>, not
+        /// across the server's integration timestep, when those differ.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every other test in this fixture uses <see cref="TickRate"/> for both roles, so
+        /// the integration timestep and the input interval are the same number and the
+        /// distinction is invisible. They stopped being the same number in 0.12.0: the
+        /// predictor takes its timestep from the server's 60 Hz base tick while the client
+        /// sends input at its own, slower cadence.
+        /// </para>
+        /// <para>
+        /// When the smoothing interval is the shorter of the two, the step is fully shown
+        /// early and the avatar then sits still until the next input — measured at 60 Hz
+        /// integration and 15 Hz sends, 150 of 200 render frames were frozen. That is the
+        /// stutter the smoothing exists to remove, reintroduced by fixing the tick rate,
+        /// and no correction is ever raised because the simulation is perfectly correct.
+        /// It is only the rendering that is wrong.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void EveryFrameMovesWhenInputsAreSlowerThanTheIntegrationStep()
+        {
+            const int integrationHz = 60;
+            const int sendHz = 15;
+
+            var p = new LocalMovePredictor(
+                new PredictionSettings(integrationHz, Speed, Bounds));
+            p.Reconcile(Vec2.Zero, 0);
+
+            float sendInterval = 1f / sendHz;
+            const int framesPerInterval = 20;
+            float frame = sendInterval / framesPerInterval;
+
+            float previous = p.Position.X;
+            var still = 0;
+            var counted = 0;
+
+            const int inputs = 5;
+            for (var input = 1; input <= inputs; input++)
+            {
+                p.RecordInput(input, 1f, 0f);
+                for (var f = 0; f < framesPerInterval; f++)
+                {
+                    p.Advance(frame);
+                    float now = p.Position.X;
+
+                    // The first input is excluded, and only the first. No interval has
+                    // been observed at that point, so the span falls back to the
+                    // integration timestep and the step is shown early. Nothing can be
+                    // measured from one sample; the alternative is for the client to
+                    // declare its send rate, which is another constant free to drift
+                    // from the truth — the failure this whole area keeps producing.
+                    if (input == 1) continue;
+
+                    counted++;
+                    if (now - previous <= 1e-6f) still++;
+                    previous = now;
+                }
+
+                if (input == 1) previous = p.Position.X;
+            }
+
+            Assert.That(still, Is.Zero,
+                $"{still} of {counted} render frames after the first input did not move. " +
+                "The step is being spread over the integration timestep instead of the " +
+                "interval until the next input, so the avatar arrives early and then " +
+                "freezes. This is invisible to every correction counter because the " +
+                "simulation is right and only the rendering is wrong.");
+
+            Assert.That(p.ObservedInputInterval, Is.EqualTo(sendInterval).Within(1e-5f),
+                "the measured input interval must converge on the real send cadence, " +
+                "since it is what the smoothing span is taken from");
+        }
+
         [Test]
         public void ResetClearsSmoothingState()
         {

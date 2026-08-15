@@ -5,6 +5,217 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-15
+
+Prediction reproduces the server's **held movement**. Until now the client took one step
+per input while the server takes one per base tick for a whole world interval, so the
+client predicted a quarter of the server's motion at a 15 Hz send rate against a 60 Hz
+base tick — a corrections-on-every-input defect that never once snapped.
+
+Found by the assertion added in 0.12.2. That assertion was written to catch the tick-rate
+mismatch and caught a second, unrelated defect with the same signature on its first live
+run, which is the argument for asserting the healthy case rather than only the failing
+one.
+
+### The rule, from the server source
+
+`InputHandler.ProcessInput` steps once on the input's own base tick and records the
+direction as held. `InputHandler.ApplyHeldMovement` — called from `TickLoop` on **every**
+base tick, including ticks where no packet arrived at all — steps again while
+`baseTick - heldFrom < holdTicks`, where `holdTicks` is `_rates.WorldEvery`, four at
+60/15. An explicit stop (`MoveResult.None`) clears the hold immediately; a rejected
+vector leaves it alone.
+
+One input at 15 Hz therefore produces four steps, `4 x 5/60 = 0.3333`, and the server
+moves at the configured 5 u/s. The client produced `0.0833` and moved at 1.25.
+
+### Fixed
+
+- **The predictor is now tick-driven, like the server.** `Advance` runs whole base ticks
+  and integrates the held direction on each, instead of moving only when an input is
+  recorded. Replay reproduces the same timeline rather than one step per pending input,
+  so the live path and replay agree and a reconcile no longer injects a correction the
+  network did not cause.
+- **The hold window is measured, not configured.** Snapshots are emitted once per world
+  tick, so the gap between the base ticks two consecutive snapshots carry *is*
+  `WorldEvery`. `TickRateEstimator.SnapshotTickGap` derives it and `WorldViewBinder` hands
+  it to the predictor, so no consumer has to know the number and none can set it wrongly.
+  The minimum gap is used rather than the mean: a dropped snapshot only widens a gap, so
+  an average is biased upward by exactly the losses.
+- **Until a hold has been observed, behaviour is unchanged** — `HoldTicks` is 1 and the
+  predictor takes one step per input, as before. An unmeasured window is not guessed at.
+- **The smoothing span from 0.12.3 is now conditional.** With a hold, steps arrive one
+  timestep apart however slowly the client sends, so spreading them over the input
+  interval would leave the rendered position permanently four timesteps behind its own
+  simulation. That fix addressed a symptom whose cause was the missing hold; it is
+  retained only for the no-hold case.
+
+### Corrected
+
+**The "Not fixed here" note in 0.12.3 was wrong and is withdrawn.** It claimed the server
+also moves at 1.25 u/s and that the fix was raising the client's send rate to 60 Hz. The
+server moves at the configured 5; only the client was slow. Raising the send rate would
+have masked the shortfall at four times the input traffic per client and fixed nothing.
+The error came from reading `applyMovement` in the drain loop, concluding one step per
+input, and not noticing that the hold path runs outside the drain entirely.
+
+This also settles the `0.2500` figure the measurement reported with prediction off: three
+steps, which is what a snapshot sampling mid-hold shows. The original 0.3333 expectation
+was right and the correction offered against it was wrong.
+
+### Added
+
+- `LocalMovePredictor.HoldTicks` / `SetHoldTicks(int)` — the observed window, on the same
+  "values below 1 are not sent" rule the speed and tick-rate fields use.
+- `TickRateEstimator.SnapshotTickGap` — base ticks between consecutive snapshots.
+- `HeldMovementParityTests`, seven cases asserting the predictor against a restatement of
+  the server's scheduling that drives the same `MovementSystem.TryMove`, so only the
+  scheduling is compared and the arithmetic stays shared. Includes a direct assertion
+  that one second of held input travels the configured speed: client and server can agree
+  perfectly on a wrong number, and the absence of corrections cannot detect that.
+
+### Known gap, upstream
+
+`gameserver-dotnet/docs/API.md` states `dt = 1 / tick_rate` and "movement integrates once
+per simulation tick". Both are true of the server and both read, on the client, as "once
+per input". Nothing in the normative section says the newest input is held and
+re-integrated until a world interval expires, or that a deadzone clears it. A client
+implemented exactly to the document builds the predictor this release replaces. This is
+the third server behaviour a client has had to infer from source; it belongs beside the
+`tick_rate` contract and is being raised against the backend.
+
+## [0.12.3] - 2026-08-15
+
+Fixing the tick rate in 0.12.0 made the visible stutter worse, and this is the repair.
+
+Render smoothing spread each step over the integration timestep. Until 0.12.0 that was
+also the interval between inputs, because the predictor was built from the client's own
+rate, so the two were the same number and nothing distinguished them. Once the timestep
+came from the server's 60 Hz base tick while the client kept sending at 15, the whole
+step was shown in the first 16.7 ms and the avatar then sat still for the remaining 50.
+Measured at 300 fps: **150 of 200 render frames frozen**.
+
+No counter could have shown this. The simulation was exactly right — the predicted
+positions matched the server bit for bit and no correction was ever raised. Only the
+rendering was wrong, and the only symptom was a user saying it did not feel smooth.
+
+### Fixed
+
+- **The smoothing span is now the observed interval between inputs**, not the integration
+  timestep. It is measured rather than declared: the alternative is for the client to
+  announce its send rate, which is one more constant free to drift from the truth, and
+  drifting constants are the failure this area has now produced three times. Clamped
+  below at the timestep so a burst cannot drive the span to zero; a gap longer than four
+  intervals is treated as a pause and restarts the measurement rather than smearing the
+  next step across the length of the idle.
+
+  This remains interpolation. The span changes, the bound does not — progress still
+  saturates at 1, so the rendered position never passes the step an input actually
+  produced, however late the next one is. A longer span makes the avatar arrive later,
+  never further.
+
+  The first input after a connect or a pause is still shown over the timestep, because no
+  interval has been observed yet and nothing can be measured from one sample.
+
+### Added
+
+- `LocalMovePredictor.ObservedInputInterval` — the measured cadence, for diagnostics. A
+  value far from the client's intended send period means inputs are not being submitted
+  at the rate the client believes.
+- `RenderSmoothingTests.EveryFrameMovesWhenInputsAreSlowerThanTheIntegrationStep`, which
+  is the test that was missing. Every other test in that fixture used one constant for
+  both the integration timestep and the input interval, so the two were equal by
+  construction and the entire class of defect was invisible to it.
+
+### Not fixed here
+
+One accepted input displaces `speed / tickRate`, and the server applies one step per
+input received. A client sending at 15 Hz against a 60 Hz base tick therefore moves at
+**1.25 u/s against a configured 5** — and client and server agree perfectly while doing
+it, so no correction is raised and nothing in the package can detect it. The fix is for
+the client to send at the server's base tick rate, which is four times the input traffic
+per client and lands on the bandwidth budget in ADR-7. That is a project decision, not a
+package one, and it is open.
+
+## [0.12.2] - 2026-08-15
+
+The instrument that exists to catch a tick-rate mismatch was itself running at the wrong
+tick rate. `PredictionLatencyMeasurement` built its `PredictionSettings` from
+`LiveBackendConfig.TickRate` — a constant defaulting to 15 — before it had connected, so
+against the now-60 Hz server it predicted a step four times too long on every input. The
+run it produced reported `corrections smoothed = 20` out of 20 samples and every other
+number it printed was measured through that error.
+
+This is the same defect 0.12.0 shipped a fix for in the consumer path, and the harness
+kept its own copy of the constant. A measurement that does not obtain its parameters the
+way the thing it measures obtains them is measuring a different system.
+
+Found and diagnosed independently by @dyCuong03 in #36, which reached the same
+ordering fix first. This lands over it because #36 did not compile — an escaping
+artifact in its report string — and because the cross-check against the measured
+rate was still missing. The framing of the defect below is theirs.
+
+### Fixed
+
+- **The measurement now connects before it builds the predictor.** The timestep comes
+  from the join response, so there is no longer an order in which a predictor can exist
+  without the server's rate. `PredictionSettings.FromServer` is used exactly as the
+  sample uses it, with `LiveBackendConfig.TickRate` demoted to the fallback it always
+  should have been.
+
+### Added
+
+- **The rate in use is printed, and the measured rate beside it.** Each configuration
+  reports `TICK RATE IN USE ... (advertised by the server)` or `<- FALLBACK, server
+  advertised none`, then the rate `TickRateEstimator` recovered from snapshot arrivals
+  and whether the two agree. The previous header printed the configured constant as
+  though it were operative, which is precisely how this went unnoticed.
+- **Three assertions on the healthy configuration**, so a repeat fails rather than
+  reports: the measured rate must not disagree with the rate in use, `Snaps` must be
+  zero, and `SmoothedCorrections` must not exceed a quarter of the samples. The last
+  carries the note that when it last fired it was a 4x tick-rate mismatch that no other
+  counter showed — every individual correction was 0.25 units, under the 0.5 snap
+  threshold, so the failure smoothed silently instead of snapping.
+- **The expected displacement per input is printed next to the largest frame jump**, as
+  `speed / tickRateInUse`, with the observed/expected ratio and a marker when it exceeds
+  1.5. This is instrumentation for an open question rather than an answer to it: a
+  prediction-off run reported a largest frame jump of `0.2500` where one accepted input
+  at speed 5 on a 60 Hz integration step should displace `0.0833`. The server applies one
+  movement step per received input — `TickLoop` sets `applyMovement` only for the newest
+  input per handle per tick — so three steps' worth of displacement between consecutive
+  snapshots is not accounted for by the send rate alone. The ratio is now in the output
+  instead of being reconstructed afterwards from numbers that had to be assumed.
+
+## [0.12.1] - 2026-08-15
+
+The smoothness figure was not comparable between runs, and the way that surfaced is worth
+recording: two runs of the same build reported a largest single-frame jump of **0.0149**
+and **0.0244** world units — a 60% spread that looks like measurement noise.
+
+**It is not noise. It is frame rate.** Those values imply **336 fps and 205 fps**, and a
+smoothed step necessarily divides into larger pieces when there are fewer frames to divide
+it across. The metric was frame-rate dependent by construction, so it could not be compared
+between runs, between machines, or between a developer's Editor and a player's build.
+
+### Added
+
+- **`FrameDeltaBurstiness` — worst frame ÷ average frame.** **1.0 is perfect**: every frame
+  moved the same distance. Unsmoothed motion puts a whole step on one frame and nothing on
+  the rest, so the ratio becomes the number of frames per input interval. This is the
+  number to quote; the raw distances are kept for context and now print the frame rate
+  beside them so nobody compares two of them without noticing.
+
+- **`ObservedFps`**, measured over the sampled frames.
+
+### Note
+
+The harness has now produced two figures that needed explaining rather than reporting —
+this one, and a "forced divergence" that forced none. Both were caught by someone asking
+why a number looked odd rather than by anything automatic. **A measurement tool needs its
+own scepticism applied to it**, and the useful habit is checking whether a suspicious value
+has a mechanical explanation before treating it as data: 0.0149 versus 0.0244 was one
+division away from being obvious.
+
 ## [0.12.0] - 2026-08-15
 
 0.11.0 read the advertised tick rate. This makes the client **verify** it, and makes the
