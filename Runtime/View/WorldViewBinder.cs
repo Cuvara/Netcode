@@ -250,6 +250,12 @@ namespace Cuvara.Netcode.View
                 // The tick carried here is a BASE tick, so its rate is the movement
                 // integration rate even though snapshots arrive at the slower world rate.
                 TickRate.Sample(world.Tick, nowMs / 1000.0);
+
+                // The gap between consecutive snapshot ticks is the server's world
+                // interval, which is exactly how long it keeps integrating a held
+                // direction. Handing it to the predictor here means no consumer has to
+                // know the number, and none can configure it wrongly.
+                _predictor?.SetHoldTicks(TickRate.SnapshotTickGap);
             }
 
             // Compute interpolation factor: 0 = at "from", 1 = at "to"
