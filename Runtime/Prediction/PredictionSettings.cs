@@ -73,11 +73,63 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Play area the server clamps positions into.</summary>
         public readonly MapBounds Bounds;
 
+        /// <summary>
+        /// True when <see cref="TickRate"/> is a locally configured guess because the
+        /// server advertised none. <b>A caller must surface this</b> — see
+        /// <see cref="FromServer"/>.
+        /// </summary>
+        public readonly bool TickRateIsFallback;
+
         public PredictionSettings(int tickRate, float speed, MapBounds bounds)
+            : this(tickRate, speed, bounds, tickRateIsFallback: false)
+        {
+        }
+
+        private PredictionSettings(int tickRate, float speed, MapBounds bounds, bool tickRateIsFallback)
         {
             TickRate = tickRate;
             Speed = speed;
             Bounds = bounds;
+            TickRateIsFallback = tickRateIsFallback;
+        }
+
+        /// <summary>
+        /// Builds settings from the tick rate the server advertised in its join response,
+        /// falling back to a configured rate when it advertised none.
+        /// </summary>
+        /// <param name="advertisedTickRate">
+        /// <c>NetworkClient.TickRate</c>. <b>Zero means "not advertised"</b>, never a rate.
+        /// </param>
+        /// <param name="fallbackTickRate">
+        /// Used only when nothing was advertised, and recorded in
+        /// <see cref="TickRateIsFallback"/> so the substitution is visible.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>The fallback must not be silent, and this is what makes it observable.</b>
+        /// The protocol permits falling back to a configured rate only if the substitution
+        /// is surfaced — logged once, counted, or shown in a dev build — because a silent
+        /// fallback is behaviourally the code that predated the field and reintroduces the
+        /// defect it exists to close. This flag is that surface; a caller is expected to
+        /// report it.
+        /// </para>
+        /// <para>
+        /// <b>Why the rule is stricter than the one for <c>speed</c>.</b> Speed is
+        /// per-entity and a wrong value is bounded by that entity's real speed. Tick rate
+        /// is session-constant and scales <i>every</i> predicted displacement by a whole
+        /// ratio — 15 against 60 is 4× per input, which lands under a typical correction
+        /// threshold and so smooths rather than snaps. It never announces itself.
+        /// </para>
+        /// </remarks>
+        public static PredictionSettings FromServer(
+            uint advertisedTickRate, int fallbackTickRate, float speed, MapBounds bounds)
+        {
+            bool advertised = advertisedTickRate > 0u;
+            return new PredictionSettings(
+                advertised ? (int)advertisedTickRate : fallbackTickRate,
+                speed,
+                bounds,
+                tickRateIsFallback: !advertised);
         }
 
         /// <summary>
