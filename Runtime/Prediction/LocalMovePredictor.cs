@@ -287,6 +287,23 @@ namespace Cuvara.Netcode.Prediction
         public int ReplayedSteps { get; private set; }
 
         /// <summary>
+        /// Times <see cref="Reconcile"/> has folded in an authoritative position.
+        /// </summary>
+        /// <remarks>
+        /// Distinct from <see cref="ReplayedSteps"/>, and the distinction matters: a
+        /// reconcile with nothing pending replays nothing, so zero replay steps does not
+        /// mean reconciliation is not running. Diagnosing that took a live run and an
+        /// isolation experiment; this counter makes it readable directly.
+        /// <para>
+        /// The seeding call — the first <see cref="Reconcile"/> on a fresh predictor — is
+        /// deliberately <b>not</b> counted. It adopts a starting position without
+        /// comparing anything, so counting it would make a nonzero value mean "we
+        /// initialised" rather than "a real reconcile happened".
+        /// </para>
+        /// </remarks>
+        public int Reconciles { get; private set; }
+
+        /// <summary>
         /// Inputs discarded because the buffer was full — the server has stopped
         /// acknowledging. Nonzero means predictions are running against a history that is
         /// missing its oldest entries and can no longer be fully replayed.
@@ -390,6 +407,8 @@ namespace Cuvara.Netcode.Prediction
                 LastCorrection = 0f;
                 return;
             }
+
+            Reconciles++;
 
             Vec2 before = _predicted;
 
@@ -540,6 +559,7 @@ namespace Cuvara.Netcode.Prediction
             Snaps = 0;
             SmoothedCorrections = 0;
             ReplayedSteps = 0;
+            Reconciles = 0;
             DroppedInputs = 0;
             RejectedInputs = 0;
         }

@@ -92,12 +92,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         private const float MoveEpsilon = 0.001f;
 
-        // How the divergence run forces a disagreement, and why not by a wrong speed:
-        // the wire carries per-entity speed now (field 9) and the binder feeds it to
-        // SetServerSpeed on every snapshot, so a deliberately wrong PredictionSettings
-        // speed is corrected back to the server's within one snapshot and no divergence
-        // survives. Dropping an input instead cannot be undone that way — the client
-        // predicts a step the server never takes, and the next snapshot must correct it.
+        // How the divergence run forces a disagreement, and the two ways that do NOT work:
+        //
+        //   A wrong SPEED does not survive. The wire carries per-entity speed (field 9)
+        //   and the binder feeds it to SetServerSpeed every snapshot, so the error is
+        //   corrected back within one snapshot.
+        //
+        //   DROPPING the input does not diverge at all, which cost a live run to learn.
+        //   An input that is never sent is never acknowledged, so it is never removed
+        //   from the pending buffer, so every reconcile replays it on top of the
+        //   authoritative position and reproduces the prediction exactly. Correction is
+        //   zero because nothing HAS diverged: from the client's side a dropped input is
+        //   indistinguishable from one still in flight, which is what it is.
+        //
+        // What works is sending a DIFFERENT vector than the one predicted. The server
+        // acknowledges the tick — so the input leaves the buffer — having moved somewhere
+        // else, and the disagreement is real and permanent.
 
         private sealed class Sample
         {
@@ -113,6 +123,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public List<Sample> Samples = new List<Sample>();
             public int PendingPeak;
             public int ReplayedSteps;
+            public int Reconciles;
             public int Snaps;
             public int SmoothedCorrections;
             public float MaxCorrection;
@@ -185,9 +196,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // needs to are indistinguishable.
             //
             // Its TIMINGS are not comparable with the other two and are not used in the
-            // comparison — dropping inputs delays acknowledgement by design. Only its
+            // comparison — the avatar is being deliberately mispredicted. Only its
             // MaxCorrection is read.
-            var diverging = await MeasureAsync(predict: true, dropSampleInput: true);
+            var diverging = await MeasureAsync(predict: true, forceDivergence: true);
 
             Report(withPrediction);
             Report(withoutPrediction);
@@ -248,18 +259,18 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // The falsifiability check. A predictor fed a speed the server is not using
             // MUST be corrected; if this is zero too, then corrections never happen at
             // all and the healthy run's 0.0000 meant nothing.
+            Assert.That(diverging.Reconciles, Is.GreaterThan(0),
+                "the divergence run never reconciled at all, so it cannot say anything " +
+                "about whether corrections work.");
+
             Assert.That(diverging.MaxCorrection, Is.GreaterThan(0f),
-                "the predictor predicted movement from inputs the server never received, " +
-                "and STILL reported no correction. That means reconcile is not comparing " +
-                "against the server's position at all, and the zero correction on the " +
+                "the client predicted a step while sending the server a zero vector, so " +
+                "the two MUST disagree by one step once the tick is acknowledged — and " +
+                "the predictor still reported no correction. That means reconcile is not " +
+                "comparing against the server's position, and the zero correction on the " +
                 "healthy run above is meaningless rather than reassuring.");
         });
 
-        /// <param name="dropSampleInput">
-        /// Predict the sample input locally but never send it, so the server cannot have
-        /// applied it. Forces a real disagreement; see the note above on why a wrong speed
-        /// no longer works for this.
-        /// </param>
         /// <summary>
         /// Names the first backend endpoint that cannot be reached, or null when both can.
         /// </summary>
@@ -323,12 +334,18 @@ namespace Cuvara.Netcode.Tests.PlayMode
             }
         }
 
-        private static async UniTask<Run> MeasureAsync(bool predict, bool dropSampleInput = false)
+        /// <param name="forceDivergence">
+        /// Send a zero vector while predicting a non-zero one, so the server acknowledges
+        /// the tick having moved nowhere while the client predicted a step. See the note
+        /// on <c>WrongSpeed</c> above for why the two more obvious approaches — a wrong
+        /// speed, and dropping the input — do not produce a divergence at all.
+        /// </param>
+        private static async UniTask<Run> MeasureAsync(bool predict, bool forceDivergence = false)
         {
             var run = new Run
             {
-                Name = dropSampleInput
-                    ? "prediction ON, sample input DROPPED (forced divergence; timings not comparable)"
+                Name = forceDivergence
+                    ? "prediction ON, predicted vector != sent vector (forced divergence)"
                     : predict ? "prediction ON" : "prediction OFF",
             };
 
@@ -339,7 +356,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // Unique device per run: two runs in one session must not share a player
             // entity, or the second inherits the first's position and speed.
             var jwt = await auth.GetGatewayTokenAsync(
-                $"measure-{(dropSampleInput ? "drop" : predict ? "on" : "off")}-{DateTime.UtcNow.Ticks}", ct);
+                $"measure-{(forceDivergence ? "diverge" : predict ? "on" : "off")}-{DateTime.UtcNow.Ticks}", ct);
 
             using var client = new NetworkClient(
                 new NetworkSettings
@@ -391,11 +408,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 long sampleTick = tick;
                 float t0 = Time.realtimeSinceStartup;
 
-                // The divergence run predicts this step but never sends it.
-                if (!dropSampleInput)
-                {
-                    client.Session?.SendInput(sampleTick, 1f, 0f, "");
-                }
+                // The divergence run sends a vector the server will act on (nothing)
+                // while predicting one it will not. The tick is still SENT, so it is
+                // acknowledged and leaves the buffer — which is what makes the
+                // disagreement real rather than merely pending.
+                client.Session?.SendInput(sampleTick, forceDivergence ? 0f : 1f, 0f, "");
                 predictor?.RecordInput(sampleTick, 1f, 0f);
 
                 var sample = new Sample { VisibleTimedOut = true, AuthoritativeTimedOut = true };
@@ -446,6 +463,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             if (predictor != null)
             {
                 run.ReplayedSteps = predictor.ReplayedSteps;
+                run.Reconciles = predictor.Reconciles;
                 run.Snaps = predictor.Snaps;
                 run.SmoothedCorrections = predictor.SmoothedCorrections;
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
@@ -482,7 +500,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  input -> authoritative   {Describe(auth)}\n" +
                 $"  predicting               {run.Predicting}\n" +
                 $"  pending peak             {run.PendingPeak}\n" +
-                $"  replayed steps           {run.ReplayedSteps}\n" +
+                $"  reconciles               {run.Reconciles}\n" +
+                $"  replayed steps           {run.ReplayedSteps}   (zero is normal when nothing was pending)\n" +
                 $"  corrections smoothed     {run.SmoothedCorrections}\n" +
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
