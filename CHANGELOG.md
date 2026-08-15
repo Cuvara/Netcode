@@ -5,6 +5,55 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-15
+
+**Consumers must now call `WorldViewBinder.AdvanceFrame(deltaTime)` once per rendered
+frame.** Without it the smoothing this package has spent five releases on is computed and
+never sampled.
+
+### The defect
+
+Prediction was advanced, and the local entity re-rendered, **only inside snapshot
+processing**. The rendered position therefore changed at the **world** rate — 15 Hz at
+the default configuration — however fast the client was drawing. Every frame between
+snapshots showed the avatar perfectly still; the frame a snapshot landed on showed the
+whole interval's movement at once.
+
+Spreading a step across an interval achieves nothing when nothing samples the position
+during that interval. The interpolation was only ever read at its endpoints.
+
+Nothing reported it. Positions were correct, corrections were zero, `input -> visible`
+was unaffected at 0.1 ms. It surfaces only in frame-delta burstiness, as roughly *frames
+per snapshot interval* — about 20 at 300 fps against 15 Hz.
+
+**The clue was in the measurement all along and was read past three times:** the
+predicting and non-predicting configurations reported burstiness in the same band. A
+number that does not care whether prediction is switched on is not measuring prediction.
+
+### Added
+
+- **`WorldViewBinder.AdvanceFrame(float deltaTime)`** — advances prediction and re-renders
+  the local entity. Call once per frame from `Update` or equivalent, separately from
+  snapshot handling. No-ops safely before a local entity exists and when there is no
+  predictor, so it can be called unconditionally.
+- Called every frame by the DOTS sample and by both frame loops in the live measurement.
+- `WorldViewBinderTests` covers it, including that it is safe with no predictor and no
+  local entity. Mutating `AdvanceFrame` to a no-op fails the first of those.
+
+### Why no test caught this
+
+Every case in `WorldViewBinderTests` drives the binder by feeding it snapshots. **The
+frame loop was not modelled at all**, so a position that only moved on snapshots was
+indistinguishable from a correct one. The same shape as the smoothing fixture using one
+constant for two different rates, and as the gate that could not go red: the fixture could
+not express the failure.
+
+### Not addressed
+
+The `2.00`-step correction is unchanged and deliberately not touched, so this release's
+effect on burstiness is attributable to one change. The phase fix — the snapshot's server
+tick as an anchor for replay — is next.
+
 ## [0.14.1] - 2026-08-15
 
 Measurement and tests. No runtime change.

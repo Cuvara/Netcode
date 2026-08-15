@@ -570,6 +570,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             long tick = 0;
             var lastSendAt = 0f;
+            float lastFrameAt = Time.realtimeSinceStartup;
 
             // The SEND cadence, which is a client choice and deliberately not the server's
             // integration rate. Conflating the two is what produced the defect above.
@@ -658,6 +659,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         run.MaxCorrection = Math.Max(run.MaxCorrection, predictor.LastCorrection);
                     }
 
+                    // The sampling loop is a frame loop too, and it is the one whose
+                    // frame deltas become the burstiness figure.
+                    float frameNow = Time.realtimeSinceStartup;
+                    binder.AdvanceFrame(frameNow - lastFrameAt);
+                    lastFrameAt = frameNow;
+
                     await UniTask.Yield(PlayerLoopTiming.Update, ct);
                 }
 
@@ -704,9 +711,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
             NetworkClient client, WorldViewBinder binder, string localId, float seconds, CancellationToken ct)
         {
             float until = Time.realtimeSinceStartup + seconds;
+            float last = Time.realtimeSinceStartup;
+
             while (Time.realtimeSinceStartup < until)
             {
                 binder.Tick(client.World, localId);
+
+                // Per frame, not per snapshot. Snapshot processing advances prediction
+                // once per arriving snapshot, which is the world rate; a client that
+                // renders only then shows the avatar still between snapshots and jumps
+                // on the frame one lands. That is what the harness was measuring.
+                float now = Time.realtimeSinceStartup;
+                binder.AdvanceFrame(now - last);
+                last = now;
+
                 await UniTask.Yield(PlayerLoopTiming.Update, ct);
             }
         }

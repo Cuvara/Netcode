@@ -325,10 +325,32 @@ var binder = new WorldViewBinder(view, predictor);
 // per input, immediately after sending it, same tick and same vector
 session.SendInput(tick, moveX, moveY, attackTarget);
 predictor.RecordInput(tick, moveX, moveY);
+
+// per FRAME, from Update or equivalent — required, see below
+binder.Tick(client.World, client.UserId);
+binder.AdvanceFrame(Time.deltaTime);
 ```
 
-The binder calls `Reconcile` and `Advance` itself. Pass no predictor and the local
-entity renders at the newest received position, which is 0.4.0's behaviour.
+The binder calls `Reconcile` itself when a snapshot arrives. **You must call
+`AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
+renders at the newest received position, which is 0.4.0's behaviour.
+
+### Why `AdvanceFrame` is not optional
+
+Snapshot processing advances prediction once per arriving snapshot — the **world**
+rate, 15 Hz at the default configuration. A client that renders only from it shows
+the avatar perfectly still between snapshots and moving the whole interval at once on
+the frame one lands, however fast it is drawing.
+
+Nothing reports this as an error. Positions are correct, corrections are zero, and
+latency to first visible movement is unaffected; the only symptom is that motion is
+not smooth. It appears in frame-delta burstiness as roughly *frames per snapshot
+interval* — about 20 at 300 fps — and it is indistinguishable from having no
+prediction at all, because spreading a step across an interval achieves nothing when
+nothing samples the position during that interval.
+
+`AdvanceFrame` no-ops safely before a local entity exists and when there is no
+predictor, so it can be called unconditionally.
 
 **That wiring is for views that render whatever `SetState` hands them** —
 `GameObjectEntityView`, the WorldView sample, and this package's own DOTS sample, which
