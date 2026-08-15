@@ -5,6 +5,45 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-08-15
+
+**The live-backend measurement failed a consumer's CI.** It is a test, not runtime code —
+but it shipped in the package, so it is the package's problem.
+
+### Fixed
+
+- **`PredictionLatencyMeasurement` now skips, with a reason, when no backend is
+  reachable.** It was gated only by `[Category("LiveBackend")]`, and **a consuming project
+  runs the whole PlayMode suite without filtering by category**, so the gate did nothing
+  there and the test failed with `Cannot connect to destination host`. **A package cannot
+  rely on a consumer's runner passing the right filter** — correctness has to live in the
+  test.
+
+  A cheap bounded TCP probe (1.5 s, not the auth flow) checks the gateway and Nakama; if
+  either is unreachable the test calls `Assert.Ignore` naming which one and where it
+  looked. **Any exception from the probe is treated as unreachable, never as a failure** —
+  a throw from the probe is the same situation as a refused connection, and surfacing it
+  would recreate the bug being fixed.
+
+  **Ignore, not silent-pass.** An ignored test with a reason appears in the report and
+  names what is missing; a test that quietly goes green by doing nothing is the failure
+  this repository has spent two days eliminating, and it is not being reintroduced in the
+  one place whose job is producing honest numbers.
+
+  **The category is kept.** It lets someone deliberately select or exclude the test; the
+  Ignore makes it safe when nobody does either.
+
+  **Nothing else was weakened.** With a backend present it still asserts everything it
+  asserted before — all seven guards, including `ReplayedSteps > 0` and the forced
+  divergence. The change is "skip when there is nothing to measure", not "assert less".
+
+### Note
+
+I predicted this failure mode when the harness landed — *"it cannot run in CI, so gate it
+behind a category or a define"* — and then implemented the half of the gate that depends on
+the consumer cooperating. Foreseeing a problem and shipping a mitigation that only works
+under your own configuration is not much better than not foreseeing it.
+
 ## [0.10.2] - 2026-08-15
 
 **The DOTS sample threw on its first frame in any project using the Input System package,
