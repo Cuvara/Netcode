@@ -5,6 +5,37 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-08-15
+
+Measurement only. No runtime change.
+
+### Fixed
+
+- **The measurement printed a configured constant where a measured value belongs.** With
+  prediction off there is no predictor to ask for a speed, and that branch assigned
+  `LiveBackendConfig.PlayerSpeed` so the expected-step row could still be printed. A run
+  in which the avatar never moved therefore reported `effective speed 5`, which reads as
+  evidence that snapshots were arriving and carrying speed. It reports `not measured` now.
+  Added in 0.12.2, by the same hand that removed the last constant of this kind.
+
+### Added
+
+- **Distinct positions and `SetState` call counts per run.** "The server never moved the
+  entity", "the harness never noticed it moving" and "no snapshot ever reached the binder"
+  produce an identical report — no usable samples, 100% still frames — and nothing already
+  present told them apart.
+- **Send-gap burstiness.** `rpg-mmo-server#100` discards inputs that clump into one tick
+  along with the simulated time they carried, up to 46% of movement at 60/15/5, so an
+  unevenly sending client is legitimately outrun by its own prediction. Measured rather
+  than assumed even.
+- **The correction reported as a count of steps, not only a distance.** A whole number of
+  steps is a phase error: an input is acknowledged when the server has *received* it, not
+  when it has finished integrating it, and replay drops the input at acknowledgement along
+  with the hold steps its window has not taken yet. A fraction would point at the rate or
+  the arithmetic instead. The 0.1667 measured at 60/15/5 is 2.00 steps exactly, which is
+  why 0.13.0 did not move it: that release corrected how many steps the client takes, not
+  when they stop being replayable.
+
 ## [0.13.1] - 2026-08-15
 
 Documentation only. No behaviour change.
