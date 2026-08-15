@@ -38,6 +38,14 @@ jobs:
             exit 1
           }
 
+      # A missing .meta does not fail a build here and does not show in these test
+      # results -- it fails a CONSUMER'S suite, because Unity logs an Error and the
+      # test framework turns unexpected log errors into exceptions. v0.14.0 and
+      # v0.15.0 shipped HeldMovementParityTests.cs without one: the test never ran
+      # anywhere, and downstream saw a red run with zero failing tests.
+      - name: Every Unity-visible file has a .meta
+        run: python3 .github/scripts/check_metas.py
+
       - name: Check asmdef names
         run: |
           find . -name "*.asmdef" -not -path "./.github/*" | while read f; do
