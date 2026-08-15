@@ -613,7 +613,7 @@ The simulation logic the client shares with the server arrives as a UPM package,
 pinned to a **tag, never a branch**:
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
 ```
 
 `sgl-v0.1.0` resolved but produced **no assembly**. Unity treats a git package as
