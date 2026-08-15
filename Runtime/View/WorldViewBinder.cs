@@ -98,6 +98,9 @@ namespace Cuvara.Netcode.View
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
         private double _lastRenderMs;
+
+        /// <summary>Set once AdvanceFrame is driving the clock, which then owns it.</summary>
+        private bool _frameDriven;
         private int _localHp;
         private int _localMaxHp;
         private bool _localSeen;
@@ -309,7 +312,35 @@ namespace Cuvara.Netcode.View
                         _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
                     }
 
-                    _predictor.Advance((float)((nowMs - _lastRenderMs) / 1000.0));
+                    // Only the time no frame has advanced yet. AdvanceFrame is the
+                    // ordinary clock and stamps _lastRenderMs itself, so this is normally
+                    // a residue near zero; it carries the full gap only when nothing is
+                    // driving frames — a headless harness that pumps snapshots and
+                    // nothing else, which must still see prediction move.
+                    //
+                    // It used to pass the whole wall-clock gap unconditionally while
+                    // AdvanceFrame was separately advancing the same span in frame
+                    // slices, so the predictor's clock ran at ~2x real time. Every
+                    // consequence of that lands on the local avatar alone: base ticks
+                    // accrued twice as fast, so the server's hold window (WorldEvery
+                    // ticks) expired in half the real time it should, and the avatar
+                    // stood still between inputs. That is a stutter no frame rate can
+                    // fix, on the one entity the player is looking at, while remotes —
+                    // driven by the interpolator's own clock — stayed smooth.
+                    // Only when nothing else is driving the clock. AdvanceFrame is the
+                    // ordinary driver and sets _frameDriven; this fallback exists for a
+                    // harness that pumps snapshots and renders nothing, which must still
+                    // see prediction move.
+                    if (!_frameDriven)
+                    {
+                        double unadvancedMs = nowMs - _lastRenderMs;
+                        if (unadvancedMs > 0.0)
+                        {
+                            _predictor.Advance((float)(unadvancedMs / 1000.0));
+                        }
+                    }
+
+                    _lastRenderMs = nowMs;
 
                     // Kept so AdvanceFrame can re-render between snapshots. Only movement
                     // is predicted, so HP stays whatever the server last said.
@@ -445,6 +476,22 @@ namespace Cuvara.Netcode.View
 
             _predictor.Advance(deltaTime);
 
+            // Claim the clock. Both drivers share it and only one may advance it, or the
+            // predictor runs fast: Tick is called once per rendered frame by a real
+            // client, not once per arriving snapshot, so leaving the snapshot path
+            // advancing too made every frame count twice and the predictor's clock ran at
+            // 2x real time.
+            //
+            // The whole cost of that lands on the local avatar. Base ticks accrued twice
+            // as fast, so the server's hold window (WorldEvery base ticks) expired in half
+            // the real time it should, and the avatar stood still between inputs —
+            // measured at 15 sends per real second being read as one every 0.133s. No
+            // frame rate fixes it, and remote entities, driven by the interpolator's own
+            // clock, stayed smooth throughout. "Only the player I control stutters" is the
+            // signature of exactly this.
+            _frameDriven = true;
+            _lastRenderMs = _clock.Elapsed.TotalMilliseconds;
+
             var predicted = _predictor.Position;
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
         }
@@ -452,6 +499,7 @@ namespace Cuvara.Netcode.View
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
         public void Reset()
         {
+            _frameDriven = false;
             foreach (var id in _live)
             {
                 _view.Despawn(id);
