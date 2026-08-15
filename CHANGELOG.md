@@ -5,23 +5,7 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.1] - 2026-08-15
-
-### Fixed
-
-- **`HeldMovementParityTests.cs` shipped in 0.14.0 without its `.meta`, so Unity ignored
-  the asset entirely — the parity test has never run, in this repository or in any
-  consumer.** Worse for consumers than for us: Unity logs
-  `has no meta file, but it's in an immutable folder`, and the test framework turns an
-  unexpected log error into an exception, so **the error fails the whole test run of any
-  project that installs the package**. Found by `com.cuvara.dots`' CI, whose job reported
-  failure with 137/137 EditMode and 29/29 PlayMode passing and not one test failed.
-
-  A `.meta` is load-bearing for a git-installed package: the package lands in the
-  immutable `Library/PackageCache`, where Unity will not generate one. This is the third
-  time a missing or stub `.meta` has silently disabled shipped content here.
-
-## [0.15.1] - 2026-08-15
+## [0.15.2] - 2026-08-15
 
 Assertions only. No runtime change — and the measurement below is the reason there is no
 runtime change.
@@ -53,6 +37,32 @@ leaving burstiness untouched. Second time that change has been proposed and meas
   8.33 frames per tick. Every existing evenness case used frame rates that divide the tick
   exactly, so the awkward case, which is the only one a real client ever runs, was not
   covered.
+
+### On the assertions added here
+
+Both live in files that already have their `.meta`, and both were added to existing
+fixtures rather than new files, deliberately: 0.15.1 records that
+`HeldMovementParityTests.cs` shipped in 0.14.0 without one and therefore never ran in
+Unity — not here and not in any consumer — while passing out of Unity, where `.meta` files
+are irrelevant. Every mutation result quoted for that fixture in 0.14.0 was true of the
+out-of-Unity run and vacuous in Unity. A green out-of-Unity suite says nothing about
+whether Unity can see the file.
+
+## [0.15.1] - 2026-08-15
+
+### Fixed
+
+- **`HeldMovementParityTests.cs` shipped in 0.14.0 without its `.meta`, so Unity ignored
+  the asset entirely — the parity test has never run, in this repository or in any
+  consumer.** Worse for consumers than for us: Unity logs
+  `has no meta file, but it's in an immutable folder`, and the test framework turns an
+  unexpected log error into an exception, so **the error fails the whole test run of any
+  project that installs the package**. Found by `com.cuvara.dots`' CI, whose job reported
+  failure with 137/137 EditMode and 29/29 PlayMode passing and not one test failed.
+
+  A `.meta` is load-bearing for a git-installed package: the package lands in the
+  immutable `Library/PackageCache`, where Unity will not generate one. This is the third
+  time a missing or stub `.meta` has silently disabled shipped content here.
 
 ## [0.15.0] - 2026-08-15
 
