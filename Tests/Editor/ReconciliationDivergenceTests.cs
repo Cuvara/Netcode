@@ -37,6 +37,9 @@ namespace Cuvara.Netcode.Tests.Editor
     public sealed class ReconciliationDivergenceTests
     {
         private const int TickRate = 15;
+
+        /// <summary>The base timestep, for advancing a tick between inputs.</summary>
+        private static float Dt => MovementSystem.DeltaTimeForTickRate(TickRate);
         private const float ServerSpeed = 5f;
 
         private static MapBounds Bounds => MapBounds.Default;
@@ -81,6 +84,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 p.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                p.Advance(Dt);
             }
             return p;
         }
