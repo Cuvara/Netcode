@@ -5,6 +5,86 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-15
+
+Prediction now implements **all three** rules of the server's movement model. 0.13.0 added
+the second; this adds the first and third, which `gameserver-dotnet/docs/API.md` now
+specifies normatively and states plainly: *a client that implements the first two but not
+the third will diverge from the server exactly when the network is worst.*
+
+Requires **`sgl-v0.1.8`** or newer — the tag that adds
+`GameConstants.MaxBankedMovementTicks`.
+
+### Added
+
+- **Rule 1, coalescing: at most one step per player per base tick.** The predictor could
+  step twice in one tick — once from the hold, once from an input arriving later in the
+  same tick. The server cannot: it drains inputs and then applies holds inside one tick,
+  and guards the hold on `HeldFromTick == baseTick`. A client has no ordering guarantee
+  between its frame loop and its send loop, so it guards both sides. Counted as
+  `CoalescedInputs`, which is not a fault at or above the base tick rate and is worth
+  looking at below it.
+
+- **Rule 3, the elapsed-time step.** `dt` covers the time since the entity last *actually
+  moved*, `min(now - lastMoveTick, cap) / tickRate`, with the cap read from
+  `GameConstants.MaxBankedMovementTicks` rather than copied. Invisible to a client sending
+  every tick, because `lastMoveTick == now - 1` always — which is why the server could add
+  it without regenerating the golden vectors. Visible to a client sending at 15 Hz into a
+  60 Hz base tick whenever jitter opens a gap past the hold window.
+
+  The cap is part of the movement model, not a server-side valve: a client banking
+  unbounded time reconciles against a server that does not, on exactly the frames where
+  the network was worst.
+
+### Fixed
+
+- **Replay reproduced a different position from forward prediction**, which would inject a
+  correction on every reconcile that the network never caused. One misplaced line cleared
+  `_lastMoveTick` on the deadzone branch of `RecordInput` instead of in `Reset`.
+
+  Worth recording how it hid: clearing that field sends the elapsed-time rule down its
+  "never moved" early return, which yields one plain timestep and so **reproduces the
+  pre-rule-3 behaviour exactly**. The forward-parity test stayed green while rule 3 was
+  not in effect. The failing replay test is what exposed the passing one as a lie, and it
+  was found by tracing the values rather than by reasoning about them — three separate
+  arguments about that timeline were all wrong.
+
+### Changed — an invariant was retired on purpose
+
+- **`SmoothingDoesNotTouchTheSimulatedPosition` is now
+  `SubTickFramesDoNotTouchTheSimulatedPosition`.** The old name asserted that `Advance`
+  affects only the rendered position. Rule 2 already falsified that in 0.13.0 — `Advance`
+  runs the base-tick timeline — and rules 1 and 3 make it more so. The test was rewritten
+  to assert what is now true and still worth protecting: a **partial** tick must not step
+  the simulation. Both predictors receive the same whole ticks; one receives them in
+  slices. If those slices move `SimulatedPosition`, the frame rate has entered the
+  simulation and bit-exactness with the server is gone.
+
+  Stated here rather than edited quietly, because a test adjusted until it passes is how
+  an invariant dies without anyone deciding to kill it.
+
+- **The tests' restatement of the server banks time, and there is now one copy of it.**
+  `ServerWalk` modelled a pre-rule-3 server with a fixed `dt`, and a second copy of the
+  same loop was inlined in another case. A second copy of the server model in the tests is
+  the same defect as a second copy of a server constant in the code.
+
+### Verification
+
+96/96 out of Unity. Mutation-checked: disabling rule 3 fails 4 tests, disabling rule 1
+fails 1, removing the cap fails 1.
+
+### Known and not addressed here
+
+The live measurement reports `max correction in steps = 2.00` — exactly two whole steps,
+with send-gap burstiness `1.01`, so coalescing on the wire is not contributing. A whole
+number is a phase error rather than a rate error: an input is acknowledged when the server
+has *received* it, not when it has finished integrating it, and `DropAcknowledged` retires
+it at acknowledgement along with the hold steps its window has not yet taken. Fixing it
+needs the snapshot's server tick as an anchor so replay can reconstruct which of those
+steps the authoritative position already contains — a change to what `Reconcile` is told,
+not an adjustment to the arithmetic. Whether rules 1 and 3 move that figure is now
+measurable.
+
 ## [0.13.2] - 2026-08-15
 
 Measurement only. No runtime change.
