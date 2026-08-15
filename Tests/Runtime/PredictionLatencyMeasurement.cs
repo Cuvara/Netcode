@@ -129,9 +129,44 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float MeasuredTickRate;
             public bool TickRateDisagrees;
 
+            /// <summary>Distinct positions the view was told for the local entity.</summary>
+            /// <remarks>
+            /// One means the entity never moved at all. Separates "the server did not
+            /// move it" from "the harness did not notice", which otherwise report
+            /// identically.
+            /// </remarks>
+            public int DistinctPositions;
+
+            /// <summary>Times SetState was called for any entity.</summary>
+            public int SetStateCalls;
+
+            /// <summary>Wall-clock gaps between consecutive input sends, seconds.</summary>
+            /// <remarks>
+            /// The server discards inputs that clump into one tick along with the
+            /// simulated time they carried (rpg-mmo-server#100), losing up to 46% of
+            /// movement at 60/15/5. A client sending unevenly is therefore legitimately
+            /// outrun by its own prediction. Measured rather than assumed even, because
+            /// "the sends are evenly spaced" is exactly the sort of thing this harness
+            /// has now been wrong about twice.
+            /// </remarks>
+            public readonly System.Collections.Generic.List<float> SendGaps =
+                new System.Collections.Generic.List<float>();
+
+            public float SendGapBurstiness
+            {
+                get
+                {
+                    if (SendGaps.Count < 2) return float.NaN;
+                    float mean = SendGaps.Average();
+                    return mean > 0f ? SendGaps.Max() / mean : float.NaN;
+                }
+            }
+
             /// <summary>Displacement one accepted input produces on the server.</summary>
             public float ExpectedStep =>
-                TickRateInUse > 0 ? EffectiveSpeed / TickRateInUse : 0f;
+                TickRateInUse > 0 && !float.IsNaN(EffectiveSpeed)
+                    ? EffectiveSpeed / TickRateInUse
+                    : 0f;
             public int Snaps;
             public int SmoothedCorrections;
             public float MaxCorrection;
@@ -461,11 +496,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             LocalMovePredictor predictor = predict ? new LocalMovePredictor(settings) : null;
 
-            var view = new ProbeView();
+            var view = new ProbeView { TrackedId = localId };
             var binder = new WorldViewBinder(view, predictor);
             run.Predicting = binder.IsPredicting;
 
             long tick = 0;
+            var lastSendAt = 0f;
 
             // The SEND cadence, which is a client choice and deliberately not the server's
             // integration rate. Conflating the two is what produced the defect above.
@@ -500,6 +536,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 // while predicting one it will not. The tick is still SENT, so it is
                 // acknowledged and leaves the buffer — which is what makes the
                 // disagreement real rather than merely pending.
+                if (lastSendAt > 0f)
+                {
+                    run.SendGaps.Add(t0 - lastSendAt);
+                }
+
+                lastSendAt = t0;
+
                 client.Session?.SendInput(sampleTick, forceDivergence ? 0f : 1f, 0f, "");
                 predictor?.RecordInput(sampleTick, 1f, 0f);
 
@@ -553,6 +596,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.Samples.Add(sample);
             }
 
+            run.DistinctPositions = view.DistinctTrackedPositions;
+            run.SetStateCalls = view.SetStateCalls;
+
             if (run.FrameSeconds.Count > 0)
             {
                 float mean = run.FrameSeconds.Average();
@@ -572,9 +618,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
             }
             else
             {
-                // No predictor to ask; use the configured speed purely so the expected
-                // step can be printed for comparison.
-                run.EffectiveSpeed = LiveBackendConfig.PlayerSpeed;
+                // Deliberately NOT set from LiveBackendConfig. It was, and it printed
+                // "effective speed 5" for a run in which nothing moved, which read as
+                // evidence that snapshots were arriving and carrying speed. It was the
+                // configured constant echoing back. An instrument may print a measured
+                // value or say it has none; printing a constant in the slot where a
+                // measurement belongs is how a reader is misled by a working tool.
+                run.EffectiveSpeed = float.NaN;
             }
 
             client.Disconnect();
@@ -613,7 +663,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  corrections smoothed     {run.SmoothedCorrections}\n" +
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
-                $"  effective speed          {run.EffectiveSpeed}\n" +
+                $"  max correction in steps  {(run.ExpectedStep > 0f ? (run.MaxCorrection / run.ExpectedStep).ToString("F2") : "n/a")}" +
+                    CorrectionShapeNote(run) + "\n" +
+                $"  distinct positions seen  {run.DistinctPositions}" +
+                    (run.DistinctPositions <= 1
+                        ? "   <<< the entity NEVER MOVED — server or spawn, not the probe"
+                        : "   (the view was told it moved, so the probe can see motion)") + "\n" +
+                $"  SetState calls           {run.SetStateCalls}" +
+                    (run.SetStateCalls == 0 ? "   <<< no snapshots reached the binder at all" : "") + "\n" +
+                $"  send gap burstiness      {run.SendGapBurstiness:F2}" +
+                    (run.SendGapBurstiness > 1.5f
+                        ? "   <<< sends are CLUMPING; rpg-mmo-server#100 discards clumped inputs"
+                        : "   (1.00 is evenly spaced)") + "\n" +
+                $"  effective speed          " +
+                    (float.IsNaN(run.EffectiveSpeed)
+                        ? "not measured (no predictor in this configuration)"
+                        : run.EffectiveSpeed.ToString()) + "\n" +
                 $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
@@ -673,6 +738,45 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// against an expected 0.0833 and neither of us could account for the factor of
         /// three from the numbers we had printed.
         /// </remarks>
+        /// <summary>
+        /// Reads the correction as a count of server steps, which is what separates the
+        /// two candidate causes of a persistent sub-threshold correction.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A whole number of steps is a phase problem, not a rate problem.</b> An input
+        /// is acknowledged when the server has <i>received</i> it, not when it has finished
+        /// integrating it: the hold keeps stepping for up to <c>holdTicks - 1</c> base
+        /// ticks afterwards. Replay drops an input as soon as it is acknowledged, so the
+        /// steps its hold has not taken yet are dropped with it, and the client differs
+        /// from the server by exactly that remainder — a whole number of steps, the same
+        /// number every time.
+        /// </para>
+        /// <para>
+        /// <b>A fraction is a rate or arithmetic problem</b>, and would point back at the
+        /// timestep, the speed, or the movement model rather than at the hold.
+        /// </para>
+        /// <para>
+        /// A measured 0.1667 at 60/15/5 is 2.00 steps exactly, which is the first case.
+        /// Printing the ratio rather than the distance is the difference between a number
+        /// that needs arithmetic to interpret and one that names its own cause.
+        /// </para>
+        /// </remarks>
+        private static string CorrectionShapeNote(Run run)
+        {
+            if (run.ExpectedStep <= 0f || run.MaxCorrection <= 0f) return string.Empty;
+
+            float steps = run.MaxCorrection / run.ExpectedStep;
+            float nearest = (float)Math.Round(steps);
+            bool whole = nearest >= 1f && Math.Abs(steps - nearest) < 0.05f;
+
+            return whole
+                ? $"   <<< {nearest:F0} whole steps — a PHASE error (hold remainder dropped " +
+                  "at ack), not a rate error"
+                : "   (not a whole number of steps — look at the rate or the arithmetic, " +
+                  "not the hold)";
+        }
+
         private static string ExpectedStepNote(Run run)
         {
             if (run.ExpectedStep <= 0f || float.IsNaN(run.MaxFrameDelta) || run.MaxFrameDelta <= 0f)

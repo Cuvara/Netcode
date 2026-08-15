@@ -166,6 +166,24 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         public int SetStateCalls { get; private set; }
 
+        /// <summary>
+        /// Every distinct position this view was told for the tracked id, in order.
+        /// </summary>
+        /// <remarks>
+        /// The evidence that distinguishes "the server never moved the entity" from "the
+        /// harness never noticed it moving". Those two produce an identical report — no
+        /// usable samples, 100% still frames — and no counter already present separates
+        /// them, which is why a run that measured nothing could not say why.
+        /// </remarks>
+        public readonly System.Collections.Generic.List<Vector2> TrackedPositions =
+            new System.Collections.Generic.List<Vector2>();
+
+        /// <summary>Id whose raw positions are recorded into <see cref="TrackedPositions"/>.</summary>
+        public string TrackedId { get; set; } = string.Empty;
+
+        /// <summary>Distinct positions seen for the tracked id. One means it never moved.</summary>
+        public int DistinctTrackedPositions => TrackedPositions.Count;
+
         public void Spawn(string id, bool isLocal, string type) { }
 
         public void Despawn(string id) => _positions.Remove(id);
@@ -173,7 +191,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
         public void SetState(string id, float x, float y, int hp, int maxHp)
         {
             SetStateCalls++;
-            _positions[id] = new Vector2(x, y);
+            var position = new Vector2(x, y);
+
+            if (!string.IsNullOrEmpty(TrackedId) && id == TrackedId &&
+                (TrackedPositions.Count == 0 || TrackedPositions[TrackedPositions.Count - 1] != position))
+            {
+                TrackedPositions.Add(position);
+            }
+
+            _positions[id] = position;
         }
 
         /// <summary>
