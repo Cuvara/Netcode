@@ -53,8 +53,11 @@ namespace Cuvara.Netcode.Tests.Editor
 
             public readonly Dictionary<string, int> Hp = new Dictionary<string, int>();
 
+            public int SetStateCalls { get; private set; }
+
             public void SetState(string id, float x, float y, int hp, int maxHp)
             {
+                SetStateCalls++;
                 Positions[id] = new[] { x, y };
                 Hp[id] = hp;
             }
@@ -445,5 +448,67 @@ namespace Cuvara.Netcode.Tests.Editor
 
             Assert.That(view.Positions[LocalId], Is.EqualTo(new[] { 9f, 9f }));
         }
+        // ── The render pump ──
+
+        /// <summary>
+        /// The local entity must be re-rendered every frame, not once per snapshot.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Prediction used to be advanced, and the local entity re-rendered, only inside
+        /// snapshot processing. The rendered position therefore changed at the world rate
+        /// however fast the client drew, so every frame between snapshots showed the
+        /// avatar still and the frame a snapshot landed on showed the whole interval at
+        /// once. All the smoothing work was being computed and never sampled.
+        /// </para>
+        /// <para>
+        /// Nothing caught it because every test here drives the binder by feeding it
+        /// snapshots — the frame loop was not modelled at all, so a position that only
+        /// moved on snapshots looked exactly like a correct one.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AdvanceFrameMovesTheLocalEntityBetweenSnapshots()
+        {
+            var view = new RecordingView();
+            var predictor = new LocalMovePredictor(
+                new PredictionSettings(60, 5f, MapBounds.Default));
+            predictor.SetHoldTicks(4);
+            var binder = new WorldViewBinder(view, predictor);
+
+            var world = new WorldState();
+            world.Apply(Keyframe(1, Entity(LocalId, 0f, 0f)));
+            binder.Tick(world, LocalId);
+
+            predictor.RecordInput(1, 1f, 0f);
+
+            int callsAfterSnapshot = view.SetStateCalls;
+
+            // Frames pass; no snapshot arrives.
+            for (var i = 0; i < 10; i++)
+            {
+                binder.AdvanceFrame(1f / 300f);
+            }
+
+            Assert.That(view.SetStateCalls, Is.GreaterThan(callsAfterSnapshot),
+                "the local entity was not re-rendered between snapshots, so its position " +
+                "can only change at the world rate however fast the client draws");
+        }
+
+        [Test]
+        public void AdvanceFrameIsSafeWithoutAPredictorOrALocalEntity()
+        {
+            var view = new RecordingView();
+
+            var bare = new WorldViewBinder(view);
+            Assert.DoesNotThrow(() => bare.AdvanceFrame(1f / 60f),
+                "a consumer without prediction must be able to call this unconditionally");
+
+            var predicting = new WorldViewBinder(
+                view, new LocalMovePredictor(new PredictionSettings(60, 5f, MapBounds.Default)));
+            Assert.DoesNotThrow(() => predicting.AdvanceFrame(1f / 60f),
+                "called before any snapshot has identified the local entity");
+        }
+
     }
 }
