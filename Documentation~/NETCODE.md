@@ -510,10 +510,24 @@ that is perfectly accurate — both simply look right. So the test fails unless:
 |---|---|
 | `PendingCount > 0` | inputs never reached the buffer; nothing ran ahead of the server |
 | `ReplayedSteps > 0` | prediction ran open-loop, never rewound to an authoritative position |
-| `MaxCorrection > 0` | every correction was exactly `0.000` — the signature of reconciling against its own output, not the server's |
+| a forced-divergence run corrects | corrections are stuck at zero regardless of disagreement |
 | `EffectiveSpeed == server speed` | replay integrated at the wrong speed, so every step is wrong by the ratio |
 
 Without those, a green result would prove only that the numbers were collected.
+
+**A correction of `0.000` on the healthy run is not a fault.** On localhost, with no loss
+and `Shared.GameLogic` bit-exact on both sides, zero divergence is the designed outcome —
+it is what ADR-10, the FMA-denying split in `Integrate` and the golden vectors are for.
+`ReplayedSteps` answers "is reconciliation alive?"; `LastCorrection` answers "do the two
+sides disagree?", and the healthy answer to the second is *no*. An earlier version of this
+harness conflated them and failed a correct run.
+
+That is why a **third configuration deliberately diverges** — it predicts a sample input
+and never sends it, so the server cannot have applied it — and asserts a correction
+appears. Note a wrong *speed* would not work: the wire carries speed and the binder feeds
+it to `SetServerSpeed` every snapshot, so the error is corrected away within one snapshot.
+`ReconciliationDivergenceTests` pins the same four readings in EditMode, without a
+backend.
 
 ### It cannot run in CI, and it does not skip
 

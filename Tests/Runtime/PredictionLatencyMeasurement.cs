@@ -90,6 +90,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         private const float MoveEpsilon = 0.001f;
 
+        // How the divergence run forces a disagreement, and why not by a wrong speed:
+        // the wire carries per-entity speed now (field 9) and the binder feeds it to
+        // SetServerSpeed on every snapshot, so a deliberately wrong PredictionSettings
+        // speed is corrected back to the server's within one snapshot and no divergence
+        // survives. Dropping an input instead cannot be undone that way — the client
+        // predicts a step the server never takes, and the next snapshot must correct it.
+
         private sealed class Sample
         {
             public float InputToVisibleMs;
@@ -119,8 +126,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
             var withPrediction = await MeasureAsync(predict: true);
             var withoutPrediction = await MeasureAsync(predict: false);
 
+            // A third run whose only purpose is to make the predictor WRONG, so the
+            // correction machinery has something to correct. Without it the healthy run's
+            // 0.0000 is unfalsifiable: a predictor that never corrects and one that never
+            // needs to are indistinguishable.
+            //
+            // Its TIMINGS are not comparable with the other two and are not used in the
+            // comparison — dropping inputs delays acknowledgement by design. Only its
+            // MaxCorrection is read.
+            var diverging = await MeasureAsync(predict: true, dropSampleInput: true);
+
             Report(withPrediction);
             Report(withoutPrediction);
+            Report(diverging);
             ReportComparison(withPrediction, withoutPrediction);
 
             // ---- Guards that make the numbers mean something ----
@@ -142,13 +160,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "server is untested and this measurement proves nothing about " +
                 "reconciliation.");
 
-            // The open-loop tell. Over real network timing, some reconcile must produce a
-            // non-zero correction; an exact 0.000 across every sample means Reconcile is
-            // being handed the position prediction just produced, not the server's.
-            Assert.That(withPrediction.MaxCorrection, Is.GreaterThan(0f),
-                "every correction was exactly 0.000 across the whole run. That is not " +
-                "accuracy, it is the signature of the predictor reconciling against its " +
-                "own output.");
+            // NOT asserted: MaxCorrection > 0 on the healthy run.
+            //
+            // The first live run failed exactly that assertion, and the assertion was
+            // wrong. On localhost, with no loss and Shared.GameLogic bit-exact on both
+            // sides, a correction of 0.0000 is the DESIGNED outcome — it is what ADR-10,
+            // the FMA-denying split in Integrate and the golden vectors are all for. The
+            // same run disproved the assertion's own diagnosis: `replayed steps 3` means
+            // Reconcile fired, which is precisely what open-loop cannot do.
+            //
+            // "Is reconciliation alive?" is answered by ReplayedSteps, asserted above.
+            // "Do the two sides disagree?" is what LastCorrection answers, and on a
+            // lossless link the healthy answer is no. Conflating them cost a red run.
+            //
+            // What that assertion was reaching for is covered instead by the deliberate
+            // divergence configuration below, and by ReconciliationDivergenceTests in
+            // EditMode, which pins all four readings without needing a backend.
 
             Assert.That(withPrediction.EffectiveSpeed, Is.EqualTo(LiveBackendConfig.PlayerSpeed).Within(0.001f),
                 $"the speed replay used ({withPrediction.EffectiveSpeed}) does not match the " +
@@ -164,11 +191,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Assert.That(predictedMedian, Is.LessThan(unpredictedMedian),
                 "prediction did not make the avatar move sooner, which is the only thing " +
                 "it exists to do.");
+
+            // The falsifiability check. A predictor fed a speed the server is not using
+            // MUST be corrected; if this is zero too, then corrections never happen at
+            // all and the healthy run's 0.0000 meant nothing.
+            Assert.That(diverging.MaxCorrection, Is.GreaterThan(0f),
+                "the predictor predicted movement from inputs the server never received, " +
+                "and STILL reported no correction. That means reconcile is not comparing " +
+                "against the server's position at all, and the zero correction on the " +
+                "healthy run above is meaningless rather than reassuring.");
         });
 
-        private static async UniTask<Run> MeasureAsync(bool predict)
+        /// <param name="dropSampleInput">
+        /// Predict the sample input locally but never send it, so the server cannot have
+        /// applied it. Forces a real disagreement; see the note above on why a wrong speed
+        /// no longer works for this.
+        /// </param>
+        private static async UniTask<Run> MeasureAsync(bool predict, bool dropSampleInput = false)
         {
-            var run = new Run { Name = predict ? "prediction ON" : "prediction OFF" };
+            var run = new Run
+            {
+                Name = dropSampleInput
+                    ? "prediction ON, sample input DROPPED (forced divergence; timings not comparable)"
+                    : predict ? "prediction ON" : "prediction OFF",
+            };
 
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
             var ct = cts.Token;
@@ -177,7 +223,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // Unique device per run: two runs in one session must not share a player
             // entity, or the second inherits the first's position and speed.
             var jwt = await auth.GetGatewayTokenAsync(
-                $"measure-{(predict ? "on" : "off")}-{DateTime.UtcNow.Ticks}", ct);
+                $"measure-{(dropSampleInput ? "drop" : predict ? "on" : "off")}-{DateTime.UtcNow.Ticks}", ct);
 
             using var client = new NetworkClient(
                 new NetworkSettings
@@ -229,7 +275,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 long sampleTick = tick;
                 float t0 = Time.realtimeSinceStartup;
 
-                client.Session?.SendInput(sampleTick, 1f, 0f, "");
+                // The divergence run predicts this step but never sends it.
+                if (!dropSampleInput)
+                {
+                    client.Session?.SendInput(sampleTick, 1f, 0f, "");
+                }
                 predictor?.RecordInput(sampleTick, 1f, 0f);
 
                 var sample = new Sample { VisibleTimedOut = true, AuthoritativeTimedOut = true };
