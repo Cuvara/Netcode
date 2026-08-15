@@ -5,6 +5,35 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The DOTS sample's `inputRateHz` defaulted to a literal `15` instead of
+  `GameConstants.DefaultTickRate`.** It has to equal the server's simulation tick rate —
+  the server integrates one step per accepted input at `1/tickRate` and applies only the
+  newest when several land in one tick — so a drift between the two is not a preference,
+  it is a desync. `NetworkBootstrapConfig` already defaulted from the constant; the
+  sample did not, which made it the copy most likely to be wrong and the one a client
+  team actually builds from.
+
+  The mismatch does not fail loudly. The client is wrong by a little on every tick, is
+  corrected by every snapshot, and the player sees rubber-banding rather than a
+  misconfiguration — the failure `PredictionSettings` documents and refuses to guess its
+  way into.
+
+  **The field initializer is load-bearing here precisely because nothing serializes it.**
+  `DOTSSceneSetup` adds `DOTSNetworkBridge` at runtime, so the scene carries no component
+  and no stored value to override the default. Author the component into a scene instead
+  and the serialized number wins, at which point this default stops applying and the
+  scene has to be updated too — noted in the code so the next reader does not trust the
+  initializer in a situation where it does not apply.
+
+  The matching server-side half is `rpg-mmo-server#94`: `Program.cs` fell back to a
+  literal `15` while its neighbours used `GameConstants`, so bumping the shared constant
+  moved the client and left the server behind. Neither fix makes the rate observable —
+  that is `rpg-mmo-server#93`, which proposes `tick_rate` on `JoinTokenResponse`.
+
 ## [0.10.0] - 2026-08-15
 
 The other half of the user's complaint. `v0.9.x` made the avatar respond ~72 ms sooner;
