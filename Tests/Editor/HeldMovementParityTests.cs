@@ -1,3 +1,4 @@
+using System.Linq;
 using NUnit.Framework;
 using Cuvara.Netcode.Prediction;
 using Shared.GameLogic.Components;
@@ -352,6 +353,85 @@ namespace Cuvara.Netcode.Tests.Editor
                 $"a client sending every tick travelled {p.SimulatedPosition.X:F4} against " +
                 $"a configured {Speed}. It always has lastMoveTick == now - 1, so every " +
                 "step must be one plain timestep and rule 3 must add nothing.");
+        }
+
+        // ── Evenness of the rendered motion ──
+
+        /// <summary>
+        /// Rendered motion must be even across frames under live conditions: a hold
+        /// active, frames far faster than the base tick, and inputs slower than it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every other case here asserts <i>where</i> the avatar is. None asserted how
+        /// evenly it gets there, and evenness is the thing the user actually reports — so
+        /// a change that made predicted motion less even than no prediction at all passed
+        /// the whole fixture. This measures the same max/mean frame delta the live harness
+        /// reports, so a regression fails here rather than being discovered on a build.
+        /// </para>
+        /// <para>
+        /// The failure it was written for: an input that moves nothing — coalesced by
+        /// rule 1, or a deadzone — used to restart the interpolation with a zero step,
+        /// which snaps the rendered position onto the simulated one and discards the
+        /// in-flight interpolation of the step that tick did take.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void RenderedMotionIsEvenAcrossFramesWithAHoldActive()
+        {
+            var p = Predictor();
+
+            const int framesPerSend = 20;              // 300 fps against 15 Hz sends
+            float sendInterval = 1f / SendHz;
+            float frame = sendInterval / framesPerSend;
+
+            var deltas = new System.Collections.Generic.List<float>();
+            float previous = p.Position.X;
+
+            for (var i = 1; i <= 8; i++)
+            {
+                p.RecordInput(i, 1f, 0f);
+                for (var f = 0; f < framesPerSend; f++)
+                {
+                    p.Advance(frame);
+                    if (i == 1) { previous = p.Position.X; continue; }
+
+                    deltas.Add(p.Position.X - previous);
+                    previous = p.Position.X;
+                }
+            }
+
+            float max = deltas.Max();
+            float mean = deltas.Average();
+            float burstiness = mean > 0f ? max / mean : float.NaN;
+
+            Assert.That(burstiness, Is.LessThan(2.5f),
+                $"frame-delta burstiness {burstiness:F2} (max {max:F5}, mean {mean:F5}). " +
+                "1.00 is perfectly even. The avatar is arriving in lurches rather than " +
+                "travelling, which is what a player calls not smooth and what no " +
+                "correction counter can see.");
+        }
+
+        [Test]
+        public void AnInputThatMovesNothingDoesNotSnapTheRenderedPosition()
+        {
+            var p = Predictor();
+            p.RecordInput(1, 1f, 0f);
+
+            // Part way through a tick, mid-interpolation.
+            p.Advance((1f / BaseHz) * 0.4f);
+            float before = p.Position.X;
+
+            Assert.That(before, Is.LessThan(p.SimulatedPosition.X),
+                "precondition: the step should be part-way shown");
+
+            // An input on a tick the hold already stepped: coalesced, moves nothing.
+            p.RecordInput(2, 1f, 0f);
+
+            Assert.That(p.Position.X, Is.EqualTo(before).Within(1e-6f),
+                "an input that moved nothing restarted the interpolation, snapping the " +
+                "rendered position onto the simulated one. The step that tick actually " +
+                "took was mid-flight and is now discarded.");
         }
 
         [Test]
