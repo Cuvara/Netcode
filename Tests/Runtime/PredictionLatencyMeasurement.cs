@@ -140,6 +140,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </summary>
             public List<float> FrameDeltas = new List<float>();
 
+            /// <summary>Wall-clock length of each sampled frame, for the fps context.</summary>
+            public List<float> FrameSeconds = new List<float>();
+
             public float StillFramePercent =>
                 FrameDeltas.Count == 0 ? float.NaN
                     : 100f * FrameDeltas.Count(d => d <= 1e-6f) / FrameDeltas.Count;
@@ -147,6 +150,33 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float MaxFrameDelta => FrameDeltas.Count == 0 ? float.NaN : FrameDeltas.Max();
 
             public float MeanFrameDelta => FrameDeltas.Count == 0 ? float.NaN : FrameDeltas.Average();
+
+            /// <summary>
+            /// Worst frame divided by the average frame — <b>the frame-rate-independent
+            /// smoothness number</b>, and the one to quote.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>1.0 is perfect</b>: every frame moved the same distance. Unsmoothed
+            /// motion puts a whole step on one frame and nothing on the rest, so the ratio
+            /// is the number of frames per input interval.
+            /// </para>
+            /// <para>
+            /// <b>Why not quote the raw distance.</b> Two runs of the same build reported a
+            /// largest single-frame jump of 0.0149 and 0.0244 world units — a 60% spread
+            /// that looks like measurement noise and is not. It is frame rate: those values
+            /// imply 336 fps and 205 fps, and a smoothed step necessarily divides into
+            /// larger pieces when there are fewer frames to divide it across. The raw
+            /// figure is not comparable between runs, or between machines, or between a
+            /// developer's Editor and a player's build. This ratio is.
+            /// </para>
+            /// </remarks>
+            public float FrameDeltaBurstiness =>
+                FrameDeltas.Count == 0 || MeanFrameDelta <= 0f ? float.NaN
+                    : MaxFrameDelta / MeanFrameDelta;
+
+            /// <summary>Observed render rate during the sampled frames, for context.</summary>
+            public float ObservedFps { get; set; }
 
             /// <summary>Standard deviation of the per-frame movement — flat when smooth.</summary>
             public float FrameDeltaStdDev
@@ -419,6 +449,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 bool sawVisible = false, sawAuthoritative = false;
 
                 var previousRendered = settled;
+                float previousFrameTime = Time.realtimeSinceStartup;
 
                 while (Time.realtimeSinceStartup - t0 < SampleTimeoutSeconds &&
                        !(sawVisible && sawAuthoritative))
@@ -431,6 +462,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     {
                         run.FrameDeltas.Add((rendered - previousRendered).magnitude);
                         previousRendered = rendered;
+
+                        float nowFrame = Time.realtimeSinceStartup;
+                        run.FrameSeconds.Add(nowFrame - previousFrameTime);
+                        previousFrameTime = nowFrame;
                     }
 
                     if (!sawVisible && view.TryGet(localId, out var now) &&
@@ -458,6 +493,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 }
 
                 run.Samples.Add(sample);
+            }
+
+            if (run.FrameSeconds.Count > 0)
+            {
+                float mean = run.FrameSeconds.Average();
+                run.ObservedFps = mean > 0f ? 1f / mean : 0f;
             }
 
             if (predictor != null)
@@ -511,7 +552,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "high means the avatar teleports once per input and is frozen between\n" +
                 $"  largest single-frame jump {run.MaxFrameDelta:F4} world units\n" +
                 $"  mean frame delta         {run.MeanFrameDelta:F4}\n" +
-                $"  frame delta std dev      {run.FrameDeltaStdDev:F4}   <- flat when smooth");
+                $"  frame delta std dev      {run.FrameDeltaStdDev:F4}\n" +
+                $"  BURSTINESS (max/mean)    {run.FrameDeltaBurstiness:F2}   <- 1.00 is perfectly even; " +
+                    "THIS is the comparable number\n" +
+                $"  observed frame rate      {run.ObservedFps:F0} fps   (the raw distances above scale with this)");
         }
 
         private static void ReportComparison(Run on, Run off)
@@ -527,8 +571,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "\n" +
                 $"  still frames, OFF              {off.StillFramePercent:F1}%\n" +
                 $"  still frames, ON               {on.StillFramePercent:F1}%\n" +
-                $"  largest frame jump, OFF        {off.MaxFrameDelta:F4}\n" +
-                $"  largest frame jump, ON         {on.MaxFrameDelta:F4}\n" +
+                $"  BURSTINESS, OFF                {off.FrameDeltaBurstiness:F2}   (1.00 = perfectly even)\n" +
+                $"  BURSTINESS, ON                 {on.FrameDeltaBurstiness:F2}\n" +
+                $"  largest frame jump, OFF        {off.MaxFrameDelta:F4}  at {off.ObservedFps:F0} fps\n" +
+                $"  largest frame jump, ON         {on.MaxFrameDelta:F4}  at {on.ObservedFps:F0} fps\n" +
+                "  (raw distances scale with frame rate and are NOT comparable between runs;\n" +
+                "   burstiness is. Two runs of one build gave 0.0149 and 0.0244 purely because\n" +
+                "   they rendered at 336 and 205 fps.)\n" +
                 "\n" +
                 "  This is input-submitted to avatar-moves, measured in-engine.\n" +
                 "  It is NOT keypress-to-visible: the keyboard, OS input stack and display\n" +
