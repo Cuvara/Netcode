@@ -488,6 +488,130 @@ namespace Cuvara.Netcode.Tests.Editor
                 "per frame, and the avatar is teleporting between still poses.");
         }
 
+        // ── The correction is a clock meter ──
+
+        /// <summary>
+        /// Runs a full client/server loop and returns the steady-state correction, in
+        /// steps, for a predictor whose clock runs at <paramref name="clockFactor"/> times
+        /// real time.
+        /// </summary>
+        private static float SteadyStateCorrectionInSteps(float clockFactor)
+        {
+            MapBounds bounds = Bounds;
+            var p = new LocalMovePredictor(new PredictionSettings(BaseHz, Speed, bounds));
+            p.SetHoldTicks(HoldTicks);
+            p.Reconcile(Vec2.Zero, 0);
+
+            var serverPos = Vec2.Zero;
+            long serverTick = 0, heldFrom = 0, lastAck = 0;
+            float heldX = 0f, heldY = 0f;
+
+            void ServerStep(long tick, bool hasInput, float mx, float my, long inputTick)
+            {
+                if (hasInput)
+                {
+                    var probe = new EntityState { Position = serverPos, Speed = Speed, Dead = false };
+                    if (MovementSystem.TryMove(in probe, mx, my, Dt, in bounds, out Vec2 moved)
+                        is MoveResult.Accepted or MoveResult.Clamped)
+                    {
+                        serverPos = moved; heldX = mx; heldY = my; heldFrom = tick;
+                    }
+                    lastAck = inputTick;
+                    return;
+                }
+
+                if (heldFrom != 0 && tick != heldFrom && tick - heldFrom < HoldTicks)
+                {
+                    var probe = new EntityState { Position = serverPos, Speed = Speed, Dead = false };
+                    if (MovementSystem.TryMove(in probe, heldX, heldY, Dt, in bounds, out Vec2 moved)
+                        is MoveResult.Accepted or MoveResult.Clamped)
+                    {
+                        serverPos = moved;
+                    }
+                }
+            }
+
+            const float frame = 1f / 300f;
+            float last = 0f;
+
+            for (var interval = 1; interval <= 30; interval++)
+            {
+                p.RecordInput(interval, 1f, 0f);
+
+                for (var k = 0; k < HoldTicks; k++)
+                {
+                    serverTick++;
+                    ServerStep(serverTick, k == 0, 1f, 0f, interval);
+                }
+
+                float real = 0f;
+                while (real < 1f / SendHz)
+                {
+                    p.Advance(frame * clockFactor);
+                    real += frame;
+                }
+
+                p.Reconcile(serverPos, lastAck);
+                last = p.LastCorrection / (Speed / BaseHz);
+            }
+
+            return last;
+        }
+
+        /// <summary>
+        /// A client whose clock is right disagrees with the server by <b>nothing</b>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The property the whole prediction path exists to have, and nothing asserted it
+        /// end to end. Individual pieces were pinned — the step, the hold, replay parity —
+        /// but never client and server run against each other over many snapshots with the
+        /// answer required to be exactly zero.
+        /// </para>
+        /// <para>
+        /// It matters because a persistent correction is <i>not</i> harmless below the snap
+        /// threshold. Under the threshold it is smoothed, which means a decaying offset
+        /// injected on every snapshot — fifteen times a second — and that reads as jerk at
+        /// any frame rate. "Smoothed" is not "unseen"; it was read that way here for
+        /// several releases.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ACorrectClockProducesNoCorrectionAtAll()
+        {
+            float steps = SteadyStateCorrectionInSteps(1.0f);
+
+            Assert.That(steps, Is.EqualTo(0f).Within(0.01f),
+                $"steady-state correction is {steps:F2} steps against a server the client " +
+                "agrees with by construction. A persistent correction is smoothed rather " +
+                "than snapped, so nothing jumps and no counter reads unhealthy — it is " +
+                "visible only as uneven motion on the locally predicted entity.");
+        }
+
+        /// <summary>
+        /// The correction reads out the predictor's clock error, linearly.
+        /// </summary>
+        /// <remarks>
+        /// <c>correction_steps = (clockFactor - 1) * holdTicks</c>, exactly, at every
+        /// factor measured. That makes the correction an instrument rather than only a
+        /// symptom: a live run reporting 2.00 steps against a 4-tick hold is reporting a
+        /// clock running at 1.5x, and one reporting 0.00 is reporting a clock that is
+        /// right. Pinned so the reading stays trustworthy.
+        /// </remarks>
+        [TestCase(1.25f, 1f)]
+        [TestCase(1.5f, 2f)]
+        [TestCase(2.0f, 4f)]
+        public void TheCorrectionMeasuresTheClockError(float clockFactor, float expectedSteps)
+        {
+            float steps = SteadyStateCorrectionInSteps(clockFactor);
+
+            Assert.That(steps, Is.EqualTo(expectedSteps).Within(0.05f),
+                $"a {clockFactor:F2}x clock produced {steps:F2} steps of correction, not " +
+                $"{expectedSteps:F2}. The relation (factor - 1) * holdTicks is what lets a " +
+                "measured correction be read back as a clock error, so if it no longer " +
+                "holds, that reading is no longer valid.");
+        }
+
         [Test]
         public void NoHoldMeasuredMeansTheOldOneStepBehaviour()
         {
