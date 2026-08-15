@@ -18,6 +18,11 @@ This is the same defect 0.12.0 shipped a fix for in the consumer path, and the h
 kept its own copy of the constant. A measurement that does not obtain its parameters the
 way the thing it measures obtains them is measuring a different system.
 
+Found and diagnosed independently by @dyCuong03 in #36, which reached the same
+ordering fix first. This lands over it because #36 did not compile — an escaping
+artifact in its report string — and because the cross-check against the measured
+rate was still missing. The framing of the defect below is theirs.
+
 ### Fixed
 
 - **The measurement now connects before it builds the predictor.** The timestep comes
