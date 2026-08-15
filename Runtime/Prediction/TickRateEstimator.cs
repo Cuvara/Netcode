@@ -70,10 +70,30 @@ namespace Cuvara.Netcode.Prediction
         /// <remarks>
         /// <para>
         /// Snapshots are emitted once per world tick, so the gap between the base ticks
-        /// two consecutive ones carry <i>is</i> the ratio of the two rates. Nothing on the
-        /// wire states it and nothing needs to: it is already implied by data the client
-        /// receives, and deriving it is one fewer field to advertise, one fewer constant
-        /// to configure, and one fewer thing that can be configured wrongly.
+        /// two consecutive ones carry <i>is</i> the ratio of the two rates. Deriving it is
+        /// one fewer field to advertise, one fewer constant to configure, and one fewer
+        /// thing that can be configured wrongly.
+        /// </para>
+        /// <para>
+        /// <b>This measures the snapshot cadence. It is used as the hold window, and
+        /// those are two different facts about the server.</b> They are equal only
+        /// because the server passes <c>_rates.WorldEvery</c> as <c>holdTicks</c> to
+        /// <c>ApplyHeldMovement</c> and also emits one snapshot per world tick — a
+        /// coincidence of construction, not a guarantee anything on the wire makes. If
+        /// the server ever holds for a window it does not send on, this returns the wrong
+        /// number and the client mis-predicts by a fixed ratio, which is the failure this
+        /// package has now hit four times and which no correction counter can see.
+        /// </para>
+        /// <para>
+        /// It is not left to go unnoticed. A hold window wrong by a ratio produces a
+        /// correction on every input, and the live measurement asserts that corrections
+        /// stay near zero on a healthy link
+        /// (<c>PredictionLatencyMeasurement</c>) — the assertion that found the missing
+        /// hold in the first place. If that fires and the tick rate agrees, suspect this
+        /// coupling before suspecting the arithmetic. `rpg-mmo-server#101` asks for the
+        /// hold semantics to be specified normatively and for an advertised
+        /// <c>hold_ticks</c> to be considered, which would retire the assumption instead
+        /// of documenting it.
         /// </para>
         /// <para>
         /// <b>Minimum, not mean.</b> A dropped or coalesced snapshot only ever widens a
