@@ -50,6 +50,20 @@ namespace Cuvara.Netcode.Client
 
         public string UserId { get; private set; } = string.Empty;
 
+        /// <summary>
+        /// The server's simulation tick rate in Hz, as advertised in its join response.
+        /// <b>Zero means the server did not send one</b> — fall back to a configured
+        /// default rather than treating it as a rate.
+        /// </summary>
+        /// <remarks>
+        /// This is the cadence the server integrates movement at, so it is the <c>dt</c> a
+        /// prediction layer must use. Reading it here rather than assuming a constant is
+        /// what stops a client and a server that disagree about the rate from silently
+        /// predicting different distances — see <c>JoinTokenResponse.TickRate</c> for what
+        /// that cost when it happened.
+        /// </remarks>
+        public uint TickRate { get; private set; }
+
         /// <summary>Server tick of the newest snapshot applied. Never moves backwards.</summary>
         public long ServerTick { get; private set; }
 
@@ -116,6 +130,7 @@ namespace Cuvara.Netcode.Client
                 }
 
                 UserId = response.UserId;
+                TickRate = response.TickRate;
             }
 
             _resolver.Reset();

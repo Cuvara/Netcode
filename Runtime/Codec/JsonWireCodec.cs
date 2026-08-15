@@ -179,7 +179,8 @@ namespace Cuvara.Netcode.Codec
                     {
                         Ok = payload.GetBool("ok"),
                         UserId = payload.GetString("user_id"),
-                        Error = payload.GetString("error")
+                        Error = payload.GetString("error"),
+                        TickRate = payload.GetUInt("tick_rate")
                     };
 
                 case MsgType.Snapshot:

@@ -257,17 +257,15 @@ namespace DOTSSample
             // server's spawn default (ServerDefaults.DefaultPlayerSpeed); nothing on the
             // wire carries it, which is the weakest joint in this setup and is why the
             // predictor refuses rather than guesses when it is left at zero.
-            _predictor = new LocalMovePredictor(
-                new PredictionSettings(inputRateHz, playerSpeed, MapBounds.Default));
+            // Constructed after the join, because the tick rate comes from the server —
+            // see StartPrediction. Creating it here with a guessed rate is exactly the
+            // defect this release fixes.
+            _predictor = null;
 
             // A predictor that refused is passed anyway: the binder treats a disabled one
             // as no predictor at all, so the fallback is 0.4.0's behaviour rather than a
             // special case anyone has to remember to write.
-            _binder = new WorldViewBinder(_view, _predictor);
-
-            Debug.Log(_binder.IsPredicting
-                ? $"[DOTSNet] Prediction ON — {inputRateHz}Hz, speed {playerSpeed}"
-                : "[DOTSNet] Prediction OFF — settings unusable; rendering server positions");
+            _binder = new WorldViewBinder(_view);
 
             _cts = new CancellationTokenSource();
             // Connection starts when a map is selected (see the OnGUI map selector).
@@ -392,6 +390,52 @@ namespace DOTSSample
 
             // Restart server status polling (doesn't need auth)
             PollServerStatusAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Builds the predictor once the server has told us its tick rate, and rebinds the
+        /// view to it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The tick rate comes from the server, not from a local constant.</b> It is the
+        /// cadence the server integrates movement at, so it is the <c>dt</c> prediction must
+        /// use — and it was a value shared by convention across two repositories until the
+        /// server moved movement to a 60 Hz group while this sample still assumed 15. The
+        /// client then predicted four times the distance per input, which at the default
+        /// speed is 0.25 world units: <b>under</b> the correction-smoothing threshold, so
+        /// it produced no visible snap and simply felt soft and wrong.
+        /// </para>
+        /// <para>
+        /// <c>inputRateHz</c> is deliberately NOT reused for this. It is how often this
+        /// client sends, which is a client choice; the integration rate is the server's.
+        /// Conflating them is what made the constant look shareable in the first place.
+        /// </para>
+        /// </remarks>
+        private void StartPrediction()
+        {
+            uint advertised = _client?.TickRate ?? 0u;
+
+            // Zero means "not sent" — same rule as EntitySnapshot.Speed. An older server
+            // gets the configured fallback rather than a tick rate of zero.
+            int tickRate = advertised > 0 ? (int)advertised : inputRateHz;
+
+            _predictor = new LocalMovePredictor(
+                new PredictionSettings(tickRate, playerSpeed, MapBounds.Default));
+
+            _binder = new WorldViewBinder(_view, _predictor);
+
+            Debug.Log(advertised > 0
+                ? $"[DOTSNet] Prediction ON — server tick rate {tickRate}Hz (advertised), " +
+                  $"input {inputRateHz}Hz, speed {playerSpeed}"
+                : $"[DOTSNet] Prediction ON — server advertised no tick rate, falling back to " +
+                  $"{tickRate}Hz. If the server integrates at a different rate, prediction " +
+                  "will drift by the ratio and read as soft, laggy movement.");
+
+            if (!_binder.IsPredicting)
+            {
+                Debug.LogWarning("[DOTSNet] Prediction OFF — settings unusable; rendering server positions");
+            }
         }
 
         /// <summary>
@@ -663,6 +707,7 @@ namespace DOTSSample
                 };
 
                 await _client.ConnectAsync(jwt, mapId, ct);
+                StartPrediction();
                 _status = "In World";
                 Debug.Log($"[DOTSNet] IN WORLD as {_client.UserId}");
 
