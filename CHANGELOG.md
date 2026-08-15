@@ -5,6 +5,50 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-08-15
+
+The instrument that exists to catch a tick-rate mismatch was itself running at the wrong
+tick rate. `PredictionLatencyMeasurement` built its `PredictionSettings` from
+`LiveBackendConfig.TickRate` — a constant defaulting to 15 — before it had connected, so
+against the now-60 Hz server it predicted a step four times too long on every input. The
+run it produced reported `corrections smoothed = 20` out of 20 samples and every other
+number it printed was measured through that error.
+
+This is the same defect 0.12.0 shipped a fix for in the consumer path, and the harness
+kept its own copy of the constant. A measurement that does not obtain its parameters the
+way the thing it measures obtains them is measuring a different system.
+
+### Fixed
+
+- **The measurement now connects before it builds the predictor.** The timestep comes
+  from the join response, so there is no longer an order in which a predictor can exist
+  without the server's rate. `PredictionSettings.FromServer` is used exactly as the
+  sample uses it, with `LiveBackendConfig.TickRate` demoted to the fallback it always
+  should have been.
+
+### Added
+
+- **The rate in use is printed, and the measured rate beside it.** Each configuration
+  reports `TICK RATE IN USE ... (advertised by the server)` or `<- FALLBACK, server
+  advertised none`, then the rate `TickRateEstimator` recovered from snapshot arrivals
+  and whether the two agree. The previous header printed the configured constant as
+  though it were operative, which is precisely how this went unnoticed.
+- **Three assertions on the healthy configuration**, so a repeat fails rather than
+  reports: the measured rate must not disagree with the rate in use, `Snaps` must be
+  zero, and `SmoothedCorrections` must not exceed a quarter of the samples. The last
+  carries the note that when it last fired it was a 4x tick-rate mismatch that no other
+  counter showed — every individual correction was 0.25 units, under the 0.5 snap
+  threshold, so the failure smoothed silently instead of snapping.
+- **The expected displacement per input is printed next to the largest frame jump**, as
+  `speed / tickRateInUse`, with the observed/expected ratio and a marker when it exceeds
+  1.5. This is instrumentation for an open question rather than an answer to it: a
+  prediction-off run reported a largest frame jump of `0.2500` where one accepted input
+  at speed 5 on a 60 Hz integration step should displace `0.0833`. The server applies one
+  movement step per received input — `TickLoop` sets `applyMovement` only for the newest
+  input per handle per tick — so three steps' worth of displacement between consecutive
+  snapshots is not accounted for by the send rate alone. The ratio is now in the output
+  instead of being reconstructed afterwards from numbers that had to be assumed.
+
 ## [0.12.1] - 2026-08-15
 
 The smoothness figure was not comparable between runs, and the way that surfaced is worth
