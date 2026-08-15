@@ -5,6 +5,85 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-15
+
+Prediction reproduces the server's **held movement**. Until now the client took one step
+per input while the server takes one per base tick for a whole world interval, so the
+client predicted a quarter of the server's motion at a 15 Hz send rate against a 60 Hz
+base tick — a corrections-on-every-input defect that never once snapped.
+
+Found by the assertion added in 0.12.2. That assertion was written to catch the tick-rate
+mismatch and caught a second, unrelated defect with the same signature on its first live
+run, which is the argument for asserting the healthy case rather than only the failing
+one.
+
+### The rule, from the server source
+
+`InputHandler.ProcessInput` steps once on the input's own base tick and records the
+direction as held. `InputHandler.ApplyHeldMovement` — called from `TickLoop` on **every**
+base tick, including ticks where no packet arrived at all — steps again while
+`baseTick - heldFrom < holdTicks`, where `holdTicks` is `_rates.WorldEvery`, four at
+60/15. An explicit stop (`MoveResult.None`) clears the hold immediately; a rejected
+vector leaves it alone.
+
+One input at 15 Hz therefore produces four steps, `4 x 5/60 = 0.3333`, and the server
+moves at the configured 5 u/s. The client produced `0.0833` and moved at 1.25.
+
+### Fixed
+
+- **The predictor is now tick-driven, like the server.** `Advance` runs whole base ticks
+  and integrates the held direction on each, instead of moving only when an input is
+  recorded. Replay reproduces the same timeline rather than one step per pending input,
+  so the live path and replay agree and a reconcile no longer injects a correction the
+  network did not cause.
+- **The hold window is measured, not configured.** Snapshots are emitted once per world
+  tick, so the gap between the base ticks two consecutive snapshots carry *is*
+  `WorldEvery`. `TickRateEstimator.SnapshotTickGap` derives it and `WorldViewBinder` hands
+  it to the predictor, so no consumer has to know the number and none can set it wrongly.
+  The minimum gap is used rather than the mean: a dropped snapshot only widens a gap, so
+  an average is biased upward by exactly the losses.
+- **Until a hold has been observed, behaviour is unchanged** — `HoldTicks` is 1 and the
+  predictor takes one step per input, as before. An unmeasured window is not guessed at.
+- **The smoothing span from 0.12.3 is now conditional.** With a hold, steps arrive one
+  timestep apart however slowly the client sends, so spreading them over the input
+  interval would leave the rendered position permanently four timesteps behind its own
+  simulation. That fix addressed a symptom whose cause was the missing hold; it is
+  retained only for the no-hold case.
+
+### Corrected
+
+**The "Not fixed here" note in 0.12.3 was wrong and is withdrawn.** It claimed the server
+also moves at 1.25 u/s and that the fix was raising the client's send rate to 60 Hz. The
+server moves at the configured 5; only the client was slow. Raising the send rate would
+have masked the shortfall at four times the input traffic per client and fixed nothing.
+The error came from reading `applyMovement` in the drain loop, concluding one step per
+input, and not noticing that the hold path runs outside the drain entirely.
+
+This also settles the `0.2500` figure the measurement reported with prediction off: three
+steps, which is what a snapshot sampling mid-hold shows. The original 0.3333 expectation
+was right and the correction offered against it was wrong.
+
+### Added
+
+- `LocalMovePredictor.HoldTicks` / `SetHoldTicks(int)` — the observed window, on the same
+  "values below 1 are not sent" rule the speed and tick-rate fields use.
+- `TickRateEstimator.SnapshotTickGap` — base ticks between consecutive snapshots.
+- `HeldMovementParityTests`, seven cases asserting the predictor against a restatement of
+  the server's scheduling that drives the same `MovementSystem.TryMove`, so only the
+  scheduling is compared and the arithmetic stays shared. Includes a direct assertion
+  that one second of held input travels the configured speed: client and server can agree
+  perfectly on a wrong number, and the absence of corrections cannot detect that.
+
+### Known gap, upstream
+
+`gameserver-dotnet/docs/API.md` states `dt = 1 / tick_rate` and "movement integrates once
+per simulation tick". Both are true of the server and both read, on the client, as "once
+per input". Nothing in the normative section says the newest input is held and
+re-integrated until a world interval expires, or that a deadzone clears it. A client
+implemented exactly to the document builds the predictor this release replaces. This is
+the third server behaviour a client has had to infer from source; it belongs beside the
+`tick_rate` contract and is being raised against the backend.
+
 ## [0.12.3] - 2026-08-15
 
 Fixing the tick rate in 0.12.0 made the visible stutter worse, and this is the repair.
