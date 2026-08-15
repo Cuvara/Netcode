@@ -171,8 +171,28 @@ namespace Cuvara.Netcode.Tests.Editor
 
         // ── The guarantee this must not break ──
 
+        /// <summary>
+        /// Sub-tick render frames must not perturb the simulation.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This assertion changed meaning in 0.14.0 and was not merely repaired.</b> It
+        /// used to compare a predictor given render frames against one given none, on the
+        /// premise that <c>Advance</c> only moved the rendered position. That premise is
+        /// now false: <c>Advance</c> runs the base-tick timeline, because the server
+        /// integrates a held direction on every tick and a client that moves only when it
+        /// sends reproduces a quarter of that.
+        /// </para>
+        /// <para>
+        /// What survives, and is what the assertion was always protecting, is that a
+        /// <i>partial</i> tick must not step the simulation. Both predictors are now given
+        /// the same whole ticks; only one additionally receives sub-tick frames. If those
+        /// perturb <c>SimulatedPosition</c>, the frame rate has entered the simulation and
+        /// bit-exactness with the server is gone.
+        /// </para>
+        /// </remarks>
         [Test]
-        public void SmoothingDoesNotTouchTheSimulatedPosition()
+        public void SubTickFramesDoNotTouchTheSimulatedPosition()
         {
             var smoothed = Seeded();
             var reference = Seeded();
@@ -181,12 +201,15 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < walk.Length; i++)
             {
                 smoothed.RecordInput(i + 1, walk[i].Item1, walk[i].Item2);
-                smoothed.Advance(Dt * 0.37f);   // arbitrary partial frames
                 reference.RecordInput(i + 1, walk[i].Item1, walk[i].Item2);
+
+                // The same whole tick to both, in unequal slices to one of them.
+                for (var f = 0; f < 4; f++) smoothed.Advance(Dt * 0.25f);
+                reference.Advance(Dt);
             }
 
             Assert.That(smoothed.SimulatedPosition.X, Is.EqualTo(reference.SimulatedPosition.X),
-                "rendering must not perturb the simulation — SimulatedPosition is what " +
+                "sub-tick frames perturbed the simulation — SimulatedPosition is what " +
                 "replay and the server agree on bit-for-bit, and it is bit-exactness that " +
                 "the whole shared-logic boundary exists to protect");
             Assert.That(smoothed.SimulatedPosition.Y, Is.EqualTo(reference.SimulatedPosition.Y));

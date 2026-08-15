@@ -118,12 +118,28 @@ namespace Cuvara.Netcode.Prediction
             /// </summary>
             public readonly long BaseTick;
 
-            public PendingInput(long tick, float moveX, float moveY, long baseTick)
+            /// <summary>
+            /// The entity's last-moved tick as it stood immediately before this input.
+            /// </summary>
+            /// <remarks>
+            /// Replay seeds the elapsed-time rule from this rather than reconstructing it
+            /// as <c>BaseTick - 1</c>. The two differ whenever the input before this one
+            /// did not move the entity — a deadzone, a rejected vector — because then the
+            /// banked time reaches further back than one tick, and reconstructing it
+            /// would hand the first replayed step a different <c>dt</c> from the one the
+            /// live path used. Replay and the live path must produce identical positions
+            /// or every reconcile injects a correction the network did not cause.
+            /// </remarks>
+            public readonly long LastMoveTickBefore;
+
+            public PendingInput(
+                long tick, float moveX, float moveY, long baseTick, long lastMoveTickBefore)
             {
                 Tick = tick;
                 MoveX = moveX;
                 MoveY = moveY;
                 BaseTick = baseTick;
+                LastMoveTickBefore = lastMoveTickBefore;
             }
         }
 
@@ -183,6 +199,7 @@ namespace Cuvara.Netcode.Prediction
         private float _tickAccumulator; // seconds carried toward the next base tick
         private float _heldX, _heldY; // direction the server would still be integrating
         private long _heldFrom;       // base tick the hold started on; 0 = nothing held
+        private long _lastMoveTick;   // base tick this entity last actually moved on
         private float _inputInterval; // observed seconds between inputs; diagnostics
         private float _lastInputAt;   // _elapsed when the previous input arrived
         private float _elapsed;       // monotonic seconds fed through Advance
@@ -392,6 +409,21 @@ namespace Cuvara.Netcode.Prediction
         public int RejectedInputs { get; private set; }
 
         /// <summary>
+        /// Inputs that arrived on a tick already stepped, and so moved nothing of their
+        /// own. Mirrors the server coalescing several inputs in one tick to a single step.
+        /// </summary>
+        /// <remarks>
+        /// Not a fault. A steady count at a send rate below the base tick rate would be
+        /// odd and worth looking at; at or above it, it is the rule working.
+        /// </remarks>
+        public int CoalescedInputs { get; private set; }
+
+        // TEMPORARY diagnostic - remove before merge.
+        public long DebugBaseTick => _baseTick;
+        public long DebugLastMoveTick => _lastMoveTick;
+        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick);
+
+        /// <summary>
         /// Records an input that has just been sent and applies it to the predicted
         /// position immediately. Call with the same tick and vector handed to
         /// <c>SendInput</c>.
@@ -427,7 +459,7 @@ namespace Cuvara.Netcode.Prediction
             }
 
             int slot = (_head + _count) % Capacity;
-            _pending[slot] = new PendingInput(tick, moveX, moveY, _baseTick);
+            _pending[slot] = new PendingInput(tick, moveX, moveY, _baseTick, _lastMoveTick);
             _count++;
 
             // Whatever of the previous step was still unshown would otherwise vanish
@@ -436,7 +468,30 @@ namespace Cuvara.Netcode.Prediction
             Vec2 before = Position;
 
             Vec2 previous = _predicted;
-            MoveResult verdict = StepResult(_predicted, moveX, moveY, out _predicted);
+
+            // Rule 1: at most one step per player per server tick. The server coalesces
+            // inputs landing in the same tick to the newest and moves once; a client that
+            // moves for each of them travels further than the server for the same input,
+            // which is the thing rule 1 exists to prevent.
+            //
+            // Here the tick may already have been stepped by the hold, because Advance
+            // and RecordInput are driven by the frame loop and the send loop separately
+            // and can fall either way round within one tick. The server never has that
+            // ambiguity — it drains inputs and then applies holds, in that order, inside
+            // one tick — so it guards on the hold side and this guards on both.
+            MoveResult verdict;
+            if (_lastMoveTick == _baseTick)
+            {
+                CoalescedInputs++;
+                verdict = MoveResult.Accepted;   // it moved this tick, just not for this input
+            }
+            else
+            {
+                verdict = StepResult(
+                    _predicted, moveX, moveY, StepDeltaTime(_baseTick, _lastMoveTick),
+                    out _predicted);
+            }
+
             _step = new Vec2(_predicted.X - previous.X, _predicted.Y - previous.Y);
 
             // Set or clear the hold on the server's rule: a direction becomes held only
@@ -450,11 +505,19 @@ namespace Cuvara.Netcode.Prediction
                 _heldX = moveX;
                 _heldY = moveY;
                 _heldFrom = _baseTick;
+                _lastMoveTick = _baseTick;
             }
             else if (verdict == MoveResult.None)
             {
                 // An explicit stop. A Rejected vector deliberately leaves the hold alone,
                 // matching the server, which logs and drops it without disturbing state.
+                //
+                // Clears the hold ONLY. LastMoveTick is deliberately untouched, exactly as
+                // server-side: a stop ends the held direction, it does not reset how long
+                // the entity has been stationary. Clearing it here sent StepDeltaTime down
+                // its "never moved" early return, which yields one plain timestep and so
+                // reproduced the old fixed-dt behaviour precisely — the forward-parity
+                // test stayed green while rule 3 was, in effect, not implemented.
                 _heldFrom = 0;
             }
 
@@ -532,6 +595,10 @@ namespace Cuvara.Netcode.Prediction
                 float heldX = 0f, heldY = 0f;
                 var next = 0;
 
+                // Replay banks time exactly as the live path did, seeded from the value
+                // that was actually in effect when the first surviving input was recorded.
+                long replayLastMove = _pending[_head].LastMoveTickBefore;
+
                 for (long t = _pending[_head].BaseTick; t <= _baseTick; t++)
                 {
                     // Inputs recorded on this tick step first and take the hold, exactly
@@ -540,8 +607,18 @@ namespace Cuvara.Netcode.Prediction
                     while (next < _count && _pending[(_head + next) % Capacity].BaseTick == t)
                     {
                         var input = _pending[(_head + next) % Capacity];
-                        MoveResult verdict = StepResult(
-                            replayed, input.MoveX, input.MoveY, out replayed);
+                        MoveResult verdict;
+                        if (replayLastMove == t)
+                        {
+                            // Already stepped this tick — rule 1, as above.
+                            verdict = MoveResult.Accepted;
+                        }
+                        else
+                        {
+                            verdict = StepResult(
+                                replayed, input.MoveX, input.MoveY,
+                                StepDeltaTime(t, replayLastMove), out replayed);
+                        }
                         ReplayedSteps++;
                         stepped = true;
 
@@ -550,6 +627,7 @@ namespace Cuvara.Netcode.Prediction
                             heldX = input.MoveX;
                             heldY = input.MoveY;
                             heldFrom = t;
+                            replayLastMove = t;
                         }
                         else if (verdict == MoveResult.None)
                         {
@@ -559,7 +637,8 @@ namespace Cuvara.Netcode.Prediction
                         next++;
                     }
 
-                    if (!stepped && ApplyHeld(ref replayed, t, heldFrom, heldX, heldY))
+                    if (!stepped &&
+                        ApplyHeld(ref replayed, t, heldFrom, heldX, heldY, ref replayLastMove))
                     {
                         ReplayedSteps++;
                     }
@@ -735,6 +814,7 @@ namespace Cuvara.Netcode.Prediction
             _heldX = 0f;
             _heldY = 0f;
             _heldFrom = 0;
+            _lastMoveTick = 0;
             _seeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
@@ -743,6 +823,7 @@ namespace Cuvara.Netcode.Prediction
             Snaps = 0;
             SmoothedCorrections = 0;
             ReplayedSteps = 0;
+            CoalescedInputs = 0;
             Reconciles = 0;
             DroppedInputs = 0;
             RejectedInputs = 0;
@@ -769,19 +850,27 @@ namespace Cuvara.Netcode.Prediction
         /// the smoothing threshold — the failure mode this class has now produced twice.
         /// </remarks>
         private bool ApplyHeld(ref Vec2 position, long baseTick) =>
-            ApplyHeld(ref position, baseTick, _heldFrom, _heldX, _heldY);
+            ApplyHeld(ref position, baseTick, _heldFrom, _heldX, _heldY, ref _lastMoveTick);
 
-        private bool ApplyHeld(ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY)
+        private bool ApplyHeld(
+            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref long lastMoveTick)
         {
             if (HoldTicks <= 1) return false;
             if (heldFrom == 0) return false;                 // nothing held
             if (heldFrom == baseTick) return false;          // the input already stepped it
             if (baseTick - heldFrom >= HoldTicks) return false;   // expired
 
-            Vec2 moved = Step(position, heldX, heldY);
+            // The hold path updates LastMoveTick server-side exactly as the packet path
+            // does, so a held step banks time for the next one just the same.
+            MoveResult result = StepResult(
+                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick), out Vec2 moved);
+
+            if (result is not (MoveResult.Accepted or MoveResult.Clamped)) return false;
             if (moved.X == position.X && moved.Y == position.Y) return false;
 
             position = moved;
+            lastMoveTick = baseTick;
             return true;
         }
 
@@ -824,15 +913,59 @@ namespace Cuvara.Netcode.Prediction
         /// the identical shape as the tick rate and the hold window. There is one
         /// implementation of the movement model and this asks it.
         /// </remarks>
-        private MoveResult StepResult(Vec2 from, float moveX, float moveY, out Vec2 moved)
+        private MoveResult StepResult(
+            Vec2 from, float moveX, float moveY, float deltaTime, out Vec2 moved)
         {
             var probe = new EntityState { Position = from, Speed = _speed, Dead = false };
             MoveResult result = MovementSystem.TryMove(
-                in probe, moveX, moveY, _dt, in _settings.Bounds, out Vec2 next);
+                in probe, moveX, moveY, deltaTime, in _settings.Bounds, out Vec2 next);
 
             moved = result is MoveResult.Accepted or MoveResult.Clamped ? next : from;
             return result;
         }
+
+        /// <summary>
+        /// The timestep one step covers: the time since this entity last actually moved,
+        /// bounded by <see cref="GameConstants.MaxBankedMovementMs"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Rule 3 of the three the server's movement model is built from
+        /// (<c>gameserver-dotnet/docs/API.md</c>, "The movement model a predicting client
+        /// must reproduce"). It exists so that coalescing — at most one step per player
+        /// per tick — cannot lose the simulated time the discarded inputs carried. Four
+        /// packets clumping into one tick from TCP batching, a GC pause or a radio waking
+        /// then still move the entity the distance those four ticks were worth.
+        /// </para>
+        /// <para>
+        /// <b>A client sending every tick never notices this rule</b>, because
+        /// <c>lastMoveTick == now - 1</c> makes it return exactly one timestep. A client
+        /// sending at 15 Hz into a 60 Hz base tick notices it whenever a gap runs past the
+        /// hold window — which is why the residual correction here was a constant two
+        /// steps that three releases of hold work could not move: the two sides differed
+        /// structurally, not by a rate.
+        /// </para>
+        /// <para>
+        /// <b>The cap is part of the model, not a server-side valve.</b> A client banking
+        /// unbounded time reconciles against a server that does not, on exactly the frames
+        /// where the network was worst — so the bound is applied here identically rather
+        /// than left to the server to impose.
+        /// </para>
+        /// </remarks>
+        private float StepDeltaTime(long baseTick, long lastMoveTick)
+        {
+            if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _dt;
+
+            long elapsed = baseTick - lastMoveTick;
+            if (elapsed > MaxBankedTicks) elapsed = MaxBankedTicks;
+            return _dt * elapsed;
+        }
+
+        /// <summary>
+        /// Ceiling on how many base ticks one step may cover, at this predictor's rate.
+        /// </summary>
+        public int MaxBankedTicks =>
+            GameConstants.MaxBankedMovementTicks(_settings.TickRate);
 
         private Vec2 Step(Vec2 from, float moveX, float moveY)
         {

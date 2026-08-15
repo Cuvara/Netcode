@@ -26,6 +26,9 @@ namespace Cuvara.Netcode.Tests.Editor
     public sealed class LocalMovePredictorTests
     {
         private const int TickRate = 15;
+
+        /// <summary>The base timestep, for advancing a tick between inputs.</summary>
+        private static float Dt => MovementSystem.DeltaTimeForTickRate(TickRate);
         private const float Speed = 5f;
 
         private static MapBounds Bounds => MapBounds.Default;
@@ -44,18 +47,46 @@ namespace Cuvara.Netcode.Tests.Editor
         /// What the server would do with this input sequence: one
         /// <see cref="MovementSystem.TryMove"/> per accepted input, at the fixed timestep.
         /// </summary>
-        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs)
+        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs) =>
+            ServerWalk(from, inputs, Speed);
+
+        /// <summary>
+        /// The server's movement model, restated at a given speed. One copy: a second
+        /// inline copy of this loop is how a test kept asserting the pre-rule-3 model
+        /// after the shared one had moved on.
+        /// </summary>
+        private static Vec2 ServerWalk(Vec2 from, (float x, float y)[] inputs, float speed)
         {
             float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
+            int cap = GameConstants.MaxBankedMovementTicks(TickRate);
             Vec2 pos = from;
+
+            // One input per tick, and a step covers the time since this entity last
+            // actually moved (rule 3), bounded by the shared cap. A fixed dt here would
+            // model a server that predates the rule -- and because clearing the
+            // last-moved tick reproduces a fixed dt exactly, that difference is invisible
+            // unless a walk contains an input that does not move, which this one does.
+            long tick = 0;
+            long lastMove = 0;
 
             foreach (var (x, y) in inputs)
             {
-                var probe = new EntityState { Position = pos, Speed = Speed, Dead = false };
-                var result = MovementSystem.TryMove(in probe, x, y, dt, Bounds, out var moved);
+                tick++;
+
+                float stepDt = dt;
+                if (lastMove != 0 && tick > lastMove)
+                {
+                    long elapsed = tick - lastMove;
+                    if (elapsed > cap) elapsed = cap;
+                    stepDt = dt * elapsed;
+                }
+
+                var probe = new EntityState { Position = pos, Speed = speed, Dead = false };
+                var result = MovementSystem.TryMove(in probe, x, y, stepDt, Bounds, out var moved);
                 if (result is MoveResult.Accepted or MoveResult.Clamped)
                 {
                     pos = moved;
+                    lastMove = tick;
                 }
             }
 
@@ -78,6 +109,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                predictor.Advance(Dt);
             }
 
             Vec2 expected = ServerWalk(Vec2.Zero, Walk);
@@ -96,6 +131,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 forward.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                forward.Advance(Dt);
             }
 
             // Path B: same inputs, but the server acknowledges the first four midway, so
@@ -104,6 +143,10 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 replayed.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                replayed.Advance(Dt);
             }
 
             var ackedThrough4 = ServerWalk(Vec2.Zero, new[] { Walk[0], Walk[1], Walk[2], Walk[3] });
@@ -126,7 +169,15 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 a.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                a.Advance(Dt);
                 b.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                b.Advance(Dt);
             }
 
             var anchor = ServerWalk(new Vec2(3f, -2f), new[] { Walk[0], Walk[1] });
@@ -439,20 +490,14 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 0; i < Walk.Length; i++)
             {
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                // One tick between inputs. Without it every input lands on the same base
+                // tick and rule 1 coalesces them to a single step -- which is correct, and
+                // not what a walk of four separate inputs is meant to model.
+                predictor.Advance(Dt);
             }
 
-            // Same reference walk, integrated at the server's speed.
-            float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
-            Vec2 pos = Vec2.Zero;
-            foreach (var (x, y) in Walk)
-            {
-                var probe = new EntityState { Position = pos, Speed = serverSpeed, Dead = false };
-                if (MovementSystem.TryMove(in probe, x, y, dt, Bounds, out var moved)
-                    is MoveResult.Accepted or MoveResult.Clamped)
-                {
-                    pos = moved;
-                }
-            }
+            // Same reference walk, through the one server model, at the server's speed.
+            Vec2 pos = ServerWalk(Vec2.Zero, Walk, serverSpeed);
 
             Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(pos.X),
                 "bit-exact at the server's speed, not merely close");
