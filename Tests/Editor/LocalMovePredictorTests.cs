@@ -250,20 +250,27 @@ namespace Cuvara.Netcode.Tests.Editor
             predictor.RecordInput(1, 1f, 0f);
             predictor.Reconcile(new Vec2(0.05f, 0f), 1);
 
-            Assert.That(predictor.Position, Is.Not.EqualTo(predictor.SimulatedPosition));
+            Assert.That(predictor.SmoothingOffset, Is.Not.EqualTo(Vec2.Zero));
 
             for (var frame = 0; frame < 60; frame++)
             {
                 predictor.Advance(1f / 60f);
             }
 
-            // Restored to the stronger form. #25 had to weaken this to an assertion on
-            // the offset alone, because that implementation left the rendered position
-            // LEADING the simulated one by the fraction of the pending step already drawn
-            // — its own comment said so. This implementation interpolates within the step
-            // instead, so the rendered position converges on the simulated one exactly and
-            // the original equality holds again. A test that a change forces you to
-            // weaken is telling you something about the change.
+            // Both, deliberately.
+            //
+            // #25 replaced `Position == SimulatedPosition` with this offset assertion, and
+            // that was the better test independently of which smoothing won: the intent
+            // is "the correction settles at exactly zero", and the equality was a proxy
+            // that happened to hold. Asserting the intent directly is kept.
+            //
+            // The equality is kept too, because under interpolation it is true again and
+            // it covers something the offset alone does not — that the step is fully
+            // shown as well as the correction retired. Under #25's extrapolating version
+            // it could not hold, which is why it had to go there.
+            Assert.That(predictor.SmoothingOffset, Is.EqualTo(Vec2.Zero),
+                "the correction must settle at exactly zero rather than approaching it");
+
             Assert.That(predictor.Position, Is.EqualTo(predictor.SimulatedPosition),
                 "the offset must settle exactly, not approach zero forever");
         }
