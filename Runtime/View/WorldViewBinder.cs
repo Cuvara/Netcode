@@ -164,6 +164,18 @@ namespace Cuvara.Netcode.View
         /// </summary>
         public bool IsPredicting => _predictor != null;
 
+        /// <summary>
+        /// Measures the server's base tick rate from snapshot arrivals, so the advertised
+        /// rate can be verified rather than trusted.
+        /// </summary>
+        /// <remarks>
+        /// Fed here because this is the one place that already sees every snapshot and
+        /// owns a clock. Reading it costs nothing; ignoring it costs what a wrong tick
+        /// rate costs, which is continuous sub-threshold wrongness that never announces
+        /// itself. See <see cref="TickRateEstimator"/>.
+        /// </remarks>
+        public TickRateEstimator TickRate { get; } = new TickRateEstimator();
+
         /// <summary>Entities currently presented.</summary>
         public int LiveCount => _live.Count;
 
@@ -234,6 +246,10 @@ namespace Cuvara.Netcode.View
                 _firstSnapshot = false;
                 _lastSnapshotTimeMs = nowMs;
                 _lastWorldTick = world.Tick;
+
+                // The tick carried here is a BASE tick, so its rate is the movement
+                // integration rate even though snapshots arrive at the slower world rate.
+                TickRate.Sample(world.Tick, nowMs / 1000.0);
             }
 
             // Compute interpolation factor: 0 = at "from", 1 = at "to"
@@ -389,6 +405,7 @@ namespace Cuvara.Netcode.View
             _interp.Clear();
             _explicitlyRemoved.Clear();
             _predictor?.Reset();
+            TickRate.Reset();
             _localId = string.Empty;
             _firstSnapshot = true;
             _lastWorldTick = 0;

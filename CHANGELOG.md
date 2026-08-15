@@ -5,6 +5,71 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-15
+
+0.11.0 read the advertised tick rate. This makes the client **verify** it, and makes the
+fallback **observable** — both now required by the normative contract in
+`gameserver-dotnet/docs/API.md`, which landed after 0.11.0 shipped.
+
+### The contract, and where 0.11.0 fell short of it
+
+> *"`tick_rate` is the rate at which the authoritative simulation tick advances — which is
+> also the rate at which player movement is integrated. A client MUST use
+> `dt = 1 / tick_rate`."*
+
+Read from the doc rather than relayed. Three clauses bear on the client, and 0.11.0
+satisfied one and a half:
+
+| Clause | 0.11.0 | now |
+|---|---|---|
+| MUST NOT assume a constant | ✅ | ✅ |
+| **SHOULD measure the rate**, and cross-check it even when advertised | ✗ | ✅ |
+| MAY fall back **only if observable** | sample logged it; package could not express it | ✅ |
+
+The fallback rule is the one I had wrong. I had been told to mirror the `speed` rule
+exactly — silent fallback to a configured value — and the doc is stricter for a stated
+reason worth keeping: **`speed` is per-entity and a wrong value is bounded by that
+entity's real speed; `tick_rate` scales every predicted displacement by a whole ratio.**
+15 against 60 is 4× per input, which lands under the correction threshold and smooths
+rather than snaps. Same "zero means not sent" encoding, deliberately not the same silent
+fallback.
+
+### Added
+
+- **`TickRateEstimator`** — recovers the base tick rate from snapshot arrivals:
+  `(tick₂ − tick₁)` over the wall-clock interval. **This works even though snapshots
+  arrive at the slower world rate**, because the `tick` they carry is a *base* tick: at 60
+  simulated and 15 sent, successive snapshots are four ticks apart and the arithmetic still
+  yields 60. A client that measured 15 here would predict at a quarter rate, so that case
+  is the one the tests lead with.
+
+  Requires a 1-second window and 5 samples before offering an estimate — a shorter window
+  divides a small tick delta by a small jittery interval and produces a confident-looking
+  number that is mostly scheduling noise.
+
+- **`WorldViewBinder.TickRate`** — the estimator, fed from the one place that already sees
+  every snapshot and owns a clock. Every consumer gets the cross-check for free.
+
+- **`PredictionSettings.FromServer(advertised, fallback, speed, bounds)` and
+  `TickRateIsFallback`**, mirrored on `LocalMovePredictor`. The flag *is* the observability
+  the protocol requires — a counter a caller can surface — so the package can now express
+  the rule rather than leaving each consumer to remember it.
+
+- **The DOTS sample warns on fallback and verifies the advertised rate against the
+  measured one**, once per session, logging either a confirmation or an error naming both
+  numbers.
+
+- **`TickRateEstimatorTests`** — 8 cases, leading with 60-simulated/15-sent.
+
+### Note on trust
+
+Verifying an advertised value against an independent measurement is not defensiveness for
+its own sake. A wrong tick rate produces **no symptom anyone can name**: it is wrong by a
+fixed ratio on every input, under the smoothing threshold, forever, with every counter
+reading healthy. It is the third defect of that shape in two days. A second, independent
+observation is the only thing that catches it, and the wire was already carrying enough to
+make one.
+
 ## [0.11.0] - 2026-08-15
 
 **The client took its prediction timestep from a local constant. The server moved movement

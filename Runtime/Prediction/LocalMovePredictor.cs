@@ -533,6 +533,16 @@ namespace Cuvara.Netcode.Prediction
             }
         }
 
+        /// <summary>
+        /// True when the tick rate came from a local fallback rather than from the server.
+        /// </summary>
+        /// <remarks>
+        /// Exposed so a consumer can make the substitution observable, which the protocol
+        /// requires: a silent fallback is the pre-<c>tick_rate</c> behaviour and
+        /// reintroduces the defect the field exists to close.
+        /// </remarks>
+        public bool TickRateIsFallback => _settings.TickRateIsFallback;
+
         /// <summary>The speed replay is currently integrating with.</summary>
         /// <remarks>
         /// Equal to <see cref="PredictionSettings.Speed"/> until a snapshot supplies one.
