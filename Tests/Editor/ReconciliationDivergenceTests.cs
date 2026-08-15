@@ -159,6 +159,79 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
+        /// A tick-rate mismatch diverges, and this is the regression test for the defect
+        /// that made it necessary.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Tick rate was a constant shared by convention across two repositories. When the
+        /// server moved movement integration to a 60 Hz critical group while the client
+        /// still assumed 15, the client predicted <b>four times</b> the distance per input.
+        /// </para>
+        /// <para>
+        /// The magnitude is the dangerous part. At the default speed the per-input error is
+        /// <b>0.25 world units — under the 0.5 smoothing threshold</b> — so a single
+        /// outstanding input produces no snap at all and simply feels soft. It only crosses
+        /// into a visible snap once several inputs are in flight, which makes it
+        /// intermittent: exactly "not smooth, and it jerks occasionally".
+        /// </para>
+        /// <para>
+        /// The durable fix is that the client reads the rate from
+        /// <c>JoinTokenResponse.TickRate</c> instead of assuming one. This test is what
+        /// stops the assumption creeping back.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AMismatchedTickRateProducesACorrection()
+        {
+            const int serverHz = 60;
+            const int clientHz = 15;
+
+            var predictor = new LocalMovePredictor(
+                new PredictionSettings(clientHz, ServerSpeed, Bounds));
+            predictor.Reconcile(Vec2.Zero, 0);
+            predictor.RecordInput(1, 1f, 0f);
+
+            // The server integrated the same input at its own rate.
+            float serverDt = MovementSystem.DeltaTimeForTickRate(serverHz);
+            var probe = new EntityState { Position = Vec2.Zero, Speed = ServerSpeed, Dead = false };
+            MovementSystem.TryMove(in probe, 1f, 0f, serverDt, Bounds, out var serverPos);
+
+            predictor.Reconcile(serverPos, 1);
+
+            Assert.That(predictor.LastCorrection, Is.GreaterThan(0f),
+                "a client predicting at a different rate than the server integrates at " +
+                "must be corrected; if this is zero the rates are not reaching the maths");
+
+            Assert.That(predictor.LastCorrection, Is.EqualTo(0.25f).Within(0.001f),
+                "the exact magnitude matters: 0.25 is UNDER the 0.5 smoothing threshold, " +
+                "so this defect produces no visible snap and reads as soft movement " +
+                "rather than as a bug. Pinned so the danger is visible in the test itself.");
+
+            Assert.That(predictor.LastCorrection, Is.LessThan(LocalMovePredictor.SmoothingThreshold),
+                "documenting the trap, not endorsing it");
+        }
+
+        [Test]
+        public void AMatchedTickRateProducesNoCorrection()
+        {
+            const int hz = 60;
+
+            var predictor = new LocalMovePredictor(new PredictionSettings(hz, ServerSpeed, Bounds));
+            predictor.Reconcile(Vec2.Zero, 0);
+            predictor.RecordInput(1, 1f, 0f);
+
+            float dt = MovementSystem.DeltaTimeForTickRate(hz);
+            var probe = new EntityState { Position = Vec2.Zero, Speed = ServerSpeed, Dead = false };
+            MovementSystem.TryMove(in probe, 1f, 0f, dt, Bounds, out var serverPos);
+
+            predictor.Reconcile(serverPos, 1);
+
+            Assert.That(predictor.LastCorrection, Is.Zero,
+                "the whole point of taking the rate from the server: agree exactly");
+        }
+
+        /// <summary>
         /// Predicting one vector while sending another <b>is</b> a divergence — this is
         /// what the measurement harness uses to force one.
         /// </summary>

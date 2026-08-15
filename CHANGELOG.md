@@ -5,6 +5,70 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-08-15
+
+**The client took its prediction timestep from a local constant. The server moved movement
+integration to 60 Hz. Nothing on either side noticed.** Minor rather than patch because
+`JoinTokenResponse`, `GameSessionClient` and `NetworkClient` all gain a `TickRate`.
+
+### The defect this closes
+
+Backend `develop` now runs multi-rate — critical 60 Hz, world 15 Hz — and
+`InputHandler` is constructed with `rates.CriticalHz`, so **movement integrates at
+`dt = 1/60`**. The client predicted at `1/15`, four times the distance per input.
+
+**The magnitude is what made it dangerous rather than obvious.** Measured:
+
+| inputs in flight | correction | vs the 0.5 u smoothing threshold |
+|---|---|---|
+| 1 | **0.2500 u** | **under — smoothed, no visible snap** |
+| 5 | 1.2500 u | over — snaps |
+| 15 | 3.7500 u | large snap |
+| *(rates matched)* | **0.0000 u** | — |
+
+So it would not look broken. It would feel **soft and slightly wrong continuously**, with
+an occasional jump once several inputs were in flight — *"still not smooth, and it jerks
+occasionally"*. Every counter would have read healthy, and the user would have blamed the
+prediction work. This is the third "the client assumed a server constant" defect in two
+days and the second to hide beneath the smoothing threshold.
+
+`staging` is unaffected: it was cut before the multi-rate change, so it is a consistent
+15 Hz on both sides. The break exists only on `develop`.
+
+### Added
+
+- **`JoinTokenResponse.TickRate`**, decoded from `wire.proto` field 4 in both codecs, and
+  surfaced as `GameSessionClient.TickRate` and `NetworkClient.TickRate`.
+
+  **Zero means "not sent", not "no ticks"** — the same rule as `EntitySnapshot.Speed`,
+  deliberately identical. It is the same situation, and a second convention for it would be
+  a trap of its own.
+
+- **The DOTS sample builds its predictor after the join, from the advertised rate**, with
+  the configured value as fallback. `inputRateHz` is explicitly *not* reused for this: how
+  often this client sends is a client choice, the integration rate is the server's, and
+  conflating them is what made the constant look shareable.
+
+- **`AMismatchedTickRateProducesACorrection`** pins the magnitude at **0.25 u** and asserts
+  it is *below* the smoothing threshold — documenting the trap in the test rather than
+  only in prose, so the reason this is hard to see is visible where someone will read it.
+  Plus `AMatchedTickRateProducesNoCorrection` for the other side.
+
+### Changed
+
+- `Runtime/Protocol/Generated/Wire.cs` regenerated with libprotoc 29.3. Diff is field 4 and
+  the descriptor blob, nothing else. Per [#20](https://github.com/Cuvara/Netcode/issues/20)
+  I checked the committed file afterwards rather than trusting protoc's exit code — it
+  wrote flat this time, which means the `mv` step documented in 0.7.0 describes only one of
+  protoc's two behaviours. **The reliable step is checking the file, not the recipe.**
+
+### Not changed, deliberately
+
+**The sample still sends input at 15 Hz into a 60 Hz drain.** That is legitimate — three of
+four base ticks simply carry no input — but it changes the superseded-input behaviour
+documented in 0.5.0, so it is a second variable. One thing moves at a time: land the rate
+decode, measure, then decide the input rate separately.
+
 ## [0.10.4] - 2026-08-15
 
 **The measurement harness's "forced divergence" configuration forced no divergence.** It
