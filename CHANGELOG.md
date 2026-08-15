@@ -5,6 +5,72 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-08-15
+
+**The measurement harness's "forced divergence" configuration forced no divergence.** It
+reported a correction of exactly zero on a live run, which read as reconciliation being
+broken. It is not broken; the configuration was measuring a case that legitimately yields
+zero.
+
+### The diagnosis
+
+The clue was in the run's own output: `input -> authoritative: no usable samples`. **An
+input that is never sent is never acknowledged, so it is never removed from the pending
+buffer** — every reconcile replays it on top of the authoritative position and reproduces
+the prediction exactly. Correction is zero because nothing has diverged. From the client's
+side a dropped input is indistinguishable from one still in flight, which is what it is.
+
+Reproduced in isolation:
+
+| Configuration | Correction | Pending | Replayed |
+|---|---|---|---|
+| dropped, still pending *(what the harness did)* | **0.000000** | 1 | 1 |
+| acknowledged but not applied | 0.333333 | 0 | 0 |
+| predicted vector ≠ sent vector | 0.333333 | 0 | 0 |
+
+The first row is the live case, and `replayed=1` shows `Reconcile` ran with the server's
+position and correctly found nothing to correct. The earlier out-of-Unity experiment
+measured the *second* row and called it "input superseded"; the harness was then built
+around *dropping* the input instead of *acknowledging it unapplied*, which is a different
+thing.
+
+**So the reading that a zero correction on the healthy run is bit-exactness stands.** This
+configuration never contradicted it.
+
+### Fixed
+
+- **The divergence run now sends a zero vector while predicting a non-zero one.** The
+  server acknowledges the tick — so the input leaves the buffer — having moved nowhere,
+  and the disagreement is real and permanent. It also fixes
+  `input -> authoritative: no usable samples`, because the tick is actually sent.
+
+  **The guard was not relaxed.** It is still `MaxCorrection > 0`; what changed is that the
+  configuration behind it now produces a divergence to detect.
+
+- **An orphaned `<param>` tag**, stranded onto `FirstUnreachableAsync` when 0.10.3 inserted
+  the reachability probe between a docstring and its method. Warning-level, so CI compiled
+  around it.
+
+### Added
+
+- **`LocalMovePredictor.Reconciles`** — times `Reconcile` folded in an authoritative
+  position. `ReplayedSteps` alone cannot answer "is reconciliation running", because a
+  reconcile with nothing pending replays nothing; conflating the two is what made the live
+  result look like a broken loop. The seeding call is deliberately not counted, so a
+  nonzero value means a real reconcile rather than initialisation. The harness reports it
+  and asserts on it in the divergence run.
+
+- **Three EditMode tests pinning the distinction**, so it does not have to be re-learned
+  live: `AnUnacknowledgedInputIsNotADivergence`,
+  `PredictingADifferentVectorThanWasSentDiverges`,
+  `ReconcilingWithNothingPendingStillCounts`.
+
+### The live numbers this does not affect
+
+From the same run, and they stand: **input → visible 56.0 ms → 0.1 ms**, and **largest
+single-frame jump 0.3333 → 0.0149 world units, a 22× reduction** — the 15 Hz stutter
+measured in-engine for the first time, against 0.0143 predicted out of Unity.
+
 ## [0.10.3] - 2026-08-15
 
 **The live-backend measurement failed a consumer's CI.** It is a test, not runtime code —

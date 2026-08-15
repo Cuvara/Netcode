@@ -121,6 +121,80 @@ namespace Cuvara.Netcode.Tests.Editor
                 "reading it as a fault is what this fixture exists to prevent.");
         }
 
+        /// <summary>
+        /// An input the server never received is <b>not</b> a divergence, and this is the
+        /// case that cost a live run to learn.
+        /// </summary>
+        /// <remarks>
+        /// An input that is never sent is never acknowledged, so it is never dropped from
+        /// the pending buffer, so every reconcile replays it on top of the authoritative
+        /// position and reproduces the prediction exactly. From the client's side a
+        /// dropped input is indistinguishable from one still in flight — which is what it
+        /// is. The measurement harness originally forced "divergence" this way and got a
+        /// correction of exactly zero, which read as reconciliation being broken and was
+        /// nothing of the kind.
+        /// </remarks>
+        [Test]
+        public void AnUnacknowledgedInputIsNotADivergence()
+        {
+            var predictor = AfterWalk(ServerSpeed);
+
+            // Server saw and acknowledged only the first three of four.
+            predictor.Reconcile(
+                ServerWalk(Vec2.Zero, new[] { Walk[0], Walk[1], Walk[2] }, ServerSpeed),
+                ackTick: 3);
+
+            // One, not two: the first Reconcile on a fresh predictor takes the seed path
+            // and returns before the counter, because seeding folds in a starting
+            // position without comparing anything. That makes `Reconciles > 0` mean "a
+            // real reconcile happened" rather than "we initialised", which is the more
+            // useful reading and the one the measurement harness asserts on.
+            Assert.That(predictor.Reconciles, Is.EqualTo(1));
+            Assert.That(predictor.PendingCount, Is.EqualTo(1), "the fourth input is still in flight");
+            Assert.That(predictor.ReplayedSteps, Is.GreaterThan(0), "and was replayed");
+            Assert.That(predictor.LastCorrection, Is.Zero,
+                "replaying an unacknowledged input on top of the authoritative position " +
+                "reproduces the prediction exactly. Zero here is correct, and reading it " +
+                "as a broken reconcile is the mistake this test exists to prevent.");
+        }
+
+        /// <summary>
+        /// Predicting one vector while sending another <b>is</b> a divergence — this is
+        /// what the measurement harness uses to force one.
+        /// </summary>
+        [Test]
+        public void PredictingADifferentVectorThanWasSentDiverges()
+        {
+            var predictor = Seeded(ServerSpeed);
+            predictor.RecordInput(1, 1f, 0f);                       // predicted a step
+
+            predictor.Reconcile(ServerWalk(Vec2.Zero, new[] { (0f, 0f) }, ServerSpeed), 1);
+
+            Assert.That(predictor.PendingCount, Is.Zero, "the tick was acknowledged");
+            Assert.That(predictor.LastCorrection, Is.GreaterThan(0f),
+                "the server was sent a zero vector and moved nowhere while the client " +
+                "predicted a step, so once the tick is acknowledged they must disagree");
+        }
+
+        /// <summary>
+        /// <see cref="LocalMovePredictor.Reconciles"/> and
+        /// <see cref="LocalMovePredictor.ReplayedSteps"/> answer different questions.
+        /// </summary>
+        [Test]
+        public void ReconcilingWithNothingPendingStillCounts()
+        {
+            var predictor = Seeded(ServerSpeed);
+            predictor.RecordInput(1, 1f, 0f);
+            predictor.Reconcile(ServerWalk(Vec2.Zero, new[] { Walk[0] }, ServerSpeed), 1);
+
+            int after = predictor.Reconciles;
+            predictor.Reconcile(predictor.SimulatedPosition, 1);    // nothing pending
+
+            Assert.That(predictor.Reconciles, Is.EqualTo(after + 1),
+                "a reconcile with an empty buffer replays nothing, so ReplayedSteps alone " +
+                "cannot tell you whether reconciliation is running");
+        }
+
         // ── Disagreement: the mechanism produces a correction ──
 
         /// <summary>
