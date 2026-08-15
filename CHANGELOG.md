@@ -5,7 +5,9 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.1] - 2026-08-15
+
+Two things that should have been in 0.10.0 and were lost when it merged mid-edit.
 
 ### Fixed
 
@@ -34,11 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moved the client and left the server behind. Neither fix makes the rate observable —
   that is `rpg-mmo-server#93`, which proposes `tick_rate` on `JoinTokenResponse`.
 
-## [0.10.1] - 2026-08-15
-
-Two things that should have been in 0.10.0 and were lost when it merged mid-edit.
-
-### Fixed
+  *(Moved here from `[Unreleased]` — this release tags it, so filing it as unreleased
+  would be a heading that disagrees with what shipped. Entry unchanged; authored with
+  `#27`.)*
 
 - **Restored `#25`'s `SmoothingOffset` assertion in `SmoothedOffsetDecaysToExactlyZero`.**
   I had reverted it to the older `Position == SimulatedPosition` form on the grounds that
