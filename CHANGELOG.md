@@ -5,6 +5,38 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-08-15
+
+### Fixed
+
+- **The live-backend measurement harness predicted at a locally configured tick rate
+  while the server integrated at another, and every figure it produced carried a
+  per-input correction.** Against the multi-rate server it reported `corrections
+  smoothed 20` out of 20 samples — one per input — with `input -> visible` and the
+  smoothing figures all measured through that error. The harness now connects first
+  and builds `PredictionSettings` from `NetworkClient.TickRate`, falling back to the
+  configured value only when the server advertises zero, and recording that it did.
+  This is the same defect the sample fixed in 0.11.0, surviving in the instrument
+  built to detect it: the fix reached the consumer someone was thinking about, and
+  the tool that measures the consumer kept its own copy of the constant.
+
+- **Two independent reads of the tick rate inside the harness** — the predictor's
+  settings and the replay `dt` — collapsed into one. Two reads are two things that
+  can drift, which is the shape the server removed by collapsing `CriticalHz` into a
+  single `MovementHz`.
+
+### Added
+
+- **An assertion that corrections do NOT occur when nothing should diverge.** The
+  existing guard proves a correction *can* happen; this proves one does not happen on
+  a healthy link. Twenty corrections in twenty samples passed silently before, because
+  each was under the smoothing threshold and therefore invisible with every other
+  counter reading correct.
+
+- **An assertion that the tick rate was advertised rather than guessed**, and the
+  rate in use printed beside the results. `tick rate 15` against a 60 Hz server must
+  not be printable without looking wrong.
+
 ## [0.12.1] - 2026-08-15
 
 The smoothness figure was not comparable between runs, and the way that surfaced is worth

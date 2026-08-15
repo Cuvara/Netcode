@@ -130,6 +130,16 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float EffectiveSpeed;
             public bool Predicting;
 
+            /// <summary>Tick rate the predictor actually integrated at, in Hz.</summary>
+            public int TickRateInUse;
+
+            /// <summary>
+            /// True when the server advertised no tick rate and the configured default
+            /// was used instead. Recorded rather than assumed: a silent fallback is
+            /// indistinguishable from a correct read, which is the defect it hides.
+            /// </summary>
+            public bool TickRateIsFallback;
+
             /// <summary>
             /// Per-render-frame movement of the rendered local position, while an input
             /// is in flight. This is the stutter, quantified: at 15 Hz input and a high
@@ -271,6 +281,25 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // divergence configuration below, and by ReconciliationDivergenceTests in
             // EditMode, which pins all four readings without needing a backend.
 
+            // The other half of the divergence guard. The check below proves a correction
+            // CAN occur; this proves one does NOT occur when nothing should disagree.
+            // Without it, a client predicting at the wrong tick rate corrects on every
+            // single input, lands under the smoothing threshold so nothing snaps, and the
+            // run passes with every counter reading healthy — which is exactly what
+            // happened before the harness read the rate from the server.
+            Assert.That(withPrediction.SmoothedCorrections, Is.LessThan(Samples / 2),
+                $"{withPrediction.SmoothedCorrections} of {Samples} inputs needed correcting on a " +
+                "healthy local link. Client and server disagree systematically — check the " +
+                $"tick rate first (predicting at {withPrediction.TickRateInUse} Hz" +
+                (withPrediction.TickRateIsFallback ? ", A FALLBACK the server never advertised" : "") +
+                "), then the speed. A per-input correction under the smoothing threshold is " +
+                "invisible by eye and leaves every other counter looking correct.");
+
+            Assert.That(withPrediction.TickRateIsFallback, Is.False,
+                "the server advertised no tick rate, so this run predicted at a locally " +
+                "configured guess. The figures are not comparable to a run that read the " +
+                "rate from the wire, and a silent fallback is the defect the contract closes.");
+
             Assert.That(withPrediction.EffectiveSpeed, Is.EqualTo(LiveBackendConfig.PlayerSpeed).Within(0.001f),
                 $"the speed replay used ({withPrediction.EffectiveSpeed}) does not match the " +
                 $"server's ({LiveBackendConfig.PlayerSpeed}). Either the server's default " +
@@ -396,22 +425,47 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 },
                 new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
 
+            // Connect BEFORE building the predictor: the tick rate it must integrate at
+            // is the server's, and the server does not advertise it until the join
+            // response arrives. Constructing the predictor from a locally configured
+            // constant is the defect this ordering exists to prevent — a client
+            // predicting at 15 against a server integrating at 60 overshoots every
+            // input by a whole ratio, and the error lands under the smoothing
+            // threshold, so nothing snaps and every counter reads healthy.
+            await client.ConnectAsync(jwt, LiveBackendConfig.MapId, ct);
+
+            string localId = client.UserId;
+            Assert.That(localId, Is.Not.Empty, "joined without a user id");
+
+            // Zero means "not sent" — an older server predates the field. Falling back
+            // is permitted, but only observably: a silent fallback is behaviourally the
+            // pre-#93 code. See docs/API.md's tick_rate contract.
+            bool tickRateIsFallback = client.TickRate == 0u;
+            int serverTickRate = tickRateIsFallback
+                ? LiveBackendConfig.TickRate
+                : (int)client.TickRate;
+
             LocalMovePredictor predictor = predict
                 ? new LocalMovePredictor(new PredictionSettings(
-                    LiveBackendConfig.TickRate, LiveBackendConfig.PlayerSpeed, MapBounds.Default))
+                    serverTickRate, LiveBackendConfig.PlayerSpeed, MapBounds.Default))
                 : null;
 
             var view = new ProbeView();
             var binder = new WorldViewBinder(view, predictor);
             run.Predicting = binder.IsPredicting;
 
-            await client.ConnectAsync(jwt, LiveBackendConfig.MapId, ct);
-
-            string localId = client.UserId;
-            Assert.That(localId, Is.Not.Empty, "joined without a user id");
+            run.TickRateInUse = serverTickRate;
+            run.TickRateIsFallback = tickRateIsFallback;
+            Debug.Log($"[Measure] tick rate in use: {serverTickRate} Hz " +
+                      (tickRateIsFallback
+                          ? "(FALLBACK — server advertised none; this run may not be comparable)"
+                          : $"(advertised by the server; configured default was {LiveBackendConfig.TickRate})"));
 
             long tick = 0;
-            float dt = 1f / LiveBackendConfig.TickRate;
+            // One source for the rate inside this harness. Two independent reads are two
+            // things that can drift, which is the shape the server removed by collapsing
+            // CriticalHz into a single MovementHz.
+            float dt = 1f / serverTickRate;
 
             // Let the world arrive and the local entity spawn before measuring.
             await PumpAsync(client, binder, localId, seconds: 1.5f, ct);
@@ -543,6 +597,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  pending peak             {run.PendingPeak}\n" +
                 $"  reconciles               {run.Reconciles}\n" +
                 $"  replayed steps           {run.ReplayedSteps}   (zero is normal when nothing was pending)\n" +
+                $"  tick rate in use         {run.TickRateInUse} Hz{(run.TickRateIsFallback ? \" (FALLBACK)\" : \" (from the server)\")}\n" +
                 $"  corrections smoothed     {run.SmoothedCorrections}\n" +
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
