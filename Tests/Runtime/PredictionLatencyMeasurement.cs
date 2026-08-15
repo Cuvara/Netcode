@@ -150,6 +150,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public int DistinctPositions;
 
+            /// <summary>Hold window the predictor derived, for reading the clock error.</summary>
+            public int HoldTicksInUse;
+
             /// <summary>Times SetState was called for any entity.</summary>
             public int SetStateCalls;
 
@@ -696,6 +699,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             }
 
             run.DistinctPositions = view.DistinctTrackedPositions;
+            run.HoldTicksInUse = predictor?.HoldTicks ?? 0;
             run.SetStateCalls = view.SetStateCalls;
 
             if (run.FrameSeconds.Count > 0)
@@ -880,11 +884,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
             float nearest = (float)Math.Round(steps);
             bool whole = nearest >= 1f && Math.Abs(steps - nearest) < 0.05f;
 
+            if (steps < 0.05f)
+            {
+                return "   (zero — client and server agree, which is the only healthy value)";
+            }
+
+            // Read the clock error straight off the correction.
+            //
+            // A client whose clock is right disagrees with the server by nothing at all;
+            // a client whose clock runs fast accrues extra base ticks and disagrees by
+            // exactly (factor - 1) * holdTicks steps, linearly, pinned in
+            // HeldMovementParityTests.TheCorrectionMeasuresTheClockError. So the
+            // correction is not merely a symptom, it is a reading — and this line spares
+            // the next person the arithmetic that took several releases to arrive at.
+            int hold = run.HoldTicksInUse > 0 ? run.HoldTicksInUse : 0;
+            string clock = hold > 0
+                ? $" — implies a predictor clock at {1f + steps / hold:F2}x real time"
+                : string.Empty;
+
             return whole
-                ? $"   <<< {nearest:F0} whole steps — a PHASE error (hold remainder dropped " +
-                  "at ack), not a rate error"
-                : "   (not a whole number of steps — look at the rate or the arithmetic, " +
-                  "not the hold)";
+                ? $"   <<< {nearest:F0} whole steps{clock}"
+                : $"   <<< {steps:F2} steps{clock}";
         }
 
         private static string ExpectedStepNote(Run run)
