@@ -1645,10 +1645,43 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // HeldMovementParityTests.TheCorrectionMeasuresTheClockError. So the
             // correction is not merely a symptom, it is a reading — and this line spares
             // the next person the arithmetic that took several releases to arrive at.
+            // Two different faults produce a correction that is a whole number of steps,
+            // and this note used to name only one of them — printing "implies a predictor
+            // clock at N x real time" as though the clock were established, when it is one
+            // candidate of two and the arithmetic does not distinguish them.
+            //
+            // A clock error accrues extra base ticks and disagrees by
+            // (factor - 1) * holdTicks steps, linearly, which is what
+            // HeldMovementParityTests pins. But rule 3 — banked movement — caps ONE step
+            // at MaxBankedMovementTicks timesteps (15 at 60 Hz, from a 250 ms bound), so a
+            // disagreement about how much time an entity had banked while stationary lands
+            // at or just under that cap in a single correction, with no clock error at all.
+            // A settle phase that leaves the entity still for 400 ms puts both sides
+            // squarely against that cap.
+            //
+            // So both readings are offered and the one that matches is named. 16 steps
+            // against a 15-step cap is the banked reading; it is not a 5x clock.
             int hold = run.HoldTicksInUse > 0 ? run.HoldTicksInUse : 0;
-            string clock = hold > 0
-                ? $" — implies a predictor clock at {1f + steps / hold:F2}x real time"
-                : string.Empty;
+            int bankedCap = run.TickRateInUse > 0
+                ? GameConstants.MaxBankedMovementTicks(run.TickRateInUse)
+                : 0;
+
+            string clock;
+            if (bankedCap > 0 && nearest >= bankedCap)
+            {
+                clock = $" — at or above the {bankedCap}-step banked-movement cap " +
+                        "(rule 3, MaxBankedMovementMs), so read this as a disagreement " +
+                        "about time banked while stationary, NOT as a clock error";
+            }
+            else if (hold > 0)
+            {
+                clock = $" — if this is clock error it implies {1f + steps / hold:F2}x " +
+                        $"real time; if it is banked movement the cap is {bankedCap} steps";
+            }
+            else
+            {
+                clock = string.Empty;
+            }
 
             return whole
                 ? $"   <<< {nearest:F0} whole steps{clock}"

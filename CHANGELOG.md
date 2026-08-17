@@ -89,6 +89,23 @@ trimmed — it is declining to measure a velocity over an interval of zero lengt
 is printed as `zero-duration reads` and must equal the sample count exactly; anything else
 means the loop structure has changed underneath the reasoning.
 
+### Changed — the correction-shape note no longer asserts a clock error
+
+A correction that is a whole number of steps has **two** candidate causes and the
+arithmetic does not distinguish them, but the note printed only one: "implies a predictor
+clock at N x real time", as though the clock were established.
+
+- A **clock error** accrues extra base ticks and disagrees by `(factor - 1) * holdTicks`
+  steps, linearly — what `HeldMovementParityTests` pins.
+- **Banked movement (rule 3)** caps one step at `MaxBankedMovementTicks` timesteps — 15 at
+  60 Hz, from the 250 ms `MaxBankedMovementMs` bound — so a disagreement about time banked
+  while an entity was stationary lands at or just under that cap in a single correction,
+  with no clock error at all. A settle phase that leaves the entity still for ~400 ms puts
+  both sides squarely against that cap.
+
+The note now compares against the cap and names the reading that matches. A measured 16
+steps against a 15-step cap is the **banked** reading, not a 5x clock.
+
 ### Added — the fault's run-length distribution
 
 `fault run lengths` prints the histogram of unbroken still runs *during active hold*. A
