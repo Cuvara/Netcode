@@ -68,6 +68,34 @@ Guarded against recurrence: the report prints **`largest AdvanceFrame`** and cou
 denominator is implausibly small — an empty denominator changes the percentage without
 changing the numerator, which is exactly how this hid.
 
+### Fixed — the first reading of each sample spanned no time and was recorded as a fault
+
+With the clock leak closed, the rendering-fault figure came back as **20 of 819 — exactly
+one frame per sample**, which is a per-sample artefact and not a per-step one (a per-step
+residual would have been ~3 per sample).
+
+The sampling loop reads the rendered position at the top of an iteration and calls
+`AdvanceFrame` at the bottom, so iteration *n*'s reading is the position as of iteration
+*n-1*'s advance. That is a correct one-frame delta for every iteration except the first,
+which has no advance behind it: it reads the position as it stood the instant
+`RecordInput` returned, against a baseline captured moments earlier. **That reading is
+necessarily zero and it is right that it is** — `RecordInput` deliberately preserves the
+rendered position across an input, folding the unshown remainder into `_renderOffset`
+(`LocalMovePredictor.cs:537-541`), precisely so the avatar does not jump on an input
+boundary. No time has passed, so no movement is correct.
+
+The first reading now re-baselines instead of being recorded. This is not a tail being
+trimmed — it is declining to measure a velocity over an interval of zero length. The count
+is printed as `zero-duration reads` and must equal the sample count exactly; anything else
+means the loop structure has changed underneath the reasoning.
+
+### Added — the fault's run-length distribution
+
+`fault run lengths` prints the histogram of unbroken still runs *during active hold*. A
+percentage cannot tell 20 isolated frames from 3 freezes of 7 frames, and those need
+opposite responses: the first is a sampling artefact, the second a real freeze the
+interpolation is not covering.
+
 ### Changed — the smoothness assertion measures the rendering fault, not the rest
 
 The still-frame figure divided by *every* sampled frame. A sample sends one input and then
@@ -86,14 +114,18 @@ step in flight and something to render.
 it occurs by `LocalMovePredictor.HoldIsActive`, which is why this narrowing is honest and
 an earlier attempt to trim the tail by wall-clock reasoning was not.
 
-**Budget: 1%.** The correct value is exactly zero — while the hold runs there is a step in
-flight on every frame, so every frame has something to show. 1% is margin for the one
-legitimate source, a step-boundary frame whose sub-frame remainder rounds below the 1e-6
-still-frame threshold, which is bounded by the step rate (~1 frame in 17) times the chance
-the remainder is that small and is orders of magnitude under the budget. It is also
-comfortably below the 1.5% the defect produced, so it discriminates rather than
-accommodates. The old total is still printed beside it, along with how many of its still
-frames were post-expiry.
+**Budget: 0.5%, and the rationale is in the code beside it.** The correct value is exactly
+zero, not "small": while the hold runs there is a step in flight on every frame. The two
+ways a frame could fall under the 1e-6 threshold anyway both fail arithmetic — a
+zero-delta frame is counted separately as `non-advancing frames` and measures 0, and a
+frame's movement is ~5e-3 world units, some 5000x the threshold, so reaching it would need
+a sub-microsecond frame the harness clock cannot represent. The budget is therefore margin
+against scheduling noise, not against a known source: 0.5% of the ~819-frame denominator
+is **4 frames** — enough that one unlucky hitch cannot fail the suite, nowhere near enough
+to hide a systematic one. Both systematic shapes this measurement has actually produced sit
+far above it: a per-sample residual is 20 frames (2.4%), a per-step residual would be ~60
+(7%). The old total is still printed beside it, along with how many of its still frames
+were post-expiry.
 
 ### Added — the diagnostics that located this
 

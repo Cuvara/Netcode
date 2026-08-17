@@ -270,6 +270,68 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public int NonAdvancingFrames;
 
+            /// <summary>
+            /// Lengths of the unbroken runs of still frames that occurred while the hold
+            /// was active — the runs behind <see cref="RenderingFaultPercent"/>.
+            /// </summary>
+            /// <remarks>
+            /// <b>The distribution says what the residual is; the count never can.</b>
+            /// Twenty single-frame runs and three seven-frame runs give a similar
+            /// percentage and mean completely different things: the first is one isolated
+            /// frame somewhere periodic, the second is a real freeze the interpolation is
+            /// not covering.
+            /// </remarks>
+            public readonly System.Collections.Generic.List<int> ActiveStillRuns =
+                new System.Collections.Generic.List<int>();
+
+            /// <summary>Histogram of <see cref="ActiveStillRuns"/> as "1:n 2:n 3:n 4-7:n 8+:n".</summary>
+            public string ActiveStillRunHistogram
+            {
+                get
+                {
+                    if (ActiveStillRuns.Count == 0) return "none";
+
+                    int ones = ActiveStillRuns.Count(r => r == 1);
+                    int twos = ActiveStillRuns.Count(r => r == 2);
+                    int threes = ActiveStillRuns.Count(r => r == 3);
+                    int mid = ActiveStillRuns.Count(r => r >= 4 && r <= 7);
+                    int big = ActiveStillRuns.Count(r => r >= 8);
+                    return $"1:{ones}  2:{twos}  3:{threes}  4-7:{mid}  8+:{big}  " +
+                           $"(longest {ActiveStillRuns.Max()})";
+                }
+            }
+
+            /// <summary>
+            /// Frames read before any time had been advanced in that sample, and therefore
+            /// not recorded.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// The sampling loop reads the rendered position at the top of an iteration and
+            /// calls <c>AdvanceFrame</c> at the bottom, so iteration <i>n</i>'s reading is
+            /// the position as of iteration <i>n-1</i>'s advance. That is a correct
+            /// one-frame delta for every iteration but the first, which has no advance
+            /// behind it at all: it reads the position as it stood the instant
+            /// <c>RecordInput</c> returned, against a baseline captured moments earlier.
+            /// </para>
+            /// <para>
+            /// <b>That reading is necessarily zero, and it is right that it is.</b>
+            /// <c>RecordInput</c> deliberately preserves the rendered position across an
+            /// input — it folds the unshown remainder into <c>_renderOffset</c>
+            /// (<c>LocalMovePredictor.cs:537-541</c>) precisely so the avatar does not jump
+            /// on an input boundary. No time has passed, so no movement is correct.
+            /// </para>
+            /// <para>
+            /// Recording it counted one guaranteed still frame per sample: 20 of the 20
+            /// that the rendering-fault figure reported. This is not a tail being trimmed —
+            /// it is declining to measure a velocity over an interval of zero length.
+            /// Counted and printed so the exclusion is auditable, and it should always
+            /// equal the sample count exactly; anything else means the loop structure has
+            /// changed underneath this reasoning.
+            /// </para>
+            /// </remarks>
+            public int ZeroDurationFramesSkipped;
+
             /// <summary>Largest delta handed to <c>AdvanceFrame</c>, seconds.</summary>
             public float LargestAdvanceSeconds;
 
@@ -728,15 +790,36 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // narrowing honest rather than a tail trimmed on faith — an earlier attempt
             // trimmed one and was right about the shape for entirely the wrong reason.
             //
-            // The budget is a share of the frames that had motion available to render.
-            // The correct value is EXACTLY ZERO: while the hold runs there is a step in
-            // flight on every frame, so every frame has something to show. 1% is left as
-            // margin for the one legitimate source — a step-boundary frame whose sub-frame
-            // remainder rounds below the 1e-6 threshold — which is bounded by the step
-            // rate (~1 frame in 17) times the chance the remainder is that small, and is
-            // orders of magnitude under this. It is also comfortably below the 1.5% the
-            // defect produced, so it discriminates rather than merely accommodating.
-            const float RenderingFaultBudget = 1f;
+            // THE BUDGET, and why it is this number.
+            //
+            // The correct value is EXACTLY ZERO, not "small". While the hold runs there is
+            // a step in flight on every frame, so every frame has something to show. Two
+            // things could in principle put a frame under the 1e-6 still threshold anyway,
+            // and neither survives arithmetic:
+            //
+            //   A frame that advanced no time. AdvanceFrame early-outs on deltaTime <= 0
+            //   and the rendered position is then bit-identical. Counted separately as
+            //   Run.NonAdvancingFrames, measured at 0 since the harness clock moved to
+            //   realtimeSinceStartupAsDouble, and it would be reported rather than
+            //   absorbed here.
+            //
+            //   A frame whose movement rounds below the threshold. Per frame the render
+            //   moves |_step| * dtFrame / span — about 0.0833 * (1/16.7) = 5e-3 world
+            //   units at these rates, some 5000x the 1e-6 threshold. Reaching it needs a
+            //   frame roughly 2000x shorter than typical, i.e. under a microsecond, which
+            //   the harness clock (resolving 0.018 ms) cannot even represent as distinct.
+            //
+            // So a residual is not expected, and the budget is margin against scheduling
+            // noise rather than against a known source. 0.5% of the ~819-frame denominator
+            // is 4 frames: enough that a single unlucky hitch cannot fail the suite,
+            // nowhere near enough to hide a systematic one. The two systematic shapes this
+            // measurement has actually produced are far above it — a per-sample residual
+            // is 20 frames (2.4%) and a per-step residual would be ~3 per sample, 60
+            // frames (7%) — so this discriminates rather than accommodates.
+            //
+            // Read it with `fault run lengths`. A percentage cannot tell 20 isolated
+            // frames from 3 freezes of 7, and those need different responses.
+            const float RenderingFaultBudget = 0.5f;
 
             Assert.That(withPrediction.RenderingFaultPercent, Is.LessThan(RenderingFaultBudget),
                 $"{withPrediction.RenderingFaultPercent:F2}% of the frames that should have " +
@@ -1033,6 +1116,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 sampleDeltas.Clear();
                 sampleSeconds.Clear();
 
+                // No AdvanceFrame has run in this sample yet, so the first reading spans
+                // zero time. See Run.ZeroDurationFramesSkipped.
+                var advancedThisSample = false;
+                var activeStillRun = 0;
+
                 // Scoped to this sample window, so the counters describe the measured
                 // motion and not the settle phases either side of it.
                 int ticks0 = predictor?.BaseTicksAdvanced ?? 0;
@@ -1051,11 +1139,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                     // One reading per render frame: how far the avatar moved since the
                     // last frame. The distribution of these IS the stutter.
-                    if (view.TryGet(localId, out var rendered))
+                    if (view.TryGet(localId, out var rendered) && !advancedThisSample)
+                    {
+                        // Re-baseline instead of recording. The reading is real, the
+                        // interval it spans is not.
+                        run.ZeroDurationFramesSkipped++;
+                        previousRendered = rendered;
+                        previousFrameTime = Time.realtimeSinceStartupAsDouble;
+                    }
+                    else if (view.TryGet(localId, out rendered))
                     {
                         var frameDelta = (rendered - previousRendered).magnitude;
                         sampleDeltas.Add(frameDelta);
                         previousRendered = rendered;
+
+                        bool active = predictor != null && predictor.HoldIsActive;
+                        if (active && frameDelta <= 1e-6f)
+                        {
+                            activeStillRun++;
+                        }
+                        else if (activeStillRun > 0)
+                        {
+                            run.ActiveStillRuns.Add(activeStillRun);
+                            activeStillRun = 0;
+                        }
 
                         // Classify the still frame by the predictor state that produced
                         // it, at the moment it was produced. Reconstructing this
@@ -1151,6 +1258,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                     binder.AdvanceFrame(advanceBy);
                     lastFrameAt = frameNow;
+                    advancedThisSample = true;
 
                     await UniTask.Yield(PlayerLoopTiming.Update, ct);
                 }
@@ -1226,6 +1334,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     run.SkipRefusedByMovementModel +=
                         predictor.SkipRefusedByMovementModel - skipRefused0;
                     run.SkipNoDisplacement += predictor.SkipNoDisplacement - skipNoDisp0;
+                }
+
+                if (activeStillRun > 0)
+                {
+                    run.ActiveStillRuns.Add(activeStillRun);
                 }
 
                 run.SampleSeconds.Add((float)(Time.realtimeSinceStartupAsDouble - t0));
@@ -1388,6 +1501,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  RENDERING FAULT          {run.RenderingFaultPercent:F2}% " +
                     $"({run.StillFramesHoldActive} of {run.FramesHoldActive} frames that " +
                     "should have been moving)   <- THE ASSERTED FIGURE\n" +
+                $"  fault run lengths        {run.ActiveStillRunHistogram}   " +
+                    "<- 1:n means isolated frames; a 4-7 or 8+ bucket means a real freeze\n" +
+                $"  zero-duration reads      {run.ZeroDurationFramesSkipped} skipped   " +
+                    $"(should equal the {run.Samples.Count} samples exactly)\n" +
                 $"  still: hold still ACTIVE {run.StillFramesHoldActive}   " +
                     "<<< these are the rendering fault: the predictor was still " +
                     "integrating and the render did not follow\n" +
