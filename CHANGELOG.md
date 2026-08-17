@@ -211,6 +211,11 @@ Two things for whoever picks up #12:
 **A latent defect found while investigating #11, and confirmed by measurement not to be its
 cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
 
+### Fixed — one narrow snapshot pair permanently shrank the hold window
+
+**A latent defect found while investigating #11, and confirmed by measurement not to be its
+cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
+
 `TickRateEstimator.SnapshotTickGap` is a running minimum of the base-tick gap between
 consecutive snapshots that never recovers, and it is fed straight to the predictor as the
 hold window (`WorldViewBinder.cs:264`). The premise behind the minimum — that only drops
