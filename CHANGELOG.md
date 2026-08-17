@@ -5,6 +5,125 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — the local avatar froze for part of every base tick (#11)
+
+`SmoothingSpan` returned the integration timestep `_dt` unconditionally whenever a hold
+window was in use (`LocalMovePredictor.cs:326`), on the premise that with a hold the server
+steps every base tick and so the steps being spread arrive one `_dt` apart.
+
+**That is the steady case, not the only one.** The base tick immediately after an input is
+declined by rule 1 — `ApplyHeld`'s `heldFrom == baseTick` guard, because the input already
+stepped that tick — so the next step lands a full timestep after the *following* boundary,
+a gap of up to `2 * _dt`. Spreading it over `_dt` finishes the step part-way through the
+gap; `StepProgress` pins at 1 (`:293`), `remaining` goes to zero, and `Position` is
+bit-identical for the rest of the gap. At ~1000 fps against 60 Hz that is a run of still
+frames on the one entity the player is controlling.
+
+It is invisible to every existing counter because **the simulated position is correct
+throughout** — only the rendered one stops. `Snaps` stays 0, the corrections budget passes,
+the tick rate agrees and the hold window measures the correct 4.
+
+The span now follows the interval steps are **actually** arriving at, smoothed with the
+same α = 0.3 moving average `WorldViewBinder` uses on snapshot arrivals, floored at `_dt`
+as before. In sustained movement that interval *is* `_dt`, so the steady case is unchanged;
+it widens only across the boundary that was freezing. A gap longer than the whole hold
+window means the hold lapsed and the step begins a new burst rather than continuing one —
+adopting that would spread the next step across an idle period and leave the avatar
+crawling behind its own simulation, the 0.12.3 defect in a new place — so such a gap
+restarts the measurement and the span falls back to its floor. `StepProgress` still
+saturates at 1: a wider span makes the avatar reach the step later, never further than the
+step the input actually produced.
+
+### Changed — the smoothness assertion measures the rendering fault, not the rest
+
+The still-frame figure divided by *every* sampled frame. A sample sends one input and then
+watches until the server acknowledges it; the motion that input produces lasts exactly one
+hold window and the watch outlasts it, so the tail of every sample is the avatar
+**correctly** at rest — the predictor has stopped because the server has. A live run split
+437 still frames into **417 legitimate and 20 genuine**: ~95% of the asserted number was
+measuring correct behaviour, and the figure moved with acknowledgement timing rather than
+with rendering.
+
+The assertion is now `RenderingFaultPercent` — still frames on which the hold window was
+**still running**, over the frames on which it was running. Those are the frames that had a
+step in flight and something to render.
+
+**The split is a counter, not an argument.** Every still frame is classified at the moment
+it occurs by `LocalMovePredictor.HoldIsActive`, which is why this narrowing is honest and
+an earlier attempt to trim the tail by wall-clock reasoning was not.
+
+**Budget: 1%.** The correct value is exactly zero — while the hold runs there is a step in
+flight on every frame, so every frame has something to show. 1% is margin for the one
+legitimate source, a step-boundary frame whose sub-frame remainder rounds below the 1e-6
+still-frame threshold, which is bounded by the step rate (~1 frame in 17) times the chance
+the remainder is that small and is orders of magnitude under the budget. It is also
+comfortably below the 1.5% the defect produced, so it discriminates rather than
+accommodates. The old total is still printed beside it, along with how many of its still
+frames were post-expiry.
+
+### Added — the diagnostics that located this
+
+The percentage alone cannot tell a rendering fault from correct rest from a clock artefact
+from a per-tick renderer; all four produce similar numbers from different arrangements.
+The run report now prints, recorded at the moment each frame happens:
+
+- **`RENDERING FAULT`** — the asserted figure, with its numerator and denominator.
+- **`still: hold still ACTIVE` / `hold expired` / `step SATURATED`** — every still frame
+  classified by the predictor state that produced it.
+- **`ticks the hold SKIPPED`** as a share of base ticks advanced, split six ways by
+  `ApplyHeld`'s guards: expired, nothing held, input already stepped, no hold window, model
+  refused, no displacement. Scoped to the sample windows, so the settle phases and the
+  spawn pump do not dilute it.
+- **`SMOOTHING SPAN`** against the interval steps actually arrive at, flagged with the
+  percentage of the gap the render covers before it holds. *This is the line that named the
+  bug.*
+- **`HOLD WINDOW IN USE`**, flagged against the 4 expected at 60/15. It was captured but
+  only ever mentioned inside a correction note, so a run with no correction printed no
+  window — which is exactly the run a wrong window produces.
+- **`longest still RUN`** plus run count and mean — the cadence, measured rather than
+  inferred.
+- **`sample window`** and **`ack timeouts`** — one timed-out sample is ~3 s of still frames
+  at ~1000 fps, more than twenty ordinary samples put together.
+- **`non-advancing frames`** and **`harness clock resolution`** — whether the harness handed
+  the renderer a usable delta at all.
+
+New read-only members on `LocalMovePredictor`: `IntegrationTimestep`,
+`EffectiveSmoothingSpan`, `RenderStepProgress`, `HoldIsActive`, `BaseTicksAdvanced`,
+`HeldStepsApplied`, `HoldDeclines`, the `HoldSkip` reason enum and its six counters. The
+skip counters are recorded **only on the live path** — `Reconcile` replays the same guards
+over the unacknowledged timeline, and folding those in would measure how much replay ran
+rather than how the rendered position behaved.
+
+### Fixed — one narrow snapshot pair permanently shrank the hold window
+
+**A latent defect found while investigating #11, and confirmed by measurement not to be its
+cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
+
+`TickRateEstimator.SnapshotTickGap` is a running minimum of the base-tick gap between
+consecutive snapshots that never recovers, and it is fed straight to the predictor as the
+hold window (`WorldViewBinder.cs:264`). The premise behind the minimum — that only drops
+move a gap, and they only widen it — is false at one moment every session passes through:
+the first snapshot after joining is a keyframe emitted when the join is handled rather than
+on a world tick boundary, so the gap to the next scheduled snapshot is whatever the phase
+happens to be, 1 to 3 base ticks instead of 4. Two snapshots batched into one socket read
+do the same. A narrower gap must now be observed **twice** before it is adopted; the true
+cadence repeats on every snapshot and confirms at once, a one-off never does. Drops still
+only widen a gap and are still ignored, so "minimum, not mean" is kept.
+
+`SnapshotTickGap` had no EditMode coverage at all despite being the sole source of the hold
+window; four tests now pin the rule.
+
+### Changed — harness frame timing
+
+Taken from `Time.realtimeSinceStartupAsDouble` rather than differencing
+`Time.realtimeSinceStartup`. That is a `float` whose spacing coarsens with process uptime
+(~1.95 ms past 4.5 hours), and near 1000 fps it can return the same instant twice and hand
+`AdvanceFrame` a zero delta, which early-outs and records a still frame the renderer never
+had a chance to move on. **Not the cause of #11** — a batch-mode run is ~140 s in, where
+spacing is ~15 µs — but a long-lived Editor session would hit it.
+
 ## [0.15.5] - 2026-08-15
 
 ### Fixed — the local avatar stuttered at every frame rate
