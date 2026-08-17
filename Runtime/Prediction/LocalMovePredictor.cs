@@ -899,6 +899,8 @@ namespace Cuvara.Netcode.Prediction
             SkipExpired = 0;
             SkipRefusedByMovementModel = 0;
             SkipNoDisplacement = 0;
+            StepIntervalSamples = 0;
+            StepIntervalResets = 0;
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
             _step = Vec2.Zero;
@@ -1034,13 +1036,35 @@ namespace Cuvara.Netcode.Prediction
             if (gap <= 0f || gap > HoldTicks * _dt)
             {
                 _stepInterval = 0f;
+                StepIntervalResets++;
                 return;
             }
 
             _stepInterval = _stepInterval > 0f
                 ? _stepInterval * 0.7f + gap * 0.3f
                 : gap;
+            StepIntervalSamples++;
         }
+
+        /// <summary>The measured interval between consecutive steps, in seconds.</summary>
+        /// <remarks>
+        /// Zero when the last gap was rejected as a pause, in which case
+        /// <see cref="EffectiveSmoothingSpan"/> falls back to its <c>_dt</c> floor.
+        /// </remarks>
+        public float ObservedStepInterval => _stepInterval;
+
+        /// <summary>Gaps folded into <see cref="ObservedStepInterval"/>.</summary>
+        public int StepIntervalSamples { get; private set; }
+
+        /// <summary>
+        /// Gaps rejected as a pause, which zero <see cref="ObservedStepInterval"/>.
+        /// </summary>
+        /// <remarks>
+        /// A high count against a low <see cref="StepIntervalSamples"/> means the interval
+        /// is being torn down faster than it is being built, and the span is effectively
+        /// always at its floor.
+        /// </remarks>
+        public int StepIntervalResets { get; private set; }
 
         private bool ApplyHeld(ref Vec2 position, long baseTick)
         {

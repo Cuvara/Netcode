@@ -25,6 +25,12 @@ It is invisible to every existing counter because **the simulated position is co
 throughout** — only the rendered one stops. `Snaps` stays 0, the corrections budget passes,
 the tick rate agrees and the hold window measures the correct 4.
 
+**Status: currently inert, kept deliberately.** With the harness clock leak above fixed,
+the measurement has not yet had a chance to say whether this gap survives; the change is
+a no-op in sustained movement by construction (the measured interval *is* `_dt` there) and
+should be judged against the next run rather than assumed. `SMOOTHING SPAN`,
+`step interval in use`, and NoteStep's accepted/reset split are all printed so it can be.
+
 The span now follows the interval steps are **actually** arriving at, smoothed with the
 same α = 0.3 moving average `WorldViewBinder` uses on snapshot arrivals, floored at `_dt`
 as before. In sustained movement that interval *is* `_dt`, so the steady case is unchanged;
@@ -35,6 +41,32 @@ crawling behind its own simulation, the 0.12.3 defect in a new place — so such
 restarts the measurement and the span falls back to its floor. `StepProgress` still
 saturates at 1: a wider span makes the avatar reach the step later, never further than the
 step the input actually produced.
+
+### Fixed — the harness re-advanced the settle window and retired the hold before rendering
+
+`PumpAsync` drives its own frame loop across the settle window and advances the predictor
+over it. `lastFrameAt` was only ever written inside the sample loop, so the **first**
+`AdvanceFrame` of every sample handed the predictor `now - <end of the previous sample>` —
+the whole settle span again, on top of what `PumpAsync` had already advanced. Six settle
+sends at 15 Hz is ~400 ms, so that single call ran `while (_tickAccumulator >= _dt)` about
+24 times and jumped `_baseTick` 24 ticks in one frame.
+
+The hold window is four ticks wide, so **it expired inside that one call, on every sample,
+before a single frame was rendered against it.** The new counter caught it precisely:
+`FramesHoldActive` came back as **20 across 20 samples** — one frame each, the one read
+before that first `AdvanceFrame` — where four ticks of hold at ~1000 fps should give ~67
+frames per sample. The reported "100% of frames that should have been moving were still"
+was 20 out of a denominator of 20, and a denominator of one frame per sample is not
+measuring the renderer at all.
+
+This is the same double-advance `WorldViewBinder` documents on `AdvanceFrame` and guards
+with `_frameDriven`, reappearing in the harness's own clock rather than in the binder's.
+`lastFrameAt` is now re-stamped after every `PumpAsync`.
+
+Guarded against recurrence: the report prints **`largest AdvanceFrame`** and counts
+**calls wider than one base tick**, and **`frames while hold ACTIVE`** self-flags when the
+denominator is implausibly small — an empty denominator changes the percentage without
+changing the numerator, which is exactly how this hid.
 
 ### Changed — the smoothness assertion measures the rendering fault, not the rest
 

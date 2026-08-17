@@ -270,6 +270,21 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public int NonAdvancingFrames;
 
+            /// <summary>Largest delta handed to <c>AdvanceFrame</c>, seconds.</summary>
+            public float LargestAdvanceSeconds;
+
+            /// <summary>
+            /// Calls to <c>AdvanceFrame</c> with a delta wider than one base tick.
+            /// </summary>
+            /// <remarks>
+            /// Each one steps the predictor more than once inside a single call, and a
+            /// delta of several ticks retires the whole hold window before a frame is
+            /// rendered against it — which empties the denominator of
+            /// <see cref="RenderingFaultPercent"/> rather than changing its numerator.
+            /// Always a fault in whatever drives the clock, never in the predictor.
+            /// </remarks>
+            public int OversizedAdvances;
+
             /// <summary>Smallest non-zero frame time the harness clock could resolve, seconds.</summary>
             /// <remarks>
             /// The clock's actual granularity, measured rather than assumed. If this is of
@@ -344,6 +359,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             /// <summary>Span one step is spread across, milliseconds.</summary>
             public float SmoothingSpanMs = float.NaN;
+
+            /// <summary>Measured interval between consecutive steps, milliseconds.</summary>
+            public float StepIntervalMs = float.NaN;
+
+            /// <summary>Gaps <c>NoteStep</c> accepted into the moving average.</summary>
+            public int StepIntervalSamples;
+
+            /// <summary>Gaps <c>NoteStep</c> rejected as a pause, zeroing the interval.</summary>
+            public int StepIntervalResets;
 
             /// <summary>Observed interval between inputs, milliseconds.</summary>
             public float InputIntervalMs = float.NaN;
@@ -922,6 +946,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // sub-microsecond spacing for centuries. Nothing in the runtime had this
             // problem — WorldViewBinder keeps a Stopwatch and the sample bridge passes
             // Time.deltaTime — only the harness rolled its own clock out of a float.
+            // Re-stamped after every PumpAsync, and that is not bookkeeping.
+            //
+            // PumpAsync drives its own frame loop over the settle window and advances the
+            // predictor across it. This variable was only ever written inside the sample
+            // loop, so the first AdvanceFrame of each sample handed the predictor
+            // `now - <end of the PREVIOUS sample>` — the whole settle span again, on top of
+            // what PumpAsync had already advanced. Six settle sends at 15 Hz is ~400 ms, so
+            // that one call ran `while (_tickAccumulator >= _dt)` about 24 times and jumped
+            // _baseTick 24 ticks in a single frame.
+            //
+            // The hold window is four ticks wide, so it expired inside that one call, on
+            // every sample, before a single frame had been rendered against it. The
+            // measurement saw it exactly: FramesHoldActive came back as 20 across 20
+            // samples — one frame each, the one read before that first AdvanceFrame — where
+            // four ticks of hold at ~1000 fps should give some 67 frames per sample. A
+            // "100% of frames that should have been moving were still" built on a
+            // denominator of one frame per sample is not measuring the renderer at all.
+            //
+            // This is the same double-advance WorldViewBinder documents at AdvanceFrame and
+            // guards with _frameDriven, reappearing in the harness's own clock rather than
+            // in the binder's.
             double lastFrameAt = Time.realtimeSinceStartupAsDouble;
 
             // One sample's frames, reused. See Run.TailFramesTrimmed.
@@ -935,6 +980,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // Let the world arrive and the local entity spawn before measuring.
             await PumpAsync(client, binder, localId, seconds: 1.5f, ct);
 
+            // PumpAsync runs its own frame clock and has already advanced this span.
+            // See the note on lastFrameAt.
+            lastFrameAt = Time.realtimeSinceStartupAsDouble;
+
             for (int i = 0; i < Samples; i++)
             {
                 // --- settle on zero input ---
@@ -944,6 +993,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
                     await PumpAsync(client, binder, localId, dt, ct);
+                    lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
 
                 if (!view.TryGet(localId, out var settled))
@@ -1085,6 +1135,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         run.NonAdvancingFrames++;
                     }
 
+                    if (advanceBy > run.LargestAdvanceSeconds)
+                    {
+                        run.LargestAdvanceSeconds = advanceBy;
+                    }
+
+                    // A delta wider than a base tick makes the predictor step more than one
+                    // tick in a single call, which can retire a whole hold window before
+                    // anything is rendered against it. That is always a fault in whatever
+                    // is driving the clock, never in the predictor.
+                    if (run.TickRateInUse > 0 && advanceBy > 1f / run.TickRateInUse)
+                    {
+                        run.OversizedAdvances++;
+                    }
+
                     binder.AdvanceFrame(advanceBy);
                     lastFrameAt = frameNow;
 
@@ -1190,6 +1254,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
                 run.IntegrationTimestepMs = predictor.IntegrationTimestep * 1000f;
                 run.SmoothingSpanMs = predictor.EffectiveSmoothingSpan * 1000f;
+                run.StepIntervalMs = predictor.ObservedStepInterval * 1000f;
+                run.StepIntervalSamples = predictor.StepIntervalSamples;
+                run.StepIntervalResets = predictor.StepIntervalResets;
                 run.InputIntervalMs = predictor.ObservedInputInterval * 1000f;
                 // BaseTicksAdvanced / HeldStepsApplied / the Skip* counters are
                 // accumulated per sample window above, deliberately not read whole here.
@@ -1333,6 +1400,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         ? "   <<< the HARNESS clock reported a zero delta on these; " +
                           "AdvanceFrame could not move anything and they are counted as still"
                         : "   (every frame got a positive delta, so every still frame is the renderer's)") + "\n" +
+                $"  largest AdvanceFrame     {run.LargestAdvanceSeconds * 1000f:F1} ms" +
+                    (run.OversizedAdvances > 0
+                        ? $"   <<< {run.OversizedAdvances} calls were wider than one base " +
+                          "tick, so the predictor stepped several ticks inside one call and " +
+                          "the hold window could expire before anything rendered against it"
+                        : "   (never wider than a base tick)") + "\n" +
+                $"  frames while hold ACTIVE {run.FramesHoldActive}" +
+                    (run.FramesHoldActive < run.Samples.Count * 4
+                        ? "   <<< far too few: four ticks of hold at this frame rate should " +
+                          "give tens of frames per sample. The denominator is empty and the " +
+                          "percentage above means nothing."
+                        : string.Empty) + "\n" +
+                $"  step interval in use     {run.StepIntervalMs:F2} ms   " +
+                    $"(NoteStep: {run.StepIntervalSamples} measured, {run.StepIntervalResets} reset by the pause guard)\n" +
                 $"  harness clock resolution {run.SmallestFrameSeconds * 1000f:F3} ms" +
                     (run.ObservedFps > 0f && run.SmallestFrameSeconds > 0.5f / run.ObservedFps
                         ? "   <<< comparable to the frame time; frame deltas are QUANTISED by the clock"
