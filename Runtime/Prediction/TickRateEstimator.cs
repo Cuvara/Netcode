@@ -57,6 +57,11 @@ namespace Cuvara.Netcode.Prediction
         public const float DisagreementTolerance = 0.15f;
 
         private int _minGap;
+
+        // A candidate narrower gap, and how many times it has been seen. A gap only
+        // becomes the hold window on its SECOND sighting; see the Sample remarks.
+        private int _candidateGap;
+        private int _candidateCount;
         private long _firstTick;
         private double _firstSeconds;
         private long _lastTick;
@@ -100,6 +105,33 @@ namespace Cuvara.Netcode.Prediction
         /// gap, so the smallest observed gap is the true interval and an average is biased
         /// upward by exactly the losses. Overstating the window would make the client
         /// predict motion the server has already stopped.
+        /// </para>
+        /// <para>
+        /// <b>But a minimum has to survive one narrow pair, and it did not.</b> The
+        /// premise above — that nothing ever <i>narrows</i> a gap — is false at exactly one
+        /// moment, and it is a moment every session passes through. The first snapshot
+        /// after joining is a keyframe emitted when the join is handled, not on a world
+        /// tick boundary, so the gap between it and the next scheduled snapshot is whatever
+        /// the phase happens to be: 1, 2 or 3 base ticks rather than the cadence's 4. A
+        /// running minimum that never recovers then pins the hold window at that number
+        /// for the whole session.
+        /// </para>
+        /// <para>
+        /// The consequence is not a wrong number in a diagnostic. It is fed straight to
+        /// <c>LocalMovePredictor.SetHoldTicks</c>, and the predictor stops stepping the
+        /// held direction several base ticks before the server does
+        /// (<c>ApplyHeld</c>'s <c>baseTick - heldFrom &gt;= HoldTicks</c> guard). At
+        /// <c>HoldTicks == 1</c> the hold is switched off outright. The rendered position
+        /// then finishes the step it was given, <c>StepProgress</c> pins at 1, and the
+        /// avatar holds still until something else moves it — visible as the render
+        /// advancing for part of a tick and freezing for the rest.
+        /// </para>
+        /// <para>
+        /// <b>So a narrower gap must be seen twice before it is adopted.</b> The true
+        /// cadence repeats on every snapshot and reaches two sightings immediately; a
+        /// one-off join keyframe, or a pair batched together by TCP, never does. This
+        /// keeps the "minimum, not mean" property for genuine drops — which widen, and are
+        /// still ignored — while refusing to let a single anomalous pair set the window.
         /// </para>
         /// </remarks>
         public int SnapshotTickGap => _minGap;
@@ -150,7 +182,24 @@ namespace Cuvara.Netcode.Prediction
             long gap = tick - _lastTick;
             if (gap > 0 && gap < int.MaxValue && (_minGap == 0 || gap < _minGap))
             {
-                _minGap = (int)gap;
+                // Confirm before adopting. One sighting of a narrow gap is as likely to be
+                // the join keyframe's off-cadence phase, or two snapshots batched into one
+                // read, as it is to be the cadence. Two sightings of the same gap is not.
+                var candidate = (int)gap;
+                if (candidate == _candidateGap)
+                {
+                    _candidateCount++;
+                }
+                else
+                {
+                    _candidateGap = candidate;
+                    _candidateCount = 1;
+                }
+
+                if (_candidateCount >= 2)
+                {
+                    _minGap = candidate;
+                }
             }
 
             _lastTick = tick;
@@ -188,6 +237,8 @@ namespace Cuvara.Netcode.Prediction
         {
             Samples = 0;
             _minGap = 0;
+            _candidateGap = 0;
+            _candidateCount = 0;
             _firstTick = 0;
             _lastTick = 0;
             _firstSeconds = 0;

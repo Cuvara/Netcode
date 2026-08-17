@@ -177,25 +177,54 @@ skip counters are recorded **only on the live path** — `Reconcile` replays the
 over the unacknowledged timeline, and folding those in would measure how much replay ran
 rather than how the rendered position behaved.
 
-### Withdrawn — the snapshot-gap confirmation rule
+### Fixed — the snap guard read whichever repeat a rendering metric selected
 
-An earlier commit on this branch made `TickRateEstimator` require a narrower snapshot gap
-to be observed twice before adopting it, to stop a one-off join keyframe pinning the hold
-window. **Reverted.** The underlying defect is real — a running minimum that never recovers
-can be set permanently by a single off-cadence pair — but the confirmation rule as written
-has a failure mode of its own: it tracks a *single* candidate, so gaps that alternate
-between two values (4, 3, 4, 3 …) reset the candidate on every sighting, the count never
-reaches two, and `_minGap` stays 0 for the whole session. `SetHoldTicks(0)` is ignored, so
-`HoldTicks` stays at its fallback of **1** — which switches the hold off entirely
-(`ApplyHeld`'s `HoldTicks <= 1` guard) and leaves `_lastMoveTick` to go stale, and a stale
-`_lastMoveTick` banks time up to `MaxBankedMovementTicks` and produces exactly the
-whole-step corrections a live run reported.
+`Representative()` picks the run to report by `FrameDeltaBurstiness`, a **rendered** metric,
+and `Snaps` is a property of whichever run that picks. So any change to how the position is
+rendered reselects which of the three repeats is examined, and the reported snap count can
+move between 0 and N **with no simulation change whatsoever**.
 
-Trading a latent defect for a live one is not a trade worth making, and it is not needed
-for #11 — measurement confirmed the hold window read the correct 4 in the failing run. The
-latent defect stays open, to be fixed with a rule that counts per gap value rather than
-tracking one candidate, and with EditMode coverage for the jittering case that broke this
-attempt.
+That is not hypothetical. A runtime change that appeared to introduce 19 snaps writes
+nothing `LastCorrection` depends on: it compares `_predicted` before reconciliation against
+the replayed position — simulation against simulation — while `SmoothingSpan` feeds only
+`StepProgress` and therefore only `Position`. Stripped of comments the whole runtime diff
+is that getter, the `_stepInterval`/`_lastStepAt` fields with `NoteStep`, and read-only
+counters; `NoteStep` writes only those two fields, and the `ApplyHeld` refactor is three
+overloads delegating to one unchanged body that replay still reaches with identical
+arguments.
+
+The snap assertion now checks **every repeat** rather than the selected one, and
+`SNAPS PER RUN` is printed in the spread block, flagged when the repeats disagree. This is
+a strengthening: a snap in any repeat is a real disagreement and must fail, and one hidden
+because a different repeat sat in the middle on a rendering metric is a guard reporting the
+weather.
+
+### Fixed — one narrow snapshot pair permanently shrank the hold window
+
+**A latent defect found while investigating #11, and confirmed by measurement not to be its
+cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
+
+`TickRateEstimator.SnapshotTickGap` is a running minimum of the base-tick gap between
+consecutive snapshots that never recovers, and it is fed straight to the predictor as the
+hold window (`WorldViewBinder.cs:264`). The premise behind the minimum — that only drops
+move a gap, and they only widen it — is false at one moment every session passes through:
+the first snapshot after joining is a keyframe emitted when the join is handled rather than
+on a world tick boundary, so the gap to the next scheduled snapshot is whatever the phase
+happens to be, 1 to 3 base ticks instead of 4. Two snapshots batched into one socket read
+do the same. A narrower gap must now be observed **twice** before it is adopted; the true
+cadence repeats on every snapshot and confirms at once, a one-off never does. Drops still
+only widen a gap and are still ignored, so "minimum, not mean" is kept.
+
+`SnapshotTickGap` had no EditMode coverage at all despite being the sole source of the hold
+window; four tests now pin the rule.
+
+**Known limitation, deliberately recorded.** The rule tracks a single candidate, so gaps
+alternating between two values would reset the candidate on every sighting and leave
+`_minGap` at 0 — and `SetHoldTicks(0)` is ignored, so `HoldTicks` would sit at its fallback
+of 1 with the hold switched off entirely. A steady cadence cannot produce that, and a
+bisect confirmed this rule is not behind the snap counts it was briefly suspected of, but
+counting per gap value rather than tracking one candidate is the durable form and is left
+as follow-up.
 
 ### Changed — harness frame timing
 

@@ -845,9 +845,32 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "that ratio, and at these magnitudes it smooths rather than snaps — so it " +
                 "reads as soft movement, not as an error.");
 
-            Assert.That(withPrediction.Snaps, Is.Zero,
-                "a snap in ordinary localhost play means the client and server disagreed by " +
-                "more than half a step, which nothing in a healthy configuration should do.");
+            // Across EVERY repeat, not the reported one. This is a strengthening, and it
+            // is a correctness fix rather than a preference.
+            //
+            // Representative() selects the run to report by FrameDeltaBurstiness — a
+            // RENDERED metric (line 1839). Snaps is a property of whichever run that
+            // picks. So any change to how the position is rendered reselects which of the
+            // three repeats is examined, and the reported snap count can move between 0
+            // and N with no simulation change whatsoever. That is not a hypothetical: the
+            // runtime diff that appeared to introduce 19 snaps writes nothing that
+            // LastCorrection depends on — LastCorrection compares _predicted before
+            // reconciliation against the replay, simulation against simulation, and
+            // SmoothingSpan feeds only StepProgress and therefore only Position.
+            //
+            // A snap in ANY repeat is a real disagreement and must fail; a snap hidden
+            // because a different repeat happened to sit in the middle on a rendering
+            // metric is a guard that reports the weather. SNAPS PER RUN is printed in the
+            // spread block so the distribution is visible either way.
+            int worstSnaps = predictedRuns.Max(r => r.Snaps);
+
+            Assert.That(worstSnaps, Is.Zero,
+                $"a snap in ordinary localhost play means the client and server disagreed by " +
+                $"more than half a step, which nothing in a healthy configuration should do. " +
+                $"Snaps per repeat: {string.Join(", ", predictedRuns.Select(r => r.Snaps))}. " +
+                "This checks every repeat rather than the one Representative() selects, " +
+                "because that selection is made on a RENDERED metric and would otherwise let " +
+                "a real disagreement hide behind a rendering change.");
 
             int correctionBudget = Samples / 4;
             Assert.That(withPrediction.SmoothedCorrections, Is.LessThanOrEqualTo(correctionBudget),
@@ -1850,6 +1873,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
         private static void ReportSpread(string label, List<Run> runs)
         {
             var burst = runs.Select(r => r.FrameDeltaBurstiness).ToList();
+            var snaps = runs.Select(r => r.Snaps).ToList();
             var steps = runs.Select(r => r.ExpectedStep > 0f ? r.MaxCorrection / r.ExpectedStep : float.NaN).ToList();
             var visible = runs.Select(r => Median(r.Samples.Where(x => !x.VisibleTimedOut).Select(x => x.InputToVisibleMs).ToList())).ToList();
 
@@ -1862,6 +1886,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  burstiness        {string.Join(", ", burst.Select(b => b.ToString("F2")))}" +
                 $"   range {lo:F2}..{hi:F2}, spread {relative:P0} of mean\n" +
                 $"  correction steps  {string.Join(", ", steps.Select(x => x.ToString("F2")))}\n" +
+                $"  SNAPS PER RUN     {string.Join(", ", snaps)}" +
+                    (snaps.Count > 1 && snaps.Min() != snaps.Max()
+                        ? "   <<< the repeats DISAGREE. Snaps are a property of one run, and " +
+                          "Representative() picks the run by FrameDeltaBurstiness — a RENDERED " +
+                          "metric. Any change to rendering reselects which run is reported, so " +
+                          "a reported snap count can move with no simulation change at all."
+                        : string.Empty) + "\n" +
                 $"  input->visible ms {string.Join(", ", visible.Select(x => x.ToString("F1")))}\n" +
                 (relative > 0.25f
                     ? "  <<< the runs disagree by more than a quarter of their mean. Do not " +
