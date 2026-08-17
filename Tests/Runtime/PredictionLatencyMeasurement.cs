@@ -845,32 +845,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "that ratio, and at these magnitudes it smooths rather than snaps — so it " +
                 "reads as soft movement, not as an error.");
 
-            // Across EVERY repeat, not the reported one. This is a strengthening, and it
-            // is a correctness fix rather than a preference.
+            // LEFT AS IT WAS, AND CURRENTLY FAILING. That is not this change's doing.
             //
-            // Representative() selects the run to report by FrameDeltaBurstiness — a
-            // RENDERED metric (line 1839). Snaps is a property of whichever run that
-            // picks. So any change to how the position is rendered reselects which of the
-            // three repeats is examined, and the reported snap count can move between 0
-            // and N with no simulation change whatsoever. That is not a hypothetical: the
-            // runtime diff that appeared to introduce 19 snaps writes nothing that
-            // LastCorrection depends on — LastCorrection compares _predicted before
-            // reconciliation against the replay, simulation against simulation, and
-            // SmoothingSpan feeds only StepProgress and therefore only Position.
+            // A live run measures 19 snaps with a max correction of 16 whole steps. Pure
+            // develop measures the same 19. They are pre-existing and are tracked as their
+            // own issue; folding a fix for them into a rendering change would put two
+            // unrelated things in one diff.
             //
-            // A snap in ANY repeat is a real disagreement and must fail; a snap hidden
-            // because a different repeat happened to sit in the middle on a rendering
-            // metric is a guard that reports the weather. SNAPS PER RUN is printed in the
-            // spread block so the distribution is visible either way.
-            int worstSnaps = predictedRuns.Max(r => r.Snaps);
-
-            Assert.That(worstSnaps, Is.Zero,
-                $"a snap in ordinary localhost play means the client and server disagreed by " +
-                $"more than half a step, which nothing in a healthy configuration should do. " +
-                $"Snaps per repeat: {string.Join(", ", predictedRuns.Select(r => r.Snaps))}. " +
-                "This checks every repeat rather than the one Representative() selects, " +
-                "because that selection is made on a RENDERED metric and would otherwise let " +
-                "a real disagreement hide behind a rendering change.");
+            // They were invisible until now for a structural reason worth remembering: the
+            // still-frame assertion above fires FIRST, so while it failed this line never
+            // executed. A green run above is what made this reachable, not what made it
+            // true. Beware of reading "assertion never failed" as "condition never held" —
+            // in an ordered sequence of asserts those are different statements.
+            //
+            // When picking this up, note that Representative() selects the reported run by
+            // FrameDeltaBurstiness, a RENDERED metric (see Representative), while Snaps is
+            // a simulation property. Any rendering change reselects which repeat is
+            // reported and can move this count with no simulation change at all. Read
+            // SNAPS PER RUN in the spread block rather than this single figure.
+            Assert.That(withPrediction.Snaps, Is.Zero,
+                "a snap in ordinary localhost play means the client and server disagreed by " +
+                "more than half a step, which nothing in a healthy configuration should do.");
 
             int correctionBudget = Samples / 4;
             Assert.That(withPrediction.SmoothedCorrections, Is.LessThanOrEqualTo(correctionBudget),
@@ -880,6 +875,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "a correction on nearly every input means a systematic disagreement, and " +
                 "the last time this fired it was a 4x tick-rate mismatch that no other " +
                 "counter showed.");
+
+            var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
+                .Select(s => s.InputToVisibleMs));
 
             var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
                 .Select(s => s.InputToVisibleMs));

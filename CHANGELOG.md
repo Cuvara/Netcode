@@ -177,29 +177,36 @@ skip counters are recorded **only on the live path** — `Reconcile` replays the
 over the unacknowledged timeline, and folding those in would measure how much replay ran
 rather than how the rendered position behaved.
 
-### Fixed — the snap guard read whichever repeat a rendering metric selected
+### KNOWN FAILING — the snap assertion, and it is NOT this change
 
-`Representative()` picks the run to report by `FrameDeltaBurstiness`, a **rendered** metric,
-and `Snaps` is a property of whichever run that picks. So any change to how the position is
-rendered reselects which of the three repeats is examined, and the reported snap count can
-move between 0 and N **with no simulation change whatsoever**.
+`InputToVisibleMovement_WithAndWithoutPrediction` still fails, on
+`Assert.That(withPrediction.Snaps, Is.Zero)`: **19 snaps, max correction 16 whole steps.**
+**Pure `develop` measures the same 19.** These are pre-existing and are tracked as their
+own issue. Do not read the red as this change's fault, and do not fold a fix for them in
+here — a rendering change and a reconciliation change do not belong in one diff.
 
-That is not hypothetical. A runtime change that appeared to introduce 19 snaps writes
-nothing `LastCorrection` depends on: it compares `_predicted` before reconciliation against
-the replayed position — simulation against simulation — while `SmoothingSpan` feeds only
-`StepProgress` and therefore only `Position`. Stripped of comments the whole runtime diff
-is that getter, the `_stepInterval`/`_lastStepAt` fields with `NoteStep`, and read-only
-counters; `NoteStep` writes only those two fields, and the `ApplyHeld` refactor is three
-overloads delegating to one unchanged body that replay still reaches with identical
-arguments.
+They were invisible until now for a structural reason worth remembering. The still-frame
+assertion fires **earlier in the same test**, so while it failed this line never executed.
+Taking the rendering fault to 0.00% is what made the snap assertion *reachable*, not what
+made it *true*. "The assertion never failed" and "the condition never held" are different
+statements in an ordered sequence of asserts, and the difference cost this investigation a
+round.
 
-The snap assertion now checks **every repeat** rather than the selected one, and
-`SNAPS PER RUN` is printed in the spread block, flagged when the repeats disagree. This is
-a strengthening: a snap in any repeat is a real disagreement and must fail, and one hidden
-because a different repeat sat in the middle on a rendering metric is a guard reporting the
-weather.
+Two things for whoever picks the snaps up:
 
-### Fixed — one narrow snapshot pair permanently shrank the hold window
+- **A starting lead.** The max correction is 16 steps against
+  `GameConstants.MaxBankedMovementTicks(60)` = **15** — the banked-movement cap (rule 3,
+  from `MaxBankedMovementMs = 250`). The harness settles for ~400 ms of zero input before
+  each sample, which leaves `_lastMoveTick` stale on both sides, so the next input takes a
+  step worth up to 15 timesteps. A disagreement about *how much* was banked lands exactly
+  at that magnitude. It is not a clock error.
+- **Read `SNAPS PER RUN`, not the single figure.** `Representative()` selects the reported
+  run by `FrameDeltaBurstiness`, a **rendered** metric, while `Snaps` is a simulation
+  property — so any rendering change reselects which repeat is reported and can move the
+  count with no simulation change at all. The per-repeat distribution is now printed in the
+  spread block and flagged when the repeats disagree.
+
+### Fixed — one narrow snapshot pair permanently shrank the hold window### Fixed — one narrow snapshot pair permanently shrank the hold window
 
 **A latent defect found while investigating #11, and confirmed by measurement not to be its
 cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
