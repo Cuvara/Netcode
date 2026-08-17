@@ -177,13 +177,13 @@ skip counters are recorded **only on the live path** — `Reconcile` replays the
 over the unacknowledged timeline, and folding those in would measure how much replay ran
 rather than how the rendered position behaved.
 
-### KNOWN FAILING — the snap assertion, and it is NOT this change
+### KNOWN FAILING — the snap assertion, and it belongs to #12
 
 `InputToVisibleMovement_WithAndWithoutPrediction` still fails, on
 `Assert.That(withPrediction.Snaps, Is.Zero)`: **19 snaps, max correction 16 whole steps.**
-**Pure `develop` measures the same 19.** These are pre-existing and are tracked as their
-own issue. Do not read the red as this change's fault, and do not fold a fix for them in
-here — a rendering change and a reconciliation change do not belong in one diff.
+**Pure `develop` measures the same 19.** They predate this work entirely and are tracked as
+**issue #12**. Do not read the red as this change's fault, and do not fold a fix for them
+in here — a rendering change and a reconciliation change do not belong in one diff.
 
 They were invisible until now for a structural reason worth remembering. The still-frame
 assertion fires **earlier in the same test**, so while it failed this line never executed.
@@ -192,7 +192,7 @@ made it *true*. "The assertion never failed" and "the condition never held" are 
 statements in an ordered sequence of asserts, and the difference cost this investigation a
 round.
 
-Two things for whoever picks the snaps up:
+Two things for whoever picks up #12:
 
 - **A starting lead.** The max correction is 16 steps against
   `GameConstants.MaxBankedMovementTicks(60)` = **15** — the banked-movement cap (rule 3,

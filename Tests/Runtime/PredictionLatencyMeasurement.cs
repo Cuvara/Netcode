@@ -878,9 +878,6 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
                 .Select(s => s.InputToVisibleMs));
-
-            var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
-                .Select(s => s.InputToVisibleMs));
             var unpredictedMedian = Median(withoutPrediction.Samples.Where(s => !s.VisibleTimedOut)
                 .Select(s => s.InputToVisibleMs));
 
