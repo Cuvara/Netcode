@@ -177,24 +177,25 @@ skip counters are recorded **only on the live path** — `Reconcile` replays the
 over the unacknowledged timeline, and folding those in would measure how much replay ran
 rather than how the rendered position behaved.
 
-### Fixed — one narrow snapshot pair permanently shrank the hold window
+### Withdrawn — the snapshot-gap confirmation rule
 
-**A latent defect found while investigating #11, and confirmed by measurement not to be its
-cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
+An earlier commit on this branch made `TickRateEstimator` require a narrower snapshot gap
+to be observed twice before adopting it, to stop a one-off join keyframe pinning the hold
+window. **Reverted.** The underlying defect is real — a running minimum that never recovers
+can be set permanently by a single off-cadence pair — but the confirmation rule as written
+has a failure mode of its own: it tracks a *single* candidate, so gaps that alternate
+between two values (4, 3, 4, 3 …) reset the candidate on every sighting, the count never
+reaches two, and `_minGap` stays 0 for the whole session. `SetHoldTicks(0)` is ignored, so
+`HoldTicks` stays at its fallback of **1** — which switches the hold off entirely
+(`ApplyHeld`'s `HoldTicks <= 1` guard) and leaves `_lastMoveTick` to go stale, and a stale
+`_lastMoveTick` banks time up to `MaxBankedMovementTicks` and produces exactly the
+whole-step corrections a live run reported.
 
-`TickRateEstimator.SnapshotTickGap` is a running minimum of the base-tick gap between
-consecutive snapshots that never recovers, and it is fed straight to the predictor as the
-hold window (`WorldViewBinder.cs:264`). The premise behind the minimum — that only drops
-move a gap, and they only widen it — is false at one moment every session passes through:
-the first snapshot after joining is a keyframe emitted when the join is handled rather than
-on a world tick boundary, so the gap to the next scheduled snapshot is whatever the phase
-happens to be, 1 to 3 base ticks instead of 4. Two snapshots batched into one socket read
-do the same. A narrower gap must now be observed **twice** before it is adopted; the true
-cadence repeats on every snapshot and confirms at once, a one-off never does. Drops still
-only widen a gap and are still ignored, so "minimum, not mean" is kept.
-
-`SnapshotTickGap` had no EditMode coverage at all despite being the sole source of the hold
-window; four tests now pin the rule.
+Trading a latent defect for a live one is not a trade worth making, and it is not needed
+for #11 — measurement confirmed the hold window read the correct 4 in the failing run. The
+latent defect stays open, to be fixed with a rule that counts per gap value rather than
+tracking one candidate, and with EditMode coverage for the jittering case that broke this
+attempt.
 
 ### Changed — harness frame timing
 
