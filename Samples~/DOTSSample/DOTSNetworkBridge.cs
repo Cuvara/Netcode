@@ -171,6 +171,11 @@ namespace DOTSSample
         // --- Auth ---
         private string _nakamaSessionToken;
 
+        // --- Backend address resolved at startup ---
+        // Command line first, then environment, then the field initializers above.
+        // See BackendCommandLine; nothing here is read after Start.
+        private BackendCommandLine.Settings _backend;
+
         // --- Economy (gold) ---
         private int _goldDisplay;
         private int _goldServer;
@@ -252,6 +257,41 @@ namespace DOTSSample
         private void Start()
         {
             Application.runInBackground = true;
+
+            // The backend address is not a constant: the game server is an Agones pod
+            // whose port is assigned at scheduling time, and the gateway moves with the
+            // cluster. Baking it into a field initializer means a rebuild per target,
+            // so it is read from the command line here, once, before anything connects.
+            _backend = BackendCommandLine.Resolve(gatewayHost, gatewayPort, mapId, gameServerStatusUrl);
+            gatewayHost = _backend.GatewayHost;
+            gatewayPort = _backend.GatewayPort;
+            if (_backend.NakamaExplicit)
+            {
+                nakamaBaseUrl = _backend.NakamaBaseUrl;
+                nakamaHealthUrl = _backend.NakamaHealthUrl;
+            }
+
+            if (_backend.StatusUrlExplicit)
+            {
+                gameServerStatusUrl = _backend.StatusUrl;
+            }
+
+            if (_backend.MapExplicit)
+            {
+                // Collapse the offered set to the requested map. Two or more entries make
+                // Start draw the selector and wait for a click, which is precisely what an
+                // unattended launcher cannot supply — the window would sit at a menu and
+                // read as "connected nothing".
+                mapId = _backend.MapId;
+                availableMaps = new[] { _backend.MapId };
+            }
+
+            var instanceLabel = string.IsNullOrEmpty(_backend.InstanceLabel)
+                ? "1"
+                : _backend.InstanceLabel;
+            Debug.Log($"[DOTSNet] backend gateway={gatewayHost}:{gatewayPort} " +
+                      $"nakama={_backend.NakamaBaseUrl} map={_backend.MapId} " +
+                      $"instance={instanceLabel}");
 
             _view = new DOTSEntityView();
 
@@ -711,15 +751,25 @@ namespace DOTSSample
         {
             try
             {
-                var device = $"dots-{(Application.isEditor ? "editor" : "player")}-{DateTime.UtcNow.Ticks}";
+                // Per-process identity. Two instances sharing one Nakama user is the
+                // failure that looks like success: the second login evicts the first and
+                // what is left is a single client in an empty world — indistinguishable
+                // from a broken area-of-interest.
+                var device = BackendCommandLine.ResolveDeviceId(
+                    _backend, $"dots-{(Application.isEditor ? "editor" : "player")}");
                 _status = "Authenticating...";
                 Debug.Log($"[DOTSNet] Authenticating device={device}");
 
-                var auth = new SampleNakamaAuth();
+                var auth = new SampleNakamaAuth(
+                    _backend.NakamaScheme, _backend.NakamaHost, _backend.NakamaPort,
+                    _backend.NakamaServerKey);
                 var jwt = await auth.GetGatewayTokenAsync(device, ct);
                 _userId = auth.UserId;
                 _nakamaSessionToken = auth.SessionToken;
-                _cachedUserText = "User: " + (_userId.Length > 12 ? _userId.Substring(0, 12) : _userId) + "...";
+                _cachedUserText = "User: " + (_userId.Length > 12 ? _userId.Substring(0, 12) : _userId) + "..." +
+                                  (string.IsNullOrEmpty(_backend.InstanceLabel)
+                                      ? string.Empty
+                                      : "  [#" + _backend.InstanceLabel + "]");
                 _status = "Connecting to gateway...";
                 Debug.Log($"[DOTSNet] Auth OK, user_id={_userId}");
 
