@@ -211,6 +211,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 TickRateInUse > 0 && !float.IsNaN(EffectiveSpeed)
                     ? EffectiveSpeed / TickRateInUse
                     : 0f;
+
+            /// <summary>
+            /// The same step, sized from the tick rate <b>measured off the wire</b> rather
+            /// than the one the client believes it is predicting at.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// These are the same number on a healthy run and they diverge on exactly the
+            /// runs worth reading closely, so a correction expressed in units of
+            /// <see cref="ExpectedStep"/> is self-referential in the one case where the
+            /// figure decides something: a client predicting at the wrong rate sizes its
+            /// own yardstick by the same wrong rate, and a correction of four real ticks
+            /// prints as "1.00 steps" — indistinguishable from perfect health.
+            /// </para>
+            /// <para>
+            /// Zero when the estimator has no measurement yet, in which case the wire has
+            /// said nothing and there is no second opinion to print.
+            /// </para>
+            /// </remarks>
+            public float ExpectedStepFromWire =>
+                MeasuredTickRate > 0f && !float.IsNaN(EffectiveSpeed)
+                    ? EffectiveSpeed / MeasuredTickRate
+                    : 0f;
             public int Snaps;
             public int SmoothedCorrections;
             public float MaxCorrection;
@@ -1452,6 +1475,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
                 $"  max correction in steps  {(run.ExpectedStep > 0f ? (run.MaxCorrection / run.ExpectedStep).ToString("F2") : "n/a")}" +
                     CorrectionShapeNote(run) + "\n" +
+                $"  the same, sized by wire  {(run.ExpectedStepFromWire > 0f ? (run.MaxCorrection / run.ExpectedStepFromWire).ToString("F2") : "n/a")}" +
+                    "   (steps of the tick rate MEASURED, not the one predicted at; the\n" +
+                "                             two agree on a healthy run and only this one\n" +
+                "                             stays honest when the client's rate is wrong)\n" +
                 $"  distinct positions seen  {run.DistinctPositions}" +
                     (run.DistinctPositions <= 1
                         ? "   <<< the entity NEVER MOVED — server or spawn, not the probe"

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the correction magnitude, sized by the tick rate actually measured
+
+`Report` printed `max correction in steps` as `MaxCorrection / (EffectiveSpeed /
+TickRateInUse)` — the correction divided by the client's own *belief* about the tick rate.
+On a healthy run that is right. On the one run where the figure decides something it is
+self-referential: a client predicting at the wrong rate sizes its own yardstick by the same
+wrong rate, so a correction of four real base ticks prints as `1.00 steps`, which is what
+perfect health looks like.
+
+Measured, driving the predictor at 15 Hz against a 60 Hz server: worst correction
+0.3334 world units — **four** base ticks of travel — reported as one step. The same run with
+matched rates: 0.0833, one step. Identical readings, opposite verdicts.
+
+The report now also prints the correction sized by `MeasuredTickRate`, which comes off the
+wire and cannot be corrupted by what the client believes. The two agree on a healthy run;
+only the second stays honest when the rate is wrong. Diagnostic only — no assertion reads
+it yet, deliberately, because no live magnitudes have been measured to calibrate one
+against.
+
+
 ### Fixed — 19 reconciliation snaps in ordinary localhost play (#12)
 
 `PredictionLatencyMeasurement` measured **19 corrections snapped** against a live local
