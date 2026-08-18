@@ -206,6 +206,7 @@ namespace Cuvara.Netcode.Prediction
         private float _lastInputAt;   // _elapsed when the previous input arrived
         private float _elapsed;       // monotonic seconds fed through Advance
         private bool _seeded;
+        private bool _baseTickSeeded; // true once SeedBaseTick has aligned _baseTick
 
         /// <summary>
         /// Creates a predictor. Check <see cref="IsEnabled"/> before using the result:
@@ -872,6 +873,49 @@ namespace Cuvara.Netcode.Prediction
         }
 
         /// <summary>
+        /// Seeds the predictor's base-tick counter from the server's world tick, so the
+        /// two timelines share the same epoch and the hold window's phase aligns.
+        /// </summary>
+        /// <param name="serverTick">
+        /// The server's current base tick, as carried on the snapshot
+        /// (<c>WorldState.Tick</c>). Must be positive; zero or negative is ignored.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// Takes effect once: the first call with a positive value sets
+        /// <see cref="_baseTick"/> and clears <see cref="_tickAccumulator"/>. Subsequent
+        /// calls are no-ops — the accumulator-driven clock in <see cref="Advance"/> is
+        /// the authority after seeding, and re-seeding on every snapshot would fight it.
+        /// </para>
+        /// <para>
+        /// Without this, <c>_baseTick</c> starts at 1 while the server's
+        /// <c>current_tick</c> is in the hundreds of thousands. The absolute values do
+        /// not matter — <c>StepDeltaTime</c> and <c>ApplyHeld</c> use differences — but
+        /// the <b>phase</b> does: the hold window is <c>HoldTicks</c> base ticks, and
+        /// where each clock's tick boundary falls relative to an input changes how many
+        /// held steps get applied between inputs. On localhost with matched rates and no
+        /// loss, this showed as 17 of 20 samples needing a correction of exactly 2 steps
+        /// (issue #13).
+        /// </para>
+        /// <para>
+        /// Separate from <see cref="Reconcile"/> for the same reason as
+        /// <see cref="SetServerSpeed"/>: that signature is a cross-package contract
+        /// enforced by <c>PredictionSurfaceContractTests</c>.
+        /// </para>
+        /// </remarks>
+        public void SeedBaseTick(long serverTick)
+        {
+            if (_baseTickSeeded || serverTick <= 0)
+            {
+                return;
+            }
+
+            _baseTickSeeded = true;
+            _baseTick = serverTick;
+            _tickAccumulator = 0f;
+        }
+
+        /// <summary>
         /// True when the tick rate came from a local fallback rather than from the server.
         /// </summary>
         /// <remarks>
@@ -922,6 +966,7 @@ namespace Cuvara.Netcode.Prediction
             _heldFrom = 0;
             _lastMoveTick = 0;
             _seeded = false;
+            _baseTickSeeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
             _speed = _settings.Speed;

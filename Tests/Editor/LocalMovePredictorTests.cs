@@ -638,5 +638,80 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(predictor.PendingCount, Is.EqualTo(1));
             Assert.That(predictor.RejectedInputs, Is.Zero);
         }
+
+        // ── Server base-tick seeding (issue #13) ──
+
+        [Test]
+        public void SeedBaseTickAlignsTheLocalCounter()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1),
+                "default: starts at 1");
+
+            predictor.SeedBaseTick(726_001);
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(726_001),
+                "first call moves the counter to the server's tick");
+        }
+
+        [Test]
+        public void SeedBaseTickIsIdempotent()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            predictor.SeedBaseTick(726_001);
+            predictor.SeedBaseTick(900_000);
+
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(726_001),
+                "second call must be a no-op — the accumulator-driven clock owns it now");
+        }
+
+        [Test]
+        public void SeedBaseTickIgnoresNonPositive()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            predictor.SeedBaseTick(0);
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1), "zero ignored");
+
+            predictor.SeedBaseTick(-5);
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1), "negative ignored");
+        }
+
+        [Test]
+        public void ResetAllowsReseeding()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+            predictor.SeedBaseTick(726_001);
+
+            predictor.Reset();
+
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1),
+                "reset returns to 1");
+
+            predictor.SeedBaseTick(800_000);
+            Assert.That(predictor.DebugBaseTick, Is.EqualTo(800_000),
+                "after reset, a new seed takes effect");
+        }
+
+        [Test]
+        public void SeededPredictorStillMatchesServerExactly()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+            predictor.SeedBaseTick(726_001);
+            predictor.Reconcile(Vec2.Zero, 0);
+
+            for (var i = 0; i < Walk.Length; i++)
+            {
+                predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                predictor.Advance(Dt);
+            }
+
+            Vec2 pos = ServerWalk(Vec2.Zero, Walk);
+
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(pos.X),
+                "seeding must not break bit-exact replay");
+            Assert.That(predictor.SimulatedPosition.Y, Is.EqualTo(pos.Y));
+        }
     }
 }

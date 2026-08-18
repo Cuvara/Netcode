@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — client and server base ticks free-run at arbitrary phase (#13)
+
+`LocalMovePredictor._baseTick` started at 1 and free-ran via wall-clock accumulation.
+The server's `current_tick` was in the hundreds of thousands. Absolute values did not
+matter — `StepDeltaTime` and `ApplyHeld` use differences — but the phase did: the hold
+window is `HoldTicks` base ticks, and where each clock's tick boundary fell relative to
+an input changed how many held steps got applied between inputs. On localhost with
+matched rates and no loss, 17 of 20 samples needed a correction of exactly 2 steps.
+
+**Fix:** `SeedBaseTick(long serverTick)` sets `_baseTick` from the server's world tick
+(`WorldState.Tick`, already on the wire) on the first snapshot. Called from
+`WorldViewBinder.Tick()` before `Reconcile`, following the `SetServerSpeed` pattern —
+separate method, not a signature change, so the cross-package contract in
+`PredictionSurfaceContractTests` is untouched. The accumulator-driven clock in `Advance`
+owns the counter after seeding; `SeedBaseTick` is a one-shot. `Reset()` clears the
+seeded flag so a new session can re-seed.
+
 ### Added — the correction magnitude, sized by the tick rate actually measured
 
 `Report` printed `max correction in steps` as `MaxCorrection / (EffectiveSpeed /
