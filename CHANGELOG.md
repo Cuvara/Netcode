@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 19 reconciliation snaps in ordinary localhost play (#12)
+
+`PredictionLatencyMeasurement` measured **19 corrections snapped** against a live local
+backend, on a loopback connection with sub-millisecond RTT and no packet loss, where a
+snap means the client and the server disagreed by more than half a step. The largest
+correction was a whole `1.1667` world units — **exactly 14 steps**, and 14 is
+`MaxBankedMovementTicks(60) - 1`.
+
+That figure is the tell. The predictor implemented rule 3 of the movement model —
+"a step covers the time since that entity last moved" — but not the paragraph immediately
+under it in `gameserver-dotnet/docs/API.md`:
+
+> **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
+> entity with no held direction is *stopped*, not stalled — so a player who releases the
+> stick, waits, and presses again is owed nothing for the pause.
+
+Two places implement that sentence server-side, and the client had neither:
+
+* `InputHandler.StepDeltaTime` opens with `if (heldFromTick == 0) return _deltaTime;`.
+  `LocalMovePredictor.StepDeltaTime` took no `heldFrom` argument at all, so after an idle
+  it banked the whole pause and returned `_dt * MaxBankedTicks`.
+* `InputHandler.ProcessInput` stamps `cursor.LastMoveTick = currentTick` on a deadzone
+  vector — in the pre-check and again in the `MoveResult.None` branch. `RecordInput` left
+  `_lastMoveTick` alone, under a comment asserting that this was "exactly as server-side".
+  It was the reverse of what the server does.
+
+The consequence was one lurch per restart: the harness settles on ~400 ms of zero input
+before each sample, so the sample's first real input travelled 15 timesteps on the client
+and 1 on the server, every sample — 19 samples, 19 snaps. For a player it is a quarter
+second of travel delivered in a single frame every time they stop and start again, which
+is the most common thing a player does.
+
+Fixed by transcribing both rules:
+
+* `StepDeltaTime` takes `heldFrom` and returns one plain timestep when nothing is held.
+  All four call sites pass the hold that was in effect for that step.
+* A `MoveResult.None` input now clears the hold **and** stamps `_lastMoveTick`, on the
+  live path and on the replay path alike, so replay still reproduces the live timeline
+  bit-for-bit.
+
+A `Rejected` vector still leaves both fields alone, matching the server, which logs and
+drops it without disturbing state. `GameConstants.MaxBankedMovementMs` is untouched — the
+cap was never the problem; what counted against it was.
+
+Measured on a network-free reproduction of the harness (the real `LocalMovePredictor`
+against a transcription of `InputHandler`, 60 Hz base / 15 Hz world, zero latency):
+**19 snaps and a 14.00-step worst correction before, 0 snaps and a 0.0000 worst
+correction after.** The `heldFrom` guard alone takes it to zero snaps; the `LastMoveTick`
+stamp is what takes the residual correction from 3.00 steps to nothing.
+
+### Fixed — the EditMode oracle certified the defect it existed to catch
+
+`LocalMovePredictorTests.ServerWalk` is the reference the bit-exactness assertions compare
+against, and its own docblock claims it "is not a second copy of the movement rule". It
+was: a hand-rolled rule-3 loop missing both of the guards above, so it modelled the
+client's behaviour rather than `InputHandler`'s, and `PredictingForwardMatchesTheServerExactly`
+passed on a walk that deliberately contains a stop *because* both sides were wrong the
+same way. It is now transcribed from `ProcessInput`, and two tests pin the restart-after-
+idle case directly.
+
+
 ### Fixed — the local avatar froze for part of every base tick (#11)
 
 `SmoothingSpan` returned the integration timestep `_dt` unconditionally whenever a hold

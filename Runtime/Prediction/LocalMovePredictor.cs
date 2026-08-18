@@ -494,7 +494,7 @@ namespace Cuvara.Netcode.Prediction
         // TEMPORARY diagnostic - remove before merge.
         public long DebugBaseTick => _baseTick;
         public long DebugLastMoveTick => _lastMoveTick;
-        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick);
+        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom);
 
         /// <summary>
         /// Records an input that has just been sent and applies it to the predicted
@@ -561,7 +561,8 @@ namespace Cuvara.Netcode.Prediction
             else
             {
                 verdict = StepResult(
-                    _predicted, moveX, moveY, StepDeltaTime(_baseTick, _lastMoveTick),
+                    _predicted, moveX, moveY,
+                    StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom),
                     out _predicted);
             }
 
@@ -582,16 +583,19 @@ namespace Cuvara.Netcode.Prediction
             }
             else if (verdict == MoveResult.None)
             {
-                // An explicit stop. A Rejected vector deliberately leaves the hold alone,
-                // matching the server, which logs and drops it without disturbing state.
+                // An explicit stop. Both fields move, exactly as
+                // InputHandler.ProcessInput does on a deadzone vector: it clears
+                // HeldFromTick AND stamps LastMoveTick with the current tick, in the
+                // pre-check and again in the MoveResult.None branch. The
+                // comment that used to stand here claimed the reverse of what the server
+                // does, and leaving LastMoveTick stale is what let an idle bank time: the
+                // next real input then covered MaxBankedTicks worth of distance where the
+                // server covered one, which is the whole of issue #12.
                 //
-                // Clears the hold ONLY. LastMoveTick is deliberately untouched, exactly as
-                // server-side: a stop ends the held direction, it does not reset how long
-                // the entity has been stationary. Clearing it here sent StepDeltaTime down
-                // its "never moved" early return, which yields one plain timestep and so
-                // reproduced the old fixed-dt behaviour precisely — the forward-parity
-                // test stayed green while rule 3 was, in effect, not implemented.
+                // A Rejected vector still leaves both alone, matching the server, which
+                // logs and drops it without disturbing state.
                 _heldFrom = 0;
+                _lastMoveTick = _baseTick;
             }
 
             // Measure the gap to the previous input. A gap far longer than the ones
@@ -697,7 +701,7 @@ namespace Cuvara.Netcode.Prediction
                         {
                             verdict = StepResult(
                                 replayed, input.MoveX, input.MoveY,
-                                StepDeltaTime(t, replayLastMove), out replayed);
+                                StepDeltaTime(t, replayLastMove, heldFrom), out replayed);
                         }
                         ReplayedSteps++;
                         stepped = true;
@@ -712,6 +716,7 @@ namespace Cuvara.Netcode.Prediction
                         else if (verdict == MoveResult.None)
                         {
                             heldFrom = 0;
+                            replayLastMove = t;
                         }
 
                         next++;
@@ -1108,7 +1113,8 @@ namespace Cuvara.Netcode.Prediction
             // The hold path updates LastMoveTick server-side exactly as the packet path
             // does, so a held step banks time for the next one just the same.
             MoveResult result = StepResult(
-                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick), out Vec2 moved);
+                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
+                out Vec2 moved);
 
             if (result is not (MoveResult.Accepted or MoveResult.Clamped))
             {
@@ -1205,8 +1211,18 @@ namespace Cuvara.Netcode.Prediction
         /// than left to the server to impose.
         /// </para>
         /// </remarks>
-        private float StepDeltaTime(long baseTick, long lastMoveTick)
+        private float StepDeltaTime(long baseTick, long lastMoveTick, long heldFrom)
         {
+            // Nothing held means the entity was STOPPED, not stalled. The last thing the
+            // client said was "I am not moving", and a deadzone input clears the hold, so
+            // a player who releases the stick, waits, and presses again is owed nothing
+            // for the pause. Server-side this is the first guard in
+            // InputHandler.StepDeltaTime; the client did not have it, so every restart
+            // after an idle repaid the whole pause — capped at MaxBankedTicks — as a
+            // single lurching step the server never took. See the CHANGELOG for the
+            // measurement.
+            if (heldFrom == 0) return _dt;
+
             if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _dt;
 
             long elapsed = baseTick - lastMoveTick;
