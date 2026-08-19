@@ -12,7 +12,8 @@ namespace Cuvara.Netcode.Tests.Editor
     /// <remarks>
     /// <para>
     /// The reference simulation in <see cref="ServerWalk"/> is not a second copy of the
-    /// movement rule — it is a loop around the same
+    /// movement rule — it is a transcription of <c>InputHandler.ProcessInput</c> around
+    /// the same
     /// <see cref="MovementSystem.TryMove"/> the server's <c>InputHandler</c> calls, with
     /// the same per-input <c>dt</c>. That is what makes the equality assertions
     /// meaningful: if the predictor drifted to a hand-rolled
@@ -62,19 +63,40 @@ namespace Cuvara.Netcode.Tests.Editor
             Vec2 pos = from;
 
             // One input per tick, and a step covers the time since this entity last
-            // actually moved (rule 3), bounded by the shared cap. A fixed dt here would
-            // model a server that predates the rule -- and because clearing the
-            // last-moved tick reproduces a fixed dt exactly, that difference is invisible
-            // unless a walk contains an input that does not move, which this one does.
+            // actually moved (rule 3), bounded by the shared cap.
+            //
+            // Transcribed line for line from GameServer/Input/InputHandler.cs
+            // (ProcessInput and StepDeltaTime), including the two parts this loop used to
+            // leave out, both of which only show up on a walk containing a stop:
+            //
+            //   * StepDeltaTime returns one plain timestep when NOTHING IS HELD. Standing
+            //     still is not lost input, so a pause is never repaid.
+            //   * A deadzone input stamps LastMoveTick with the current tick as well as
+            //     clearing HeldFromTick, so the pause cannot be banked afterwards either.
+            //
+            // Without them this loop was not the server -- it was a copy of the client's
+            // then-current behaviour, and it certified the very lurch it was supposed to
+            // catch (issue #12).
             long tick = 0;
             long lastMove = 0;
+            long heldFrom = 0;
 
             foreach (var (x, y) in inputs)
             {
                 tick++;
 
+                // The deadzone pre-check, ahead of the step, exactly as ProcessInput
+                // orders it. Same constant and same squared-magnitude test as
+                // MovementSystem.ResolveDirection, so the two cannot disagree.
+                float magSq = (float)((float)(x * x) + (float)(y * y));
+                if (magSq <= GameConstants.InputDeadzoneSq)
+                {
+                    heldFrom = 0;
+                    lastMove = tick;
+                }
+
                 float stepDt = dt;
-                if (lastMove != 0 && tick > lastMove)
+                if (heldFrom != 0 && lastMove != 0 && tick > lastMove)
                 {
                     long elapsed = tick - lastMove;
                     if (elapsed > cap) elapsed = cap;
@@ -86,6 +108,12 @@ namespace Cuvara.Netcode.Tests.Editor
                 if (result is MoveResult.Accepted or MoveResult.Clamped)
                 {
                     pos = moved;
+                    heldFrom = tick;
+                    lastMove = tick;
+                }
+                else if (result == MoveResult.None)
+                {
+                    heldFrom = 0;
                     lastMove = tick;
                 }
             }
@@ -100,6 +128,81 @@ namespace Cuvara.Netcode.Tests.Editor
         };
 
         // ── The determinism property ──
+
+        // ── Rule 3 is banking, not a debt for standing still (issue #12) ──
+
+        /// <summary>
+        /// A player who stops, waits, and presses again gets ONE step, not the whole
+        /// pause repaid.
+        /// </summary>
+        /// <remarks>
+        /// The server's <c>StepDeltaTime</c> returns a plain timestep whenever nothing is
+        /// held, and its <c>ProcessInput</c> stamps <c>LastMoveTick</c> on a deadzone
+        /// input so the pause cannot be banked afterwards either. The predictor had
+        /// neither, so the first input after an idle covered up to
+        /// <c>MaxBankedMovementTicks</c> of distance the server never travelled — measured
+        /// as a correction of exactly <c>cap - 1</c> steps on every restart, and a snap on
+        /// each one in ordinary localhost play.
+        /// </remarks>
+        [Test]
+        public void AnInputAfterAnIdlePauseStepsOnceInsteadOfRepayingThePause()
+        {
+            var predictor = Seeded(Vec2.Zero);
+
+            predictor.RecordInput(1, 1f, 0f);
+            predictor.Advance(Dt);
+
+            // An explicit stop, then an idle far longer than the banking cap.
+            predictor.RecordInput(2, 0f, 0f);
+            int cap = GameConstants.MaxBankedMovementTicks(TickRate);
+            for (var i = 0; i < cap * 2; i++)
+            {
+                predictor.Advance(Dt);
+            }
+
+            Vec2 beforeRestart = predictor.SimulatedPosition;
+            predictor.RecordInput(3, 1f, 0f);
+
+            var probe = new EntityState
+            {
+                Position = beforeRestart, Speed = Speed, Dead = false,
+            };
+            MovementSystem.TryMove(in probe, 1f, 0f, Dt, Bounds, out Vec2 oneStep);
+
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(oneStep.X),
+                $"the restart after an idle must travel one timestep, not up to {cap}");
+        }
+
+        /// <summary>
+        /// The same restart, reconciled: the server's answer and the client's prediction
+        /// must not differ at all, so nothing is smoothed and nothing is snapped.
+        /// </summary>
+        [Test]
+        public void AReconciledRestartAfterAnIdleProducesNoCorrection()
+        {
+            var predictor = Seeded(Vec2.Zero);
+
+            predictor.RecordInput(1, 1f, 0f);
+            predictor.Advance(Dt);
+            predictor.RecordInput(2, 0f, 0f);
+            for (var i = 0; i < GameConstants.MaxBankedMovementTicks(TickRate) * 2; i++)
+            {
+                predictor.Advance(Dt);
+            }
+
+            predictor.RecordInput(3, 1f, 0f);
+
+            // The server ran the same three inputs through its own model.
+            Vec2 authoritative = ServerWalk(Vec2.Zero, new[] { (1f, 0f), (0f, 0f), (1f, 0f) });
+
+            int snaps = predictor.Snaps;
+            predictor.Reconcile(authoritative, 3);
+
+            Assert.That(predictor.LastCorrection, Is.EqualTo(0f),
+                "the client and the server must agree exactly on a restart after an idle");
+            Assert.That(predictor.Snaps, Is.EqualTo(snaps), "no snap on a healthy restart");
+        }
+
 
         [Test]
         public void PredictingForwardMatchesTheServerExactly()
@@ -534,6 +637,81 @@ namespace Cuvara.Netcode.Tests.Editor
             predictor.RecordInput(1, 1f, 0f);
             Assert.That(predictor.PendingCount, Is.EqualTo(1));
             Assert.That(predictor.RejectedInputs, Is.Zero);
+        }
+
+        // ── Server base-tick seeding (issue #13) ──
+
+        [Test]
+        public void SeedBaseTickAlignsTheLocalCounter()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            Assert.That(predictor.BaseTick, Is.EqualTo(1),
+                "default: starts at 1");
+
+            predictor.SeedBaseTick(726_001);
+            Assert.That(predictor.BaseTick, Is.EqualTo(726_001),
+                "first call moves the counter to the server's tick");
+        }
+
+        [Test]
+        public void SeedBaseTickIsIdempotent()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            predictor.SeedBaseTick(726_001);
+            predictor.SeedBaseTick(900_000);
+
+            Assert.That(predictor.BaseTick, Is.EqualTo(726_001),
+                "second call must be a no-op — the accumulator-driven clock owns it now");
+        }
+
+        [Test]
+        public void SeedBaseTickIgnoresNonPositive()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+
+            predictor.SeedBaseTick(0);
+            Assert.That(predictor.BaseTick, Is.EqualTo(1), "zero ignored");
+
+            predictor.SeedBaseTick(-5);
+            Assert.That(predictor.BaseTick, Is.EqualTo(1), "negative ignored");
+        }
+
+        [Test]
+        public void ResetAllowsReseeding()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+            predictor.SeedBaseTick(726_001);
+
+            predictor.Reset();
+
+            Assert.That(predictor.BaseTick, Is.EqualTo(1),
+                "reset returns to 1");
+
+            predictor.SeedBaseTick(800_000);
+            Assert.That(predictor.BaseTick, Is.EqualTo(800_000),
+                "after reset, a new seed takes effect");
+        }
+
+        [Test]
+        public void SeededPredictorStillMatchesServerExactly()
+        {
+            var predictor = new LocalMovePredictor(Settings());
+            predictor.SeedBaseTick(726_001);
+            predictor.Reconcile(Vec2.Zero, 0);
+
+            for (var i = 0; i < Walk.Length; i++)
+            {
+                predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
+                predictor.Advance(Dt);
+            }
+
+            Vec2 pos = ServerWalk(Vec2.Zero, Walk);
+
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(pos.X),
+                "seeding must not break bit-exact replay");
+            Assert.That(predictor.SimulatedPosition.Y, Is.EqualTo(pos.Y));
         }
     }
 }

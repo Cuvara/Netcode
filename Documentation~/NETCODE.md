@@ -331,8 +331,10 @@ binder.Tick(client.World, client.UserId);
 binder.AdvanceFrame(Time.deltaTime);
 ```
 
-The binder calls `Reconcile` itself when a snapshot arrives. **You must call
-`AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
+The binder calls `Reconcile` itself when a snapshot arrives, and since 0.16.0 it also
+calls `SeedBaseTick` — **if you bind views yourself rather than through the binder, that
+call is yours to make**; see "The prediction contract you must not 'fix'" below. **You must
+call `AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
 renders at the newest received position, which is 0.4.0's behaviour.
 
 ### Why `AdvanceFrame` is not optional
@@ -514,6 +516,171 @@ for the rest). The client predicted both, so it runs one step ahead until the ne
 snapshot pulls it back. Bounded, self-correcting, and the reason a client's input rate
 should **match** the server tick rate rather than exceed it.
 
+### The prediction contract you must not "fix" (0.16.0)
+
+Three rules below look like bugs and are not. Each one mirrors a specific piece of
+`rpg-mmo-server` `GameServer/Input/InputHandler.cs`. Reverting any of them compiles,
+keeps every test green, and desyncs the local player against the live server.
+
+#### 1. A restart after an idle steps **once**, never repays the pause
+
+`LocalMovePredictor.StepDeltaTime(baseTick, lastMoveTick, heldFrom)` returns one plain
+timestep when `heldFrom == 0`, *before* the banked-time arithmetic runs. That is the first
+guard in `InputHandler.StepDeltaTime` (`InputHandler.cs:78-93`), transcribed line for line,
+and the rule behind it is stated in `gameserver-dotnet/docs/API.md`:
+
+> **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
+> entity with no held direction is *stopped*, not stalled — so a player who releases the
+> stick, waits, and presses again is owed nothing for the pause.
+
+It reads like a contradiction of rule 3 ("a step covers the time since that entity last
+moved") and it is not: rule 3 exists so that *coalescing* — at most one step per player per
+tick — cannot lose simulated time that discarded inputs carried. A player who was stopped
+carried none.
+
+**If you remove the guard**, the client steps up to `MaxBankedTicks` of travel — 15
+timesteps at 60 Hz, from the 250 ms `MaxBankedMovementMs` bound — on the first input after
+every pause, while the server steps one. The player stops, starts, lurches a quarter-second
+of travel forward in a single frame, and rubber-bands back on the next snapshot. Measured:
+19 snaps per run with a 14.00-step worst correction, against 0 and 0.0000 with the guard.
+**It reproduces on no test that does not deliberately contain an idle**, which is why it
+survived three releases.
+
+Paired with it: an input the movement model resolves to `MoveResult.None` clears the hold
+**and** stamps `_lastMoveTick`, live path and replay path alike — that is what
+`InputHandler.ProcessInput` does, in its pre-check and again in its `MoveResult.None`
+branch. Leaving `_lastMoveTick` stale is what lets an idle bank time in the first place. A
+`Rejected` vector still leaves both alone, matching the server, which logs and drops it
+without disturbing state.
+
+#### 2. The golden vectors cannot catch any of this
+
+**Green golden vectors do not mean the client and the server agree.** They cover
+`Shared.GameLogic`, which is genuinely shared code compiled into both sides — so they prove
+the movement *arithmetic* matches, to the bit. Everything in this section lives in
+`LocalMovePredictor`, the client-side mirror of `InputHandler`, which the shared library
+does not contain and the vectors therefore never execute.
+
+What diverges in prediction is almost never the arithmetic. It is *when* each side decides
+to run it: which tick a step is attributed to, whether a tick steps at all, how much
+simulated time one step covers. A developer who reads "golden vectors green" as
+"client and server agree" will be wrong in exactly that direction, and the symptom will be
+rubber-banding with a clean test suite. The only things that cover the seam are
+`LocalMovePredictorTests`' transcription of `ProcessInput` and the PlayMode rig below.
+
+#### 3. `SeedBaseTick`, and its one caller
+
+`WorldViewBinder.Tick()` calls `_predictor.SeedBaseTick(world.Tick)` immediately before
+`Reconcile`. **That is the only call site, and without it the feature is inert.** If you
+write your own view binding — a DOTS system reading `Position` into `LocalTransform`, or
+anything that does not go through the binder — you must make the call yourself:
+
+```csharp
+predictor.SeedBaseTick(world.Tick);   // before Reconcile; one-shot internally
+predictor.SetServerSpeed(e.Speed);
+predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
+```
+
+Without it `_baseTick` starts at 1 and free-runs on wall-clock accumulation while the
+server's `current_tick` sits in the hundreds of thousands. The absolute values do not matter
+— `StepDeltaTime` and `ApplyHeld` use differences — but the **phase** does: the hold window
+is `HoldTicks` base ticks wide, and where each clock's boundary falls relative to an input
+changes how many held steps get applied between inputs. On localhost with matched rates and
+no loss that measured as 17 of 20 samples needing a correction of exactly 2 steps.
+
+Seeding takes effect once; the accumulator clock in `Advance` owns the counter afterwards,
+and re-seeding on every snapshot would fight it. Zero and negative values are ignored, on
+the same "zero means not sent" rule the speed and tick-rate fields follow. `Reset()` clears
+the flag so a new session re-seeds. Read `LocalMovePredictor.BaseTick` to confirm the seed
+took — a binder that never seeds is otherwise indistinguishable from one that did.
+
+### The hold window is measured, and a narrow gap must be seen twice
+
+`TickRateEstimator.SnapshotTickGap` is the sole source of the predictor's hold window
+(`WorldViewBinder` feeds it to `SetHoldTicks`). It is a **running minimum** of the base-tick
+gap between consecutive snapshots — on the premise that only drops move a gap, and only
+widen it — **and a narrower gap is adopted only after being observed twice.**
+
+The second half is not defensive coding. Every session passes through one moment where the
+premise is false: the first snapshot after joining is a keyframe emitted when the join is
+handled, not on a world-tick boundary, so the gap from it to the next scheduled snapshot is
+whatever the phase happens to be — 1 to 3 base ticks against a true cadence of 4. Two
+snapshots batched into one socket read do the same.
+
+**What you would observe without the rule:** that one off-cadence gap pins the hold window
+for the whole session, and the minimum never recovers. At a keyframe gap of 1 against a real
+cadence of 4, `HoldTicks` sits at 1 — which switches the hold off entirely. The predictor
+then steps only on inputs and reproduces about a quarter of the server's motion at a 15 Hz
+send rate against a 60 Hz base tick, so every snapshot arrives as a correction. It is set
+once, at join, never recovers, and whether a reconnect clears it is a coin flip on phase.
+
+A true cadence repeats on every snapshot and therefore confirms immediately; a one-off never
+does. Drops still only widen a gap and are still ignored, so "minimum, not mean" is intact.
+
+> **Known limitation.** The rule tracks a single candidate, so gaps alternating between two
+> values reset the candidate on every sighting and leave `_minGap` at 0 — and
+> `SetHoldTicks(0)` is ignored, so `HoldTicks` would sit at its fallback of 1 with the hold
+> off. A steady cadence cannot produce that. Counting per gap value is the durable form and
+> is follow-up work.
+
+### Diagnosing rubber-banding: which counter answers which question
+
+`Snaps`, `Reconciles`, `ReplayedSteps` and `LastCorrection` describe the **simulated**
+position. All three defects fixed in 0.16.0 left every one of them clean, because in all
+three the simulated position was correct and only the *rendered* one was wrong. If your game
+looks wrong and those counters look fine, you are reading the wrong instrument.
+
+Start here instead, in this order:
+
+1. **`EffectiveSmoothingSpan` against `ObservedStepInterval`.** The span is how long one step
+   is spread over; the interval is how often steps actually arrive. Span **shorter** than
+   interval: the avatar finishes its step and then holds — `RenderStepProgress` pins at 1 and
+   `Position` goes exactly constant — for the remainder of every gap. Span **longer**: the
+   avatar permanently lags its own simulation. This comparison is the line that named the
+   0.16.0 freeze.
+2. **`HeldStepsApplied` against `BaseTicksAdvanced`.** The server integrates the held
+   direction on every base tick inside the window, so under sustained movement these track
+   each other. A large shortfall means the rendered position is refreshed far less often than
+   the hold window claims.
+3. **The six `Skip*` counters** say *why* that shortfall exists, and they need opposite
+   responses, which is why they are counted apart rather than summed:
+   `SkipInputAlreadyStepped` is rule 1 and is **not** a fault; `SkipExpired` means the hold
+   window is too narrow — check it against the measured snapshot cadence; `SkipNothingHeld`
+   means an explicit stop or no input yet; `SkipNoHoldWindow` means `HoldTicks <= 1`, i.e.
+   the hold never measured; `SkipRefusedByMovementModel` and `SkipNoDisplacement` mean the
+   shared movement model declined the vector, usually a bounds clamp.
+   They are recorded **only on the live path** — `Reconcile` replays the same guards over
+   the unacknowledged timeline, and folding those in would measure how much replay ran
+   rather than how the rendered position behaved.
+4. **`HoldIsActive`** classifies a still frame at the moment it happens: still while the hold
+   is running is a fault, still after it expired is the avatar correctly at rest. Do not
+   separate those two by wall-clock reasoning after the fact — a live run split 437 still
+   frames into 417 legitimate and 20 genuine, and only the in-the-moment classification got
+   that right.
+5. **`IntegrationTimestep`**, **`BaseTick`**, **`StepIntervalSamples` / `StepIntervalResets`**
+   confirm the predictor is on the clock you think it is: the timestep it integrates on, the
+   tick it believes it is at (comparable directly against a server log line once seeded), and
+   whether the interval measurement is converging or being torn down by the pause guard.
+
+These are public contract, pinned by `PredictionSurfaceContractTests`, not debug leftovers —
+they exist for a consumer diagnosing its own game, and the package will not remove one
+without saying so. The reason code behind the `Skip*` counters is deliberately **private**:
+this package expects to add reasons, and a consumer switching on them would be broken by
+that.
+
+### The `sgl-*` pin names a server build, not client behaviour
+
+The manual `com.rpgmmo.shared-gamelogic` pin is easy to over-read. `sgl-v0.1.8 → sgl-v0.1.9`
+changes exactly **one line** inside `Shared.GameLogic/` — the version string. The change that
+matters in that range is in `GameServer/Input/InputHandler.cs`, which is *outside* the UPM
+package and never ships to the client.
+
+So bumping the pin moves no client code. What it records is which server build this
+predictor was transcribed against — which is the only thing that makes the transcription
+verifiable later. Do not infer behaviour from a pin diff in either direction: a pin that
+moved may change nothing, and a pin that did not move does not mean the server's input
+handling stood still.
+
 ## Measuring what prediction removes
 
 `Tests/Runtime/PredictionLatencyMeasurement.cs` is a **PlayMode** test that connects to a
@@ -613,7 +780,7 @@ The simulation logic the client shares with the server arrives as a UPM package,
 pinned to a **tag, never a branch**:
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
 ```
 
 `sgl-v0.1.0` resolved but produced **no assembly**. Unity treats a git package as

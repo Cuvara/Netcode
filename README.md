@@ -62,7 +62,7 @@ with `CS0246: The type or namespace name 'VContainer' could not be found`.
   with the server.
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
 ```
 
 This one cannot be declared by the package. A UPM package's `dependencies` accepts
