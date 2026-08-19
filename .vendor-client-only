@@ -1,14 +1,7 @@
 # Files this client adds on top of the upstream package. A file listed here may
 # exist ONLY in the vendored copy; it may not DIFFER from an upstream file of the
 # same path, or a real drift could hide behind the exemption.
-
-# Lets a built player be pointed at any backend from the command line, and gives
-# N processes N distinct Nakama users. Not upstreamed: the package is netcode,
-# and this is harness for running several clients against one server.
-Samples~/DOTSSample/BackendCommandLine.cs
-Samples~/DOTSSample/BackendCommandLine.cs.meta
-
-# Depends on BackendCommandLine above, so it cannot go upstream without it.
-# Reviewed for Netcode v0.16.0 and deliberately left behind; revisit if
-# BackendCommandLine is ever upstreamed.
-Samples~/DOTSSample/DOTSNetworkBridge.cs
+#
+# Empty since Netcode v0.16.1: BackendCommandLine and the DOTS sample's use of it
+# were upstreamed, so the vendored copy is now byte-identical to its release.
+# Keep this file — an empty allowlist is a statement, and the drift check reads it.
