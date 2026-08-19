@@ -5,6 +5,89 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-08-19
+
+Sample-only release. No runtime assembly changed, so nothing about transport, codec,
+handshake, snapshots or prediction moves — a consumer who does not import the DOTS
+sample gets the same package as 0.16.0 under a new version number.
+
+### Added — `Samples~/DOTSSample/BackendCommandLine.cs`
+
+The DOTS sample can now be pointed at a backend from the command line (with
+`CUVARA_*` environment variables as a fallback), and can be run as several
+processes that authenticate as several distinct Nakama users.
+
+Both of these were previously impossible in a build. The sample scene carries only
+`DOTSSceneSetup`, which adds `DOTSNetworkBridge` at runtime — so the bridge can never
+hold anything but its own field initializers, and every address it knew
+(`127.0.0.1:8000` for the gateway, `127.0.0.1:7350` for Nakama) was baked into source.
+Retargeting a player meant editing a `[SerializeField]` default and rebuilding. That is
+wrong by construction for this backend: the game server runs as an Agones pod whose port
+is assigned at scheduling time.
+
+- **Flags, and their precedence.** Command line beats environment beats the value the
+  caller already had; with no arguments at all every field is left exactly as it was, so
+  the sample's out-of-the-box behaviour is unchanged.
+
+  | Flag | Environment | Selects |
+  |---|---|---|
+  | `-cuvara-gateway-host` | `CUVARA_GATEWAY_HOST` | gateway host |
+  | `-cuvara-gateway-port` | `CUVARA_GATEWAY_PORT` | gateway port |
+  | `-cuvara-nakama-scheme` | `CUVARA_NAKAMA_SCHEME` | `http` / `https` |
+  | `-cuvara-nakama-host` | `CUVARA_NAKAMA_HOST` | Nakama host |
+  | `-cuvara-nakama-port` | `CUVARA_NAKAMA_PORT` | Nakama port |
+  | `-cuvara-nakama-key` | `CUVARA_NAKAMA_SERVER_KEY` | Nakama server key |
+  | `-cuvara-status-url` | `CUVARA_STATUS_URL` | game-server status URL for the HUD |
+  | `-cuvara-map` | `CUVARA_MAP_ID` | map to join, skipping the selector |
+  | `-cuvara-device` | `CUVARA_DEVICE_ID` | explicit device id |
+  | `-cuvara-instance` | `CUVARA_INSTANCE` | label shown in the HUD and folded into the device id |
+
+  The names match the ones `Tests/Runtime/LiveBackend.cs` already reads, so one exported
+  environment drives both the Editor live-backend tests and a built player.
+
+- **`ResolveDeviceId` is what makes N processes N players.** Nakama device auth keys the
+  user by device id; two instances that compute the same one log in as the same user and
+  the second eviscerates the first. What is left on screen is one client alone in an
+  empty world — the same picture a broken area-of-interest draws, which is why this is
+  worth a changelog paragraph rather than a footnote. `ResolveDeviceId` folds the process
+  id, the instance label and the clock into the id so co-located processes cannot collide,
+  and honours an explicit `-cuvara-device` so a launcher can give each window a name that
+  greps out of the server logs.
+
+- **No address is baked in, deliberately.** `Resolve` takes the caller's current values as
+  its defaults and returns them untouched when nothing overrides them. The sample ships
+  pointing at localhost because that is where a dev stack is, not because the package has
+  an opinion about where your backend lives.
+
+- **`-cuvara-map` collapses the offered map set to one entry.** With two or more maps
+  available the bridge draws a selector and waits for a click, which an unattended launcher
+  cannot supply; the window would sit at a menu and read as "connected to nothing".
+
+- Reading the command line is wrapped in a `try` — WebGL denies
+  `Environment.GetCommandLineArgs()` outright, and the environment fallback must still work
+  there rather than throwing at startup.
+
+### Changed — `Samples~/DOTSSample/DOTSNetworkBridge.cs` wires the above in
+
+One `BackendCommandLine.Resolve` call at the top of `Start`, before anything connects, and
+`ResolveDeviceId` at the authentication call site. Nothing runs per frame, and no netcode
+behaviour changes.
+
+### Why these two files moved upstream now
+
+They already existed in the Cuvara client and were held back at 0.16.0 as "harness". They
+are not: pointing a build at a chosen backend, and running several clients that are several
+users, is what any consumer with more than one window needs. Keeping them out also left a
+permanent false positive in the client's vendor-drift check, because a drift allowlist can
+legitimately excuse a file that is *absent* upstream but must never excuse one that
+*differs* — an exemption that covered modifications would hide real drift behind it.
+
+### Documentation
+
+`Documentation~/NETCODE.md` gains **Pointing a build at a backend**: the full flag and
+environment table with its precedence rule, the identity-collision failure mode and why it
+looks like a netcode bug, and why no address is baked into the sample.
+
 ## [0.16.0] - 2026-08-19
 
 Three defects in the movement predictor, all of which left every existing counter clean

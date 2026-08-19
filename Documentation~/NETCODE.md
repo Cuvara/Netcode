@@ -925,6 +925,101 @@ sufficient.
 Still unverified: this was measured under **Editor Mono**. Whether IL2CPP/ARM64
 agrees is untested, and IL2CPP is what ships to devices.
 
+## Pointing a build at a backend — `BackendCommandLine` (DOTS sample)
+
+`Samples~/DOTSSample/BackendCommandLine.cs` lets one built player be aimed at any
+backend without a rebuild, and lets several players on one machine be several
+*players* rather than one player logging in repeatedly. It is a sample file, not
+part of any runtime assembly — importing the DOTS sample is what brings it in.
+
+**Nothing is baked in, and that is the design.** The sample's field initializers
+still say `127.0.0.1:8000` and Nakama on `127.0.0.1:7350`, because that is where a
+dev stack sits. They are *defaults handed to the resolver*, not an address the
+package believes in: a game server here runs as an Agones pod and is told its port
+at scheduling time, so any address compiled into a build is wrong the moment the
+pod is rescheduled. `Resolve` returns the caller's values untouched when nothing
+overrides them, so a player launched with no arguments behaves exactly as before.
+
+### Flags and environment fallbacks
+
+Resolution is read **once, in `Start`, before the first connection**. Nothing here
+runs per frame and nothing here changes netcode behaviour.
+
+Precedence, highest first:
+
+1. a command-line flag,
+2. the matching `CUVARA_*` environment variable,
+3. the default the caller passed in (the bridge's own field values).
+
+| Flag | Environment variable | Meaning |
+|---|---|---|
+| `-cuvara-gateway-host <host>` | `CUVARA_GATEWAY_HOST` | Gateway host to authenticate against. |
+| `-cuvara-gateway-port <port>` | `CUVARA_GATEWAY_PORT` | Gateway port. |
+| `-cuvara-nakama-scheme <http\|https>` | `CUVARA_NAKAMA_SCHEME` | Nakama URL scheme (default `http`). |
+| `-cuvara-nakama-host <host>` | `CUVARA_NAKAMA_HOST` | Nakama host (default `127.0.0.1`). |
+| `-cuvara-nakama-port <port>` | `CUVARA_NAKAMA_PORT` | Nakama port (default `7350`). |
+| `-cuvara-nakama-key <key>` | `CUVARA_NAKAMA_SERVER_KEY` | Nakama server key (default `defaultkey`). |
+| `-cuvara-status-url <url>` | `CUVARA_STATUS_URL` | Game-server status endpoint the HUD polls. |
+| `-cuvara-map <id>` | `CUVARA_MAP_ID` | Map to join; also skips the map selector. |
+| `-cuvara-device <id>` | `CUVARA_DEVICE_ID` | Explicit Nakama device id — see below. |
+| `-cuvara-instance <label>` | `CUVARA_INSTANCE` | Label shown in the HUD and folded into the device id. |
+
+Two details worth knowing before you debug something:
+
+- **The three Nakama address flags move together.** Setting any one of scheme,
+  host or port marks the Nakama configuration explicit, and the bridge then takes
+  the whole base URL *and* the health-check URL from the resolver. Setting none
+  leaves both the bridge's own inspector values alone. There is no way to override
+  the host but keep an unrelated hand-written base URL — that combination was
+  never coherent.
+- **A port that does not parse, or falls outside 1–65535, is refused rather than
+  used.** The resolver logs `[backend-args] <flag>='<value>' is not a usable port`
+  and keeps the default. A typo therefore connects to the dev stack instead of
+  failing to connect at all, so read the log before concluding the flag was
+  ignored.
+
+The variable names are the ones `Tests/Runtime/LiveBackend.cs` already reads, so a
+single exported environment drives the Editor live-backend tests and a built
+player identically. Reading the command line is wrapped in a `try`: WebGL denies
+`Environment.GetCommandLineArgs()` outright, and there the environment fallback
+must still work rather than throwing at startup.
+
+Running two clients against a local stack:
+
+```bash
+# Window 1
+./DOTSSample -cuvara-gateway-host 10.0.0.7 -cuvara-nakama-host 10.0.0.7 \
+             -cuvara-map map_01 -cuvara-instance a
+
+# Window 2 — same backend, a different player
+./DOTSSample -cuvara-gateway-host 10.0.0.7 -cuvara-nakama-host 10.0.0.7 \
+             -cuvara-map map_01 -cuvara-instance b
+```
+
+### `ResolveDeviceId` is what makes N processes N players
+
+**Read this before reporting an area-of-interest bug.** Nakama device
+authentication keys the account by device id. Two processes that compute the same
+device id are the *same user*: the second login evicts the first, and what is left
+on screen is one client alone in an empty world. That is pixel-for-pixel the
+symptom of replication or area-of-interest being broken, and it is neither — it is
+an identity collision, and no netcode counter will show it. The evicted client
+sees a `disconnect{duplicate_login}`, which is the tell.
+
+`BackendCommandLine.ResolveDeviceId(in Settings, string fallbackPrefix)` exists to
+make that collision impossible:
+
+- an explicit `-cuvara-device` / `CUVARA_DEVICE_ID` wins, so a launcher can give
+  each window a stable name that greps out of the server logs;
+- otherwise the id is `<prefix>-<instance label>-<pid>-<UTC ticks>`. The process id
+  separates co-located processes; the ticks separate successive runs; the label is
+  what you actually read in a log.
+
+If you write your own bootstrap rather than using the DOTS sample, this is the one
+piece to copy: any per-machine or per-build constant used as a device id — a
+product name, a `SystemInfo.deviceUniqueIdentifier`, a hard-coded `"player1"` —
+collapses every co-located client onto one account.
+
 ## Press Play: `Assets/Scenes/NetcodeBootstrap.unity`
 
 A development harness that runs the whole core flow against a local backend and
