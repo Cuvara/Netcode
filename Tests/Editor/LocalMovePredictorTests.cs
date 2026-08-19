@@ -646,11 +646,11 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var predictor = new LocalMovePredictor(Settings());
 
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1),
+            Assert.That(predictor.BaseTick, Is.EqualTo(1),
                 "default: starts at 1");
 
             predictor.SeedBaseTick(726_001);
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(726_001),
+            Assert.That(predictor.BaseTick, Is.EqualTo(726_001),
                 "first call moves the counter to the server's tick");
         }
 
@@ -662,7 +662,7 @@ namespace Cuvara.Netcode.Tests.Editor
             predictor.SeedBaseTick(726_001);
             predictor.SeedBaseTick(900_000);
 
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(726_001),
+            Assert.That(predictor.BaseTick, Is.EqualTo(726_001),
                 "second call must be a no-op — the accumulator-driven clock owns it now");
         }
 
@@ -672,10 +672,10 @@ namespace Cuvara.Netcode.Tests.Editor
             var predictor = new LocalMovePredictor(Settings());
 
             predictor.SeedBaseTick(0);
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1), "zero ignored");
+            Assert.That(predictor.BaseTick, Is.EqualTo(1), "zero ignored");
 
             predictor.SeedBaseTick(-5);
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1), "negative ignored");
+            Assert.That(predictor.BaseTick, Is.EqualTo(1), "negative ignored");
         }
 
         [Test]
@@ -686,11 +686,11 @@ namespace Cuvara.Netcode.Tests.Editor
 
             predictor.Reset();
 
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(1),
+            Assert.That(predictor.BaseTick, Is.EqualTo(1),
                 "reset returns to 1");
 
             predictor.SeedBaseTick(800_000);
-            Assert.That(predictor.DebugBaseTick, Is.EqualTo(800_000),
+            Assert.That(predictor.BaseTick, Is.EqualTo(800_000),
                 "after reset, a new seed takes effect");
         }
 

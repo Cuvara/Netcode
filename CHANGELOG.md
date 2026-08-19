@@ -5,325 +5,147 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-08-19
 
-### Fixed — client and server base ticks free-run at arbitrary phase (#13)
+Three defects in the movement predictor, all of which left every existing counter clean
+while the player's own avatar misbehaved. Read the first section even if you are not
+touching prediction code: it changes what you are allowed to assume about the golden
+vectors, and about the `sgl-*` pin.
 
-`LocalMovePredictor._baseTick` started at 1 and free-ran via wall-clock accumulation.
-The server's `current_tick` was in the hundreds of thousands. Absolute values did not
-matter — `StepDeltaTime` and `ApplyHeld` use differences — but the phase did: the hold
-window is `HoldTicks` base ticks, and where each clock's tick boundary fell relative to
-an input changed how many held steps got applied between inputs. On localhost with
-matched rates and no loss, 17 of 20 samples needed a correction of exactly 2 steps.
+### If you read nothing else
 
-**Fix:** `SeedBaseTick(long serverTick)` sets `_baseTick` from the server's world tick
-(`WorldState.Tick`, already on the wire) on the first snapshot. Called from
-`WorldViewBinder.Tick()` before `Reconcile`, following the `SetServerSpeed` pattern —
-separate method, not a signature change, so the cross-package contract in
-`PredictionSurfaceContractTests` is untouched. The accumulator-driven clock in `Advance`
-owns the counter after seeding; `SeedBaseTick` is a one-shot. `Reset()` clears the
-seeded flag so a new session can re-seed.
+- **The golden vectors do not prove client/server agreement.** They cover
+  `Shared.GameLogic`, which both sides genuinely share. All three defects below lived in
+  `LocalMovePredictor`, the *client-side* mirror of `GameServer/Input/InputHandler.cs` —
+  code the shared library does not contain and the vectors therefore never touch. Green
+  vectors mean the movement *arithmetic* matches. They say nothing about *when* each side
+  decides to run it, which is where prediction actually diverges.
+- **The `sgl-*` pin is a label, not behaviour.** This release moves the manual
+  `com.rpgmmo.shared-gamelogic` pin from `sgl-v0.1.8` to `sgl-v0.1.9`. That range changes
+  exactly one line inside `Shared.GameLogic/` — the version string. The real change in it
+  is in `GameServer/Input/InputHandler.cs`, which is *outside* the UPM package and does not
+  ship to the client at all. So the pin bump moves no client code; it names the server
+  build this predictor was transcribed against. Do not infer behaviour from a pin diff.
+- **If you write your own view binding, you must call `SeedBaseTick`.** See below.
 
-### Added — the correction magnitude, sized by the tick rate actually measured
+### Changed — `StepDeltaTime` now takes `heldFrom`, and a restart after idle steps **once**
 
-`Report` printed `max correction in steps` as `MaxCorrection / (EffectiveSpeed /
-TickRateInUse)` — the correction divided by the client's own *belief* about the tick rate.
-On a healthy run that is right. On the one run where the figure decides something it is
-self-referential: a client predicting at the wrong rate sizes its own yardstick by the same
-wrong rate, so a correction of four real base ticks prints as `1.00 steps`, which is what
-perfect health looks like.
+This is the contract not to "fix" back.
 
-Measured, driving the predictor at 15 Hz against a 60 Hz server: worst correction
-0.3334 world units — **four** base ticks of travel — reported as one step. The same run with
-matched rates: 0.0833, one step. Identical readings, opposite verdicts.
-
-The report now also prints the correction sized by `MeasuredTickRate`, which comes off the
-wire and cannot be corrupted by what the client believes. The two agree on a healthy run;
-only the second stays honest when the rate is wrong. Diagnostic only — no assertion reads
-it yet, deliberately, because no live magnitudes have been measured to calibrate one
-against.
-
-
-### Fixed — 19 reconciliation snaps in ordinary localhost play (#12)
-
-`PredictionLatencyMeasurement` measured **19 corrections snapped** against a live local
-backend, on a loopback connection with sub-millisecond RTT and no packet loss, where a
-snap means the client and the server disagreed by more than half a step. The largest
-correction was a whole `1.1667` world units — **exactly 14 steps**, and 14 is
-`MaxBankedMovementTicks(60) - 1`.
-
-That figure is the tell. The predictor implemented rule 3 of the movement model —
-"a step covers the time since that entity last moved" — but not the paragraph immediately
-under it in `gameserver-dotnet/docs/API.md`:
+`LocalMovePredictor.StepDeltaTime(baseTick, lastMoveTick, heldFrom)` returns one plain
+timestep (`_dt`) when `heldFrom == 0`, before any banked-time arithmetic runs. It mirrors
+`rpg-mmo-server` `GameServer/Input/InputHandler.cs:78-93` line for line, and the rule it
+transcribes is stated in `gameserver-dotnet/docs/API.md`:
 
 > **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
 > entity with no held direction is *stopped*, not stalled — so a player who releases the
 > stick, waits, and presses again is owed nothing for the pause.
 
-Two places implement that sentence server-side, and the client had neither:
-
-* `InputHandler.StepDeltaTime` opens with `if (heldFromTick == 0) return _deltaTime;`.
-  `LocalMovePredictor.StepDeltaTime` took no `heldFrom` argument at all, so after an idle
-  it banked the whole pause and returned `_dt * MaxBankedTicks`.
-* `InputHandler.ProcessInput` stamps `cursor.LastMoveTick = currentTick` on a deadzone
-  vector — in the pre-check and again in the `MoveResult.None` branch. `RecordInput` left
-  `_lastMoveTick` alone, under a comment asserting that this was "exactly as server-side".
-  It was the reverse of what the server does.
-
-The consequence was one lurch per restart: the harness settles on ~400 ms of zero input
-before each sample, so the sample's first real input travelled 15 timesteps on the client
-and 1 on the server, every sample — 19 samples, 19 snaps. For a player it is a quarter
-second of travel delivered in a single frame every time they stop and start again, which
+**What happens if someone removes that guard**, on the reasoning that rule 3 says a step
+covers the time since the entity last moved: the client predicts up to `MaxBankedTicks` of
+travel — 15 timesteps at 60 Hz, from the 250 ms `MaxBankedMovementMs` bound — that the
+server never takes, on the first input after every pause. The player stops, starts, and
+lurches a quarter-second of travel forward in one frame, then rubber-bands back when the
+snapshot lands. It reproduces on no test that does not deliberately contain an idle, and it
 is the most common thing a player does.
 
-Fixed by transcribing both rules:
+Paired with it: an input the movement model resolves to `MoveResult.None` (a deadzone
+vector) now clears the hold **and** stamps `_lastMoveTick`, on the live path and the replay
+path alike, exactly as `InputHandler.ProcessInput` does in its pre-check and again in its
+`MoveResult.None` branch. Leaving `_lastMoveTick` stale is what let an idle bank time in the
+first place. A `Rejected` vector still leaves both fields alone, matching the server, which
+logs and drops it without disturbing state. `GameConstants.MaxBankedMovementMs` is untouched
+— the cap was never the problem; what counted against it was.
 
-* `StepDeltaTime` takes `heldFrom` and returns one plain timestep when nothing is held.
-  All four call sites pass the hold that was in effect for that step.
-* A `MoveResult.None` input now clears the hold **and** stamps `_lastMoveTick`, on the
-  live path and on the replay path alike, so replay still reproduces the live timeline
-  bit-for-bit.
+Measured against a transcription of `InputHandler` (60 Hz base / 15 Hz world, zero
+latency): **19 snaps and a 14.00-step worst correction before, 0 snaps and 0.0000 after.**
+The `heldFrom` guard alone takes it to zero snaps; the `_lastMoveTick` stamp takes the
+residual correction from 3.00 steps to nothing.
 
-A `Rejected` vector still leaves both fields alone, matching the server, which logs and
-drops it without disturbing state. `GameConstants.MaxBankedMovementMs` is untouched — the
-cap was never the problem; what counted against it was.
+**Why no existing test caught it.** `LocalMovePredictorTests.ServerWalk` — the oracle the
+bit-exactness assertions compare against, whose own docblock claimed it "is not a second
+copy of the movement rule" — was a hand-rolled rule-3 loop missing both guards. It modelled
+the client, not `InputHandler`, so `PredictingForwardMatchesTheServerExactly` passed on a
+walk that deliberately contains a stop *because both sides were wrong the same way*. It is
+now transcribed from `ProcessInput`, and two tests pin the restart-after-idle case directly.
 
-Measured on a network-free reproduction of the harness (the real `LocalMovePredictor`
-against a transcription of `InputHandler`, 60 Hz base / 15 Hz world, zero latency):
-**19 snaps and a 14.00-step worst correction before, 0 snaps and a 0.0000 worst
-correction after.** The `heldFrom` guard alone takes it to zero snaps; the `LastMoveTick`
-stamp is what takes the residual correction from 3.00 steps to nothing.
+### Added — `SeedBaseTick(long serverTick)`, and its one caller (#13)
 
-### Fixed — the EditMode oracle certified the defect it existed to catch
+**If you use `WorldViewBinder`, this is already wired and you need do nothing.** If you
+bind views yourself — a DOTS system reading `LocalMovePredictor.Position` into
+`LocalTransform`, or any custom binder — **you must call it**, or the feature is inert and
+you keep the defect:
 
-`LocalMovePredictorTests.ServerWalk` is the reference the bit-exactness assertions compare
-against, and its own docblock claims it "is not a second copy of the movement rule". It
-was: a hand-rolled rule-3 loop missing both of the guards above, so it modelled the
-client's behaviour rather than `InputHandler`'s, and `PredictingForwardMatchesTheServerExactly`
-passed on a walk that deliberately contains a stop *because* both sides were wrong the
-same way. It is now transcribed from `ProcessInput`, and two tests pin the restart-after-
-idle case directly.
+```csharp
+predictor.SeedBaseTick(world.Tick);   // BEFORE Reconcile, every snapshot; one-shot inside
+predictor.SetServerSpeed(e.Speed);
+predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
+```
 
+`_baseTick` used to start at 1 and free-run on wall-clock accumulation while the server's
+`current_tick` sat in the hundreds of thousands. The absolute values never mattered —
+`StepDeltaTime` and `ApplyHeld` use differences — but the **phase** did: the hold window is
+`HoldTicks` base ticks wide, and where each clock's boundary fell relative to an input
+changed how many held steps got applied between inputs. On localhost, matched rates, no
+loss: 17 of 20 samples needed a correction of exactly 2 steps.
+
+It is a separate method rather than a `Reconcile` parameter for the same reason
+`SetServerSpeed` is: `Reconcile`'s signature is a cross-package contract that
+`com.cuvara.dots` drives and `PredictionSurfaceContractTests` pins. Seeding takes effect
+once — the accumulator clock in `Advance` owns the counter afterwards, and re-seeding every
+snapshot would fight it. `Reset()` clears the flag so a new session re-seeds.
+`LocalMovePredictor.BaseTick` is public so you can confirm the seed took.
 
 ### Fixed — the local avatar froze for part of every base tick (#11)
 
 `SmoothingSpan` returned the integration timestep `_dt` unconditionally whenever a hold
-window was in use (`LocalMovePredictor.cs:326`), on the premise that with a hold the server
-steps every base tick and so the steps being spread arrive one `_dt` apart.
+window was in use, on the premise that with a hold the server steps every base tick and so
+the steps being spread arrive one `_dt` apart.
 
 **That is the steady case, not the only one.** The base tick immediately after an input is
 declined by rule 1 — `ApplyHeld`'s `heldFrom == baseTick` guard, because the input already
 stepped that tick — so the next step lands a full timestep after the *following* boundary,
 a gap of up to `2 * _dt`. Spreading it over `_dt` finishes the step part-way through the
-gap; `StepProgress` pins at 1 (`:293`), `remaining` goes to zero, and `Position` is
-bit-identical for the rest of the gap. At ~1000 fps against 60 Hz that is a run of still
-frames on the one entity the player is controlling.
+gap; `StepProgress` pins at 1, `remaining` goes to zero, and `Position` is bit-identical for
+the rest of the gap. At ~1000 fps against 60 Hz that is a run of still frames on the one
+entity the player is controlling.
 
-It is invisible to every existing counter because **the simulated position is correct
+It is invisible to every correction counter because **the simulated position is correct
 throughout** — only the rendered one stops. `Snaps` stays 0, the corrections budget passes,
-the tick rate agrees and the hold window measures the correct 4.
+the tick rate agrees, the hold window measures the correct 4.
 
-**Status: currently inert, kept deliberately.** With the harness clock leak above fixed,
-the measurement has not yet had a chance to say whether this gap survives; the change is
-a no-op in sustained movement by construction (the measured interval *is* `_dt` there) and
-should be judged against the next run rather than assumed. `SMOOTHING SPAN`,
-`step interval in use`, and NoteStep's accepted/reset split are all printed so it can be.
-
-The span now follows the interval steps are **actually** arriving at, smoothed with the
-same α = 0.3 moving average `WorldViewBinder` uses on snapshot arrivals, floored at `_dt`
-as before. In sustained movement that interval *is* `_dt`, so the steady case is unchanged;
-it widens only across the boundary that was freezing. A gap longer than the whole hold
-window means the hold lapsed and the step begins a new burst rather than continuing one —
-adopting that would spread the next step across an idle period and leave the avatar
-crawling behind its own simulation, the 0.12.3 defect in a new place — so such a gap
-restarts the measurement and the span falls back to its floor. `StepProgress` still
-saturates at 1: a wider span makes the avatar reach the step later, never further than the
-step the input actually produced.
-
-### Fixed — the harness re-advanced the settle window and retired the hold before rendering
-
-`PumpAsync` drives its own frame loop across the settle window and advances the predictor
-over it. `lastFrameAt` was only ever written inside the sample loop, so the **first**
-`AdvanceFrame` of every sample handed the predictor `now - <end of the previous sample>` —
-the whole settle span again, on top of what `PumpAsync` had already advanced. Six settle
-sends at 15 Hz is ~400 ms, so that single call ran `while (_tickAccumulator >= _dt)` about
-24 times and jumped `_baseTick` 24 ticks in one frame.
-
-The hold window is four ticks wide, so **it expired inside that one call, on every sample,
-before a single frame was rendered against it.** The new counter caught it precisely:
-`FramesHoldActive` came back as **20 across 20 samples** — one frame each, the one read
-before that first `AdvanceFrame` — where four ticks of hold at ~1000 fps should give ~67
-frames per sample. The reported "100% of frames that should have been moving were still"
-was 20 out of a denominator of 20, and a denominator of one frame per sample is not
-measuring the renderer at all.
-
-This is the same double-advance `WorldViewBinder` documents on `AdvanceFrame` and guards
-with `_frameDriven`, reappearing in the harness's own clock rather than in the binder's.
-`lastFrameAt` is now re-stamped after every `PumpAsync`.
-
-Guarded against recurrence: the report prints **`largest AdvanceFrame`** and counts
-**calls wider than one base tick**, and **`frames while hold ACTIVE`** self-flags when the
-denominator is implausibly small — an empty denominator changes the percentage without
-changing the numerator, which is exactly how this hid.
-
-### Fixed — the first reading of each sample spanned no time and was recorded as a fault
-
-With the clock leak closed, the rendering-fault figure came back as **20 of 819 — exactly
-one frame per sample**, which is a per-sample artefact and not a per-step one (a per-step
-residual would have been ~3 per sample).
-
-The sampling loop reads the rendered position at the top of an iteration and calls
-`AdvanceFrame` at the bottom, so iteration *n*'s reading is the position as of iteration
-*n-1*'s advance. That is a correct one-frame delta for every iteration except the first,
-which has no advance behind it: it reads the position as it stood the instant
-`RecordInput` returned, against a baseline captured moments earlier. **That reading is
-necessarily zero and it is right that it is** — `RecordInput` deliberately preserves the
-rendered position across an input, folding the unshown remainder into `_renderOffset`
-(`LocalMovePredictor.cs:537-541`), precisely so the avatar does not jump on an input
-boundary. No time has passed, so no movement is correct.
-
-The first reading now re-baselines instead of being recorded. This is not a tail being
-trimmed — it is declining to measure a velocity over an interval of zero length. The count
-is printed as `zero-duration reads` and must equal the sample count exactly; anything else
-means the loop structure has changed underneath the reasoning.
-
-### Changed — the correction-shape note no longer asserts a clock error
-
-A correction that is a whole number of steps has **two** candidate causes and the
-arithmetic does not distinguish them, but the note printed only one: "implies a predictor
-clock at N x real time", as though the clock were established.
-
-- A **clock error** accrues extra base ticks and disagrees by `(factor - 1) * holdTicks`
-  steps, linearly — what `HeldMovementParityTests` pins.
-- **Banked movement (rule 3)** caps one step at `MaxBankedMovementTicks` timesteps — 15 at
-  60 Hz, from the 250 ms `MaxBankedMovementMs` bound — so a disagreement about time banked
-  while an entity was stationary lands at or just under that cap in a single correction,
-  with no clock error at all. A settle phase that leaves the entity still for ~400 ms puts
-  both sides squarely against that cap.
-
-The note now compares against the cap and names the reading that matches. A measured 16
-steps against a 15-step cap is the **banked** reading, not a 5x clock.
-
-### Added — the fault's run-length distribution
-
-`fault run lengths` prints the histogram of unbroken still runs *during active hold*. A
-percentage cannot tell 20 isolated frames from 3 freezes of 7 frames, and those need
-opposite responses: the first is a sampling artefact, the second a real freeze the
-interpolation is not covering.
-
-### Changed — the smoothness assertion measures the rendering fault, not the rest
-
-The still-frame figure divided by *every* sampled frame. A sample sends one input and then
-watches until the server acknowledges it; the motion that input produces lasts exactly one
-hold window and the watch outlasts it, so the tail of every sample is the avatar
-**correctly** at rest — the predictor has stopped because the server has. A live run split
-437 still frames into **417 legitimate and 20 genuine**: ~95% of the asserted number was
-measuring correct behaviour, and the figure moved with acknowledgement timing rather than
-with rendering.
-
-The assertion is now `RenderingFaultPercent` — still frames on which the hold window was
-**still running**, over the frames on which it was running. Those are the frames that had a
-step in flight and something to render.
-
-**The split is a counter, not an argument.** Every still frame is classified at the moment
-it occurs by `LocalMovePredictor.HoldIsActive`, which is why this narrowing is honest and
-an earlier attempt to trim the tail by wall-clock reasoning was not.
-
-**Budget: 0.5%, and the rationale is in the code beside it.** The correct value is exactly
-zero, not "small": while the hold runs there is a step in flight on every frame. The two
-ways a frame could fall under the 1e-6 threshold anyway both fail arithmetic — a
-zero-delta frame is counted separately as `non-advancing frames` and measures 0, and a
-frame's movement is ~5e-3 world units, some 5000x the threshold, so reaching it would need
-a sub-microsecond frame the harness clock cannot represent. The budget is therefore margin
-against scheduling noise, not against a known source: 0.5% of the ~819-frame denominator
-is **4 frames** — enough that one unlucky hitch cannot fail the suite, nowhere near enough
-to hide a systematic one. Both systematic shapes this measurement has actually produced sit
-far above it: a per-sample residual is 20 frames (2.4%), a per-step residual would be ~60
-(7%). The old total is still printed beside it, along with how many of its still frames
-were post-expiry.
-
-### Added — the diagnostics that located this
-
-The percentage alone cannot tell a rendering fault from correct rest from a clock artefact
-from a per-tick renderer; all four produce similar numbers from different arrangements.
-The run report now prints, recorded at the moment each frame happens:
-
-- **`RENDERING FAULT`** — the asserted figure, with its numerator and denominator.
-- **`still: hold still ACTIVE` / `hold expired` / `step SATURATED`** — every still frame
-  classified by the predictor state that produced it.
-- **`ticks the hold SKIPPED`** as a share of base ticks advanced, split six ways by
-  `ApplyHeld`'s guards: expired, nothing held, input already stepped, no hold window, model
-  refused, no displacement. Scoped to the sample windows, so the settle phases and the
-  spawn pump do not dilute it.
-- **`SMOOTHING SPAN`** against the interval steps actually arrive at, flagged with the
-  percentage of the gap the render covers before it holds. *This is the line that named the
-  bug.*
-- **`HOLD WINDOW IN USE`**, flagged against the 4 expected at 60/15. It was captured but
-  only ever mentioned inside a correction note, so a run with no correction printed no
-  window — which is exactly the run a wrong window produces.
-- **`longest still RUN`** plus run count and mean — the cadence, measured rather than
-  inferred.
-- **`sample window`** and **`ack timeouts`** — one timed-out sample is ~3 s of still frames
-  at ~1000 fps, more than twenty ordinary samples put together.
-- **`non-advancing frames`** and **`harness clock resolution`** — whether the harness handed
-  the renderer a usable delta at all.
-
-New read-only members on `LocalMovePredictor`: `IntegrationTimestep`,
-`EffectiveSmoothingSpan`, `RenderStepProgress`, `HoldIsActive`, `BaseTicksAdvanced`,
-`HeldStepsApplied`, `HoldDeclines`, the `HoldSkip` reason enum and its six counters. The
-skip counters are recorded **only on the live path** — `Reconcile` replays the same guards
-over the unacknowledged timeline, and folding those in would measure how much replay ran
-rather than how the rendered position behaved.
-
-### KNOWN FAILING — the snap assertion, and it belongs to #12
-
-`InputToVisibleMovement_WithAndWithoutPrediction` still fails, on
-`Assert.That(withPrediction.Snaps, Is.Zero)`: **19 snaps, max correction 16 whole steps.**
-**Pure `develop` measures the same 19.** They predate this work entirely and are tracked as
-**issue #12**. Do not read the red as this change's fault, and do not fold a fix for them
-in here — a rendering change and a reconciliation change do not belong in one diff.
-
-They were invisible until now for a structural reason worth remembering. The still-frame
-assertion fires **earlier in the same test**, so while it failed this line never executed.
-Taking the rendering fault to 0.00% is what made the snap assertion *reachable*, not what
-made it *true*. "The assertion never failed" and "the condition never held" are different
-statements in an ordered sequence of asserts, and the difference cost this investigation a
-round.
-
-Two things for whoever picks up #12:
-
-- **A starting lead.** The max correction is 16 steps against
-  `GameConstants.MaxBankedMovementTicks(60)` = **15** — the banked-movement cap (rule 3,
-  from `MaxBankedMovementMs = 250`). The harness settles for ~400 ms of zero input before
-  each sample, which leaves `_lastMoveTick` stale on both sides, so the next input takes a
-  step worth up to 15 timesteps. A disagreement about *how much* was banked lands exactly
-  at that magnitude. It is not a clock error.
-- **Read `SNAPS PER RUN`, not the single figure.** `Representative()` selects the reported
-  run by `FrameDeltaBurstiness`, a **rendered** metric, while `Snaps` is a simulation
-  property — so any rendering change reselects which repeat is reported and can move the
-  count with no simulation change at all. The per-repeat distribution is now printed in the
-  spread block and flagged when the repeats disagree.
-
-### Fixed — one narrow snapshot pair permanently shrank the hold window### Fixed — one narrow snapshot pair permanently shrank the hold window
-
-**A latent defect found while investigating #11, and confirmed by measurement not to be its
-cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
+The span now follows the interval steps are **actually** arriving at, smoothed with the same
+α = 0.3 moving average `WorldViewBinder` uses on snapshot arrivals, floored at `_dt` as
+before. In sustained movement that interval *is* `_dt`, so the steady case is unchanged; it
+widens only across the boundary that was freezing. A gap longer than the whole hold window
+means the hold lapsed and the step begins a new burst rather than continuing one — adopting
+it would spread the next step across an idle period and leave the avatar crawling behind its
+own simulation, which is the 0.12.3 defect in a new place — so such a gap restarts the
+measurement and the span falls back to its floor. `StepProgress` still saturates at 1: a
+wider span makes the avatar reach the step *later*, never *further* than the step the input
+actually produced.
 
 ### Fixed — one narrow snapshot pair permanently shrank the hold window
 
-**A latent defect found while investigating #11, and confirmed by measurement not to be its
-cause** — the hold window read the correct 4 in the failing run. Landing on its own merits.
-
 `TickRateEstimator.SnapshotTickGap` is a running minimum of the base-tick gap between
-consecutive snapshots that never recovers, and it is fed straight to the predictor as the
-hold window (`WorldViewBinder.cs:264`). The premise behind the minimum — that only drops
-move a gap, and they only widen it — is false at one moment every session passes through:
-the first snapshot after joining is a keyframe emitted when the join is handled rather than
-on a world tick boundary, so the gap to the next scheduled snapshot is whatever the phase
-happens to be, 1 to 3 base ticks instead of 4. Two snapshots batched into one socket read
-do the same. A narrower gap must now be observed **twice** before it is adopted; the true
-cadence repeats on every snapshot and confirms at once, a one-off never does. Drops still
+consecutive snapshots that never recovers, and it feeds the predictor's hold window
+directly. The premise behind the minimum — that only drops move a gap, and only widen it —
+is false at one moment every session passes through: the first snapshot after joining is a
+keyframe emitted when the join is handled rather than on a world-tick boundary, so the gap
+to the next scheduled snapshot is whatever the phase happens to be, 1 to 3 base ticks
+instead of 4. Two snapshots batched into one socket read do the same.
+
+**A narrower gap must now be observed twice before it is adopted.** The true cadence repeats
+on every snapshot and confirms immediately; a one-off join artefact never does. Drops still
 only widen a gap and are still ignored, so "minimum, not mean" is kept.
+
+**What you would observe without the two-observation rule:** the hold window is pinned for
+the whole session at the width of one off-cadence join keyframe. At a real cadence of 4 with
+a keyframe gap of 1, `HoldTicks` sits at 1, which switches the hold off entirely — the
+predictor then steps only on inputs, reproduces a quarter of the server's motion at a 15 Hz
+send rate against a 60 Hz base tick, and the difference arrives as a correction on every
+snapshot. It is set once, at join, and never recovers; reconnecting is the only thing that
+clears it, and whether it clears is a coin flip on phase.
 
 `SnapshotTickGap` had no EditMode coverage at all despite being the sole source of the hold
 window; four tests now pin the rule.
@@ -331,19 +153,92 @@ window; four tests now pin the rule.
 **Known limitation, deliberately recorded.** The rule tracks a single candidate, so gaps
 alternating between two values would reset the candidate on every sighting and leave
 `_minGap` at 0 — and `SetHoldTicks(0)` is ignored, so `HoldTicks` would sit at its fallback
-of 1 with the hold switched off entirely. A steady cadence cannot produce that, and a
-bisect confirmed this rule is not behind the snap counts it was briefly suspected of, but
-counting per gap value rather than tracking one candidate is the durable form and is left
-as follow-up.
+of 1 with the hold switched off. A steady cadence cannot produce that, and a bisect confirmed
+this rule is not behind the snap counts it was briefly suspected of, but counting per gap
+value rather than tracking one candidate is the durable form, and is left as follow-up.
 
-### Changed — harness frame timing
+### Added — a diagnostic surface for render-side faults, pinned as contract
 
-Taken from `Time.realtimeSinceStartupAsDouble` rather than differencing
-`Time.realtimeSinceStartup`. That is a `float` whose spacing coarsens with process uptime
-(~1.95 ms past 4.5 hours), and near 1000 fps it can return the same instant twice and hand
-`AdvanceFrame` a zero delta, which early-outs and records a still frame the renderer never
-had a chance to move on. **Not the cause of #11** — a batch-mode run is ~140 s in, where
-spacing is ~15 µs — but a long-lived Editor session would hit it.
+The three defects above share one property: **no correction counter could see any of them**,
+because in all three the simulated position was right and only the rendered one was wrong.
+`Snaps`, `Reconciles`, `ReplayedSteps` and `LastCorrection` cannot answer "is my avatar's
+rendered position keeping up with its simulated one". These can, and they are part of the
+package's public contract rather than debug leftovers — `PredictionSurfaceContractTests`
+pins each one, so removing one is a deliberate act:
+
+| Member | Answers |
+|---|---|
+| `IntegrationTimestep` | the base tick period the predictor is integrating on |
+| `EffectiveSmoothingSpan` | the span one step is being spread across |
+| `ObservedStepInterval` | the interval steps are actually arriving at |
+| `RenderStepProgress` | how much of the current step has been rendered, 0..1 |
+| `HoldIsActive` | whether a step is in flight *right now* |
+| `BaseTick` | the predictor's tick, on the server's timeline once seeded |
+| `BaseTicksAdvanced` / `HeldStepsApplied` | ticks advanced vs. ticks that moved |
+| `SkipNoHoldWindow`, `SkipNothingHeld`, `SkipInputAlreadyStepped`, `SkipExpired`, `SkipRefusedByMovementModel`, `SkipNoDisplacement` | *why* the shortfall between those two |
+| `StepIntervalSamples` / `StepIntervalResets` | whether the interval measurement is converging or being torn down |
+
+**Read `EffectiveSmoothingSpan` against `ObservedStepInterval` first.** A span shorter than
+the interval means the avatar finishes its step and then holds still —
+`RenderStepProgress` pins at 1 and `Position` goes exactly constant — for the remainder.
+Longer, and the avatar permanently lags its own simulation. Neither shows in any correction
+counter. That comparison is the line that named #11.
+
+The skip counters are recorded **only on the live path**. `Reconcile` replays the same
+guards over the unacknowledged timeline, and folding those in would measure how much replay
+ran rather than how the rendered position behaved.
+
+### Removed — `HoldDeclines`, `DebugBaseTick`, `DebugLastMoveTick`, `DebugStepDt`
+
+Never part of a released surface; they existed only during the investigation.
+`HoldDeclines` was the exact sum of the six `Skip*` counters, which are reported
+individually. `DebugBaseTick` survives, renamed to `BaseTick` and documented. The `HoldSkip`
+reason code is now private: it is how the class talks to itself, and publishing it would
+invite a consumer to switch on values this package expects to be free to extend.
+
+### Changed — the measurement rig, `Tests/Runtime/PredictionLatencyMeasurement.cs`
+
+A harness, not a runtime feature; nothing in `Runtime/` depends on it. Summarised because
+its findings are the evidence for everything above.
+
+- **Its own clock leaked.** `lastFrameAt` was only written inside the sample loop, so the
+  first `AdvanceFrame` of every sample re-advanced the whole ~400 ms settle window on top of
+  what `PumpAsync` had already advanced — ~24 base ticks in one call, which expired the
+  four-tick hold window before a single frame rendered against it. `FramesHoldActive` came
+  back as 20 across 20 samples where ~67 per sample was expected. This is the same
+  double-advance `WorldViewBinder` guards with `_frameDriven`, reappearing in the harness.
+  Guarded against recurrence: the report prints the largest `AdvanceFrame`, counts calls
+  wider than one base tick, and self-flags an implausibly small hold denominator.
+- **The first reading of each sample spanned no time.** It read the position as of
+  `RecordInput` returning, against a baseline captured moments earlier — necessarily zero,
+  and correctly so, since `RecordInput` deliberately preserves the rendered position across
+  an input. It now re-baselines rather than being recorded as a fault; the count prints as
+  `zero-duration reads` and must equal the sample count exactly.
+- **The smoothness assertion is now `RenderingFaultPercent`** — still frames on which the
+  hold window was still running, over the frames on which it was running. The old figure
+  divided by every sampled frame, including the tail of each sample where the avatar is
+  *correctly* at rest: a live run split 437 still frames into 417 legitimate and 20 genuine.
+  Budget 0.5%; the correct value is exactly zero and the budget is margin against scheduling
+  noise, not against a known source. Every still frame is classified at the moment it occurs
+  by `HoldIsActive`, which is what makes the narrowing a counter rather than an argument.
+- **Correction magnitude is now also sized by `MeasuredTickRate`.** Sizing it only by the
+  client's own belief about the tick rate is self-referential: a client predicting at the
+  wrong rate sizes its own yardstick by the same wrong rate, so four real base ticks of
+  correction print as `1.00 steps`, which is what perfect health looks like. Measured at
+  15 Hz against 60 Hz: 0.3334 world units reported as one step; matched rates: 0.0833, also
+  one step. Identical readings, opposite verdicts.
+- **The correction-shape note no longer asserts a clock error.** A whole-number-of-steps
+  correction has two candidate causes the arithmetic cannot distinguish — a clock error
+  (linear in `holdTicks`) and banked movement (capped at `MaxBankedMovementTicks`). The note
+  now compares against the cap and names the reading that matches.
+- **Added:** the still-run-length histogram (20 isolated frames and 3 freezes of 7 need
+  opposite responses), the per-repeat `SNAPS PER RUN` distribution (`Representative()`
+  selects by a *rendered* metric while `Snaps` is a simulation property, so any rendering
+  change reselects the reported repeat), `HOLD WINDOW IN USE`, `sample window`,
+  `ack timeouts`, `non-advancing frames`, and `harness clock resolution`.
+- **Harness frame timing** now comes from `Time.realtimeSinceStartupAsDouble` rather than
+  differencing `Time.realtimeSinceStartup`, a `float` whose spacing coarsens with process
+  uptime (~1.95 ms past 4.5 hours) and near 1000 fps can return the same instant twice.
 
 ## [0.15.5] - 2026-08-15
 

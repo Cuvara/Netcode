@@ -483,19 +483,25 @@ namespace Cuvara.Netcode.Prediction
         /// <remarks>
         /// Compare against <see cref="BaseTicksAdvanced"/>. The server integrates the held
         /// direction on every base tick inside the window, so during sustained movement
-        /// these should track each other closely. A large
-        /// <see cref="HoldDeclines"/> share means the rendered position is being refreshed
-        /// far less often than once per tick, whatever the hold window says it should be.
+        /// these should track each other closely. The shortfall between the two is the
+        /// declined ticks, split by reason across the six <c>Skip*</c> counters; a large
+        /// share there means the rendered position is being refreshed far less often than
+        /// once per tick, whatever the hold window says it should be.
         /// </remarks>
         public int HeldStepsApplied { get; private set; }
 
-        /// <summary>Base ticks on which the hold declined to move the entity.</summary>
-        public int HoldDeclines { get; private set; }
-
-        // TEMPORARY diagnostic - remove before merge.
-        public long DebugBaseTick => _baseTick;
-        public long DebugLastMoveTick => _lastMoveTick;
-        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom);
+        /// <summary>
+        /// The predictor's current base tick — the same timeline the server's
+        /// <c>WorldState.Tick</c> is on, once <see cref="SeedBaseTick"/> has aligned them.
+        /// </summary>
+        /// <remarks>
+        /// Public because <see cref="SeedBaseTick"/> is: a consumer writing its own view
+        /// binding has to call that itself (see the remarks there), and this is how it
+        /// confirms the epoch took rather than discovering months later that its binder
+        /// never seeded. It is also what makes a client-side prediction log line up
+        /// against a server-side one — both name the same tick number.
+        /// </remarks>
+        public long BaseTick => _baseTick;
 
         /// <summary>
         /// Records an input that has just been sent and applies it to the predicted
@@ -811,10 +817,6 @@ namespace Cuvara.Netcode.Prediction
                         NoteStep();
                         HeldStepsApplied++;
                     }
-                    else
-                    {
-                        HoldDeclines++;
-                    }
                 }
             }
 
@@ -941,7 +943,6 @@ namespace Cuvara.Netcode.Prediction
             _lastRecordedTick = 0;
             BaseTicksAdvanced = 0;
             HeldStepsApplied = 0;
-            HoldDeclines = 0;
             SkipNoHoldWindow = 0;
             SkipNothingHeld = 0;
             SkipInputAlreadyStepped = 0;
@@ -980,78 +981,6 @@ namespace Cuvara.Netcode.Prediction
             RejectedInputs = 0;
         }
 
-        /// <summary>
-        /// One simulation step, through the same <c>Shared.GameLogic</c> entry point the
-        /// server's <c>InputHandler</c> uses.
-        /// </summary>
-        /// <remarks>
-        /// <c>Dead</c> is false because a dead entity is not predicted at all — the server
-        /// returns early for one, and predicting movement for a corpse would be a
-        /// prediction guaranteed to be corrected.
-        /// </remarks>
-        /// <summary>
-        /// One base tick of held movement, mirroring
-        /// <c>InputHandler.ApplyHeldMovement</c>. Returns whether the position moved.
-        /// </summary>
-        /// <remarks>
-        /// The three guards are the server's, in the server's order: nothing held, already
-        /// stepped on this tick by a real input, and the window expired at
-        /// <c>baseTick - heldFrom &gt;= HoldTicks</c>. Reproduced rather than approximated,
-        /// because an off-by-one here is a fixed fraction of every step and lands under
-        /// the smoothing threshold — the failure mode this class has now produced twice.
-        /// </remarks>
-        /// <summary>
-        /// Why a base tick's held step did not move the entity.
-        /// </summary>
-        /// <remarks>
-        /// A tick the hold declines is a tick on which <see cref="Position"/> is
-        /// bit-identical for its whole duration: <c>_predicted</c> does not move,
-        /// <c>_sinceInput</c> is not re-armed, <see cref="RenderStepProgress"/> stays
-        /// saturated and <c>remaining</c> stays zero. At a high frame rate that is a still
-        /// run one base tick long. The reasons need completely different responses, so
-        /// they are counted apart rather than summed.
-        /// </remarks>
-        public enum HoldSkip
-        {
-            /// <summary>The tick stepped; nothing was skipped.</summary>
-            None = 0,
-
-            /// <summary>No hold window is configured, so the hold is off entirely.</summary>
-            NoHoldWindow,
-
-            /// <summary>Nothing is held — an explicit stop, or no input yet.</summary>
-            NothingHeld,
-
-            /// <summary>An input already stepped this tick; rule 1 forbids a second.</summary>
-            InputAlreadyStepped,
-
-            /// <summary>The hold window has run out.</summary>
-            Expired,
-
-            /// <summary>The movement model refused the held vector.</summary>
-            RefusedByMovementModel,
-
-            /// <summary>The step produced no displacement.</summary>
-            NoDisplacement,
-        }
-
-        /// <summary>Base ticks the hold declined because no window is configured.</summary>
-        public int SkipNoHoldWindow { get; private set; }
-
-        /// <summary>Base ticks the hold declined because nothing was held.</summary>
-        public int SkipNothingHeld { get; private set; }
-
-        /// <summary>Base ticks the hold declined because an input had already stepped it.</summary>
-        public int SkipInputAlreadyStepped { get; private set; }
-
-        /// <summary>Base ticks the hold declined because the window had run out.</summary>
-        public int SkipExpired { get; private set; }
-
-        /// <summary>Base ticks the hold declined because the movement model refused.</summary>
-        public int SkipRefusedByMovementModel { get; private set; }
-
-        /// <summary>Base ticks the hold declined because the step produced no displacement.</summary>
-        public int SkipNoDisplacement { get; private set; }
 
         /// <summary>
         /// Records that a step just landed, and updates the interval the next one will be
@@ -1116,6 +1045,79 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int StepIntervalResets { get; private set; }
 
+        /// <summary>
+        /// Why a base tick's held step did not move the entity.
+        /// </summary>
+        /// <remarks>
+        /// A tick the hold declines is a tick on which <see cref="Position"/> is
+        /// bit-identical for its whole duration: <c>_predicted</c> does not move,
+        /// <c>_sinceInput</c> is not re-armed, <see cref="RenderStepProgress"/> stays
+        /// saturated and <c>remaining</c> stays zero. At a high frame rate that is a still
+        /// run one base tick long. The reasons need completely different responses, so
+        /// they are counted apart rather than summed.
+        /// </remarks>
+        private enum HoldSkip
+        {
+            /// <summary>The tick stepped; nothing was skipped.</summary>
+            None = 0,
+
+            /// <summary>No hold window is configured, so the hold is off entirely.</summary>
+            NoHoldWindow,
+
+            /// <summary>Nothing is held — an explicit stop, or no input yet.</summary>
+            NothingHeld,
+
+            /// <summary>An input already stepped this tick; rule 1 forbids a second.</summary>
+            InputAlreadyStepped,
+
+            /// <summary>The hold window has run out.</summary>
+            Expired,
+
+            /// <summary>The movement model refused the held vector.</summary>
+            RefusedByMovementModel,
+
+            /// <summary>The step produced no displacement.</summary>
+            NoDisplacement,
+        }
+
+        /// <summary>Base ticks the hold declined because no window is configured.</summary>
+        public int SkipNoHoldWindow { get; private set; }
+
+        /// <summary>Base ticks the hold declined because nothing was held.</summary>
+        public int SkipNothingHeld { get; private set; }
+
+        /// <summary>Base ticks the hold declined because an input had already stepped it.</summary>
+        public int SkipInputAlreadyStepped { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the window had run out.</summary>
+        public int SkipExpired { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the movement model refused.</summary>
+        public int SkipRefusedByMovementModel { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the step produced no displacement.</summary>
+        public int SkipNoDisplacement { get; private set; }
+
+        /// <summary>
+        /// One simulation step, through the same <c>Shared.GameLogic</c> entry point the
+        /// server's <c>InputHandler</c> uses.
+        /// </summary>
+        /// <remarks>
+        /// <c>Dead</c> is false because a dead entity is not predicted at all — the server
+        /// returns early for one, and predicting movement for a corpse would be a
+        /// prediction guaranteed to be corrected.
+        /// </remarks>
+        /// <summary>
+        /// One base tick of held movement, mirroring
+        /// <c>InputHandler.ApplyHeldMovement</c>. Returns whether the position moved.
+        /// </summary>
+        /// <remarks>
+        /// The three guards are the server's, in the server's order: nothing held, already
+        /// stepped on this tick by a real input, and the window expired at
+        /// <c>baseTick - heldFrom &gt;= HoldTicks</c>. Reproduced rather than approximated,
+        /// because an off-by-one here is a fixed fraction of every step and lands under
+        /// the smoothing threshold — the failure mode this class has now produced twice.
+        /// </remarks>
         private bool ApplyHeld(ref Vec2 position, long baseTick)
         {
             bool stepped = ApplyHeld(
