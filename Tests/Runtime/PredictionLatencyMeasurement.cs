@@ -681,9 +681,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
             var predictedRuns = new List<Run>();
             var unpredictedRuns = new List<Run>();
 
+            // Interleaved three ways for the same reason it was interleaved two ways: the
+            // machine and the backend drift across a run, and batching would put that drift
+            // into whichever configuration went last.
+            var unseededRuns = new List<Run>();
+
             for (var r = 0; r < Repeats; r++)
             {
                 predictedRuns.Add(await MeasureAsync(predict: true));
+                unseededRuns.Add(await MeasureAsync(predict: true, seedBaseTick: false));
                 unpredictedRuns.Add(await MeasureAsync(predict: false));
             }
 
@@ -691,7 +697,28 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Run withoutPrediction = Representative(unpredictedRuns);
 
             ReportSpread("prediction ON", predictedRuns);
+            ReportSpread("prediction ON, base tick UNSEEDED", unseededRuns);
             ReportSpread("prediction OFF", unpredictedRuns);
+
+            // What SeedBaseTick is worth, which shipped in v0.16.0 without a number.
+            //
+            // Reported, never asserted. This is a PHASE effect: it depends on where the
+            // tick boundary happens to fall for a given run on a given machine, and the
+            // unseeded arm's own spread is the widest of the three. Turning it into a
+            // threshold would manufacture a flake and state a number this harness has not
+            // earned. Read it against the spread printed above.
+            Run unseeded = Representative(unseededRuns);
+            Debug.Log(
+                "[Measure] SeedBaseTick, before vs after (medians of " + Repeats + " interleaved runs)\n" +
+                "  reconciles          unseeded=" + unseeded.Reconciles +
+                "   seeded=" + withPrediction.Reconciles + "\n" +
+                "  max correction      unseeded=" + unseeded.MaxCorrection.ToString("F4") +
+                "   seeded=" + withPrediction.MaxCorrection.ToString("F4") +
+                "   (one base tick of movement is speed/tickRate)\n" +
+                "  held steps applied  unseeded=" + unseeded.HeldStepsApplied +
+                "   seeded=" + withPrediction.HeldStepsApplied + "\n" +
+                "  base ticks advanced unseeded=" + unseeded.BaseTicksAdvanced +
+                "   seeded=" + withPrediction.BaseTicksAdvanced);
 
             // A third run whose only purpose is to make the predictor WRONG, so the
             // correction machinery has something to correct. Without it the healthy run's
@@ -992,7 +1019,16 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// on <c>WrongSpeed</c> above for why the two more obvious approaches — a wrong
         /// speed, and dropping the input — do not produce a divergence at all.
         /// </param>
-        private static async UniTask<Run> MeasureAsync(bool predict, bool forceDivergence = false)
+        /// <param name="seedBaseTick">
+        /// False reproduces the pre-v0.16.0 predictor exactly, WITHOUT touching production
+        /// code. <see cref="LocalMovePredictor.SeedBaseTick"/> takes effect once and
+        /// <c>_baseTick</c> is initialised to 1, so seeding it with 1 here leaves the
+        /// counter where it started AND marks it seeded — which makes
+        /// <c>WorldViewBinder</c>'s real call a no-op for the rest of the run. The binder
+        /// is the only thing that seeds, so this is the only way to reach the unseeded path
+        /// through it.
+        /// </param>
+        private static async UniTask<Run> MeasureAsync(bool predict, bool forceDivergence = false, bool seedBaseTick = true)
         {
             var run = new Run
             {
@@ -1042,6 +1078,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.TickRateIsFallback = settings.TickRateIsFallback;
 
             LocalMovePredictor predictor = predict ? new LocalMovePredictor(settings) : null;
+
+            // Pin to the pre-fix phase before the binder can align it. See the parameter docs.
+            if (predictor != null && !seedBaseTick)
+            {
+                predictor.SeedBaseTick(1);
+            }
 
             var view = new ProbeView { TrackedId = localId };
             var binder = new WorldViewBinder(view, predictor);
