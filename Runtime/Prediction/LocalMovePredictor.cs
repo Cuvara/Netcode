@@ -201,9 +201,12 @@ namespace Cuvara.Netcode.Prediction
         private long _heldFrom;       // base tick the hold started on; 0 = nothing held
         private long _lastMoveTick;   // base tick this entity last actually moved on
         private float _inputInterval; // observed seconds between inputs; diagnostics
+        private float _stepInterval;  // observed seconds between consecutive steps
+        private float _lastStepAt;    // _elapsed when the previous step landed
         private float _lastInputAt;   // _elapsed when the previous input arrived
         private float _elapsed;       // monotonic seconds fed through Advance
         private bool _seeded;
+        private bool _baseTickSeeded; // true once SeedBaseTick has aligned _baseTick
 
         /// <summary>
         /// Creates a predictor. Check <see cref="IsEnabled"/> before using the result:
@@ -332,7 +335,26 @@ namespace Cuvara.Netcode.Prediction
                 // sends. Using the input interval here would stretch each step across
                 // four timesteps and leave the avatar permanently lagging its own
                 // simulation — the 0.12.3 fix, applied where it is now wrong.
-                if (HoldTicks > 1) return _dt;
+                //
+                // <b>But "one timestep apart" is the steady case, not the only one.</b>
+                // This returned _dt unconditionally, and a live measurement caught the
+                // gap it does not cover: the tick immediately after an input is declined
+                // by rule 1 — ApplyHeld's `heldFrom == baseTick` guard, because the input
+                // already stepped that tick — so the next step lands one FULL timestep
+                // after the following boundary, a gap of up to 2 * _dt. Spreading over
+                // _dt then finishes the step part-way through the gap, StepProgress pins
+                // at 1, and Position is bit-identical for the remainder: a still run at
+                // the frame rate, on the one entity the player is controlling. It is
+                // invisible to every correction counter because the SIMULATED position is
+                // right throughout — only the rendered one stops.
+                //
+                // So the span follows the interval steps are actually arriving at. In
+                // sustained movement that interval IS _dt and this is what it always was;
+                // it only widens across the boundary that was freezing.
+                if (HoldTicks > 1)
+                {
+                    return _stepInterval > _dt ? _stepInterval : _dt;
+                }
 
                 // No hold: one step per input, so the span is the gap between inputs.
                 return _inputInterval > _dt ? _inputInterval : _dt;
@@ -418,10 +440,68 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int CoalescedInputs { get; private set; }
 
-        // TEMPORARY diagnostic - remove before merge.
-        public long DebugBaseTick => _baseTick;
-        public long DebugLastMoveTick => _lastMoveTick;
-        public float DebugStepDt => StepDeltaTime(_baseTick, _lastMoveTick);
+        /// <summary>
+        /// The integration timestep in seconds — the server's base tick period, from
+        /// <c>MovementSystem.DeltaTimeForTickRate</c>. Diagnostics.
+        /// </summary>
+        public float IntegrationTimestep => _dt;
+
+        /// <summary>
+        /// The span one step is currently being spread across, in seconds.
+        /// </summary>
+        /// <remarks>
+        /// <b>Read this against the interval steps actually arrive at.</b> If the span is
+        /// shorter than that interval, the rendered position finishes the step and then
+        /// holds — <see cref="RenderStepProgress"/> pins at 1 and <see cref="Position"/>
+        /// goes exactly constant — for the remainder. If it is longer, the avatar
+        /// permanently lags its own simulation. Neither shows up in any correction
+        /// counter, because the simulated position is correct in both cases; only the
+        /// rendered one is wrong.
+        /// </remarks>
+        public float EffectiveSmoothingSpan => SmoothingSpan;
+
+        /// <summary>
+        /// How much of the current step has been rendered, 0..1. At 1 the rendered
+        /// position has caught up with the simulated one and stops moving.
+        /// </summary>
+        public float RenderStepProgress => StepProgress;
+
+        /// <summary>
+        /// Whether the held direction is still inside the server's hold window. False
+        /// means the predictor has stopped integrating it and nothing will move the
+        /// rendered position until the next input or snapshot.
+        /// </summary>
+        public bool HoldIsActive =>
+            HoldTicks > 1 && _heldFrom != 0 && _baseTick - _heldFrom < HoldTicks;
+
+        /// <summary>Base ticks <see cref="Advance"/> has stepped.</summary>
+        public int BaseTicksAdvanced { get; private set; }
+
+        /// <summary>
+        /// Base ticks on which the held direction actually moved the entity.
+        /// </summary>
+        /// <remarks>
+        /// Compare against <see cref="BaseTicksAdvanced"/>. The server integrates the held
+        /// direction on every base tick inside the window, so during sustained movement
+        /// these should track each other closely. The shortfall between the two is the
+        /// declined ticks, split by reason across the six <c>Skip*</c> counters; a large
+        /// share there means the rendered position is being refreshed far less often than
+        /// once per tick, whatever the hold window says it should be.
+        /// </remarks>
+        public int HeldStepsApplied { get; private set; }
+
+        /// <summary>
+        /// The predictor's current base tick — the same timeline the server's
+        /// <c>WorldState.Tick</c> is on, once <see cref="SeedBaseTick"/> has aligned them.
+        /// </summary>
+        /// <remarks>
+        /// Public because <see cref="SeedBaseTick"/> is: a consumer writing its own view
+        /// binding has to call that itself (see the remarks there), and this is how it
+        /// confirms the epoch took rather than discovering months later that its binder
+        /// never seeded. It is also what makes a client-side prediction log line up
+        /// against a server-side one — both name the same tick number.
+        /// </remarks>
+        public long BaseTick => _baseTick;
 
         /// <summary>
         /// Records an input that has just been sent and applies it to the predicted
@@ -488,7 +568,8 @@ namespace Cuvara.Netcode.Prediction
             else
             {
                 verdict = StepResult(
-                    _predicted, moveX, moveY, StepDeltaTime(_baseTick, _lastMoveTick),
+                    _predicted, moveX, moveY,
+                    StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom),
                     out _predicted);
             }
 
@@ -509,16 +590,19 @@ namespace Cuvara.Netcode.Prediction
             }
             else if (verdict == MoveResult.None)
             {
-                // An explicit stop. A Rejected vector deliberately leaves the hold alone,
-                // matching the server, which logs and drops it without disturbing state.
+                // An explicit stop. Both fields move, exactly as
+                // InputHandler.ProcessInput does on a deadzone vector: it clears
+                // HeldFromTick AND stamps LastMoveTick with the current tick, in the
+                // pre-check and again in the MoveResult.None branch. The
+                // comment that used to stand here claimed the reverse of what the server
+                // does, and leaving LastMoveTick stale is what let an idle bank time: the
+                // next real input then covered MaxBankedTicks worth of distance where the
+                // server covered one, which is the whole of issue #12.
                 //
-                // Clears the hold ONLY. LastMoveTick is deliberately untouched, exactly as
-                // server-side: a stop ends the held direction, it does not reset how long
-                // the entity has been stationary. Clearing it here sent StepDeltaTime down
-                // its "never moved" early return, which yields one plain timestep and so
-                // reproduced the old fixed-dt behaviour precisely — the forward-parity
-                // test stayed green while rule 3 was, in effect, not implemented.
+                // A Rejected vector still leaves both alone, matching the server, which
+                // logs and drops it without disturbing state.
                 _heldFrom = 0;
+                _lastMoveTick = _baseTick;
             }
 
             // Measure the gap to the previous input. A gap far longer than the ones
@@ -533,6 +617,13 @@ namespace Cuvara.Netcode.Prediction
 
             _lastInputAt = _elapsed;
             _sinceInput = 0f;
+
+            // An input that moved the entity is a step like any other, and the gap from it
+            // to the next one is exactly the gap that was freezing.
+            if (verdict is MoveResult.Accepted or MoveResult.Clamped)
+            {
+                NoteStep();
+            }
 
             Vec2 after = Position;
             _renderOffset = new Vec2(
@@ -617,7 +708,7 @@ namespace Cuvara.Netcode.Prediction
                         {
                             verdict = StepResult(
                                 replayed, input.MoveX, input.MoveY,
-                                StepDeltaTime(t, replayLastMove), out replayed);
+                                StepDeltaTime(t, replayLastMove, heldFrom), out replayed);
                         }
                         ReplayedSteps++;
                         stepped = true;
@@ -632,6 +723,7 @@ namespace Cuvara.Netcode.Prediction
                         else if (verdict == MoveResult.None)
                         {
                             heldFrom = 0;
+                            replayLastMove = t;
                         }
 
                         next++;
@@ -715,11 +807,15 @@ namespace Cuvara.Netcode.Prediction
                     _tickAccumulator -= _dt;
                     _baseTick++;
 
+                    BaseTicksAdvanced++;
+
                     Vec2 before = _predicted;
                     if (ApplyHeld(ref _predicted, _baseTick))
                     {
                         _step = new Vec2(_predicted.X - before.X, _predicted.Y - before.Y);
                         _sinceInput = 0f;
+                        NoteStep();
+                        HeldStepsApplied++;
                     }
                 }
             }
@@ -779,6 +875,49 @@ namespace Cuvara.Netcode.Prediction
         }
 
         /// <summary>
+        /// Seeds the predictor's base-tick counter from the server's world tick, so the
+        /// two timelines share the same epoch and the hold window's phase aligns.
+        /// </summary>
+        /// <param name="serverTick">
+        /// The server's current base tick, as carried on the snapshot
+        /// (<c>WorldState.Tick</c>). Must be positive; zero or negative is ignored.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// Takes effect once: the first call with a positive value sets
+        /// <see cref="_baseTick"/> and clears <see cref="_tickAccumulator"/>. Subsequent
+        /// calls are no-ops — the accumulator-driven clock in <see cref="Advance"/> is
+        /// the authority after seeding, and re-seeding on every snapshot would fight it.
+        /// </para>
+        /// <para>
+        /// Without this, <c>_baseTick</c> starts at 1 while the server's
+        /// <c>current_tick</c> is in the hundreds of thousands. The absolute values do
+        /// not matter — <c>StepDeltaTime</c> and <c>ApplyHeld</c> use differences — but
+        /// the <b>phase</b> does: the hold window is <c>HoldTicks</c> base ticks, and
+        /// where each clock's tick boundary falls relative to an input changes how many
+        /// held steps get applied between inputs. On localhost with matched rates and no
+        /// loss, this showed as 17 of 20 samples needing a correction of exactly 2 steps
+        /// (issue #13).
+        /// </para>
+        /// <para>
+        /// Separate from <see cref="Reconcile"/> for the same reason as
+        /// <see cref="SetServerSpeed"/>: that signature is a cross-package contract
+        /// enforced by <c>PredictionSurfaceContractTests</c>.
+        /// </para>
+        /// </remarks>
+        public void SeedBaseTick(long serverTick)
+        {
+            if (_baseTickSeeded || serverTick <= 0)
+            {
+                return;
+            }
+
+            _baseTickSeeded = true;
+            _baseTick = serverTick;
+            _tickAccumulator = 0f;
+        }
+
+        /// <summary>
         /// True when the tick rate came from a local fallback rather than from the server.
         /// </summary>
         /// <remarks>
@@ -802,11 +941,23 @@ namespace Cuvara.Netcode.Prediction
             _head = 0;
             _count = 0;
             _lastRecordedTick = 0;
+            BaseTicksAdvanced = 0;
+            HeldStepsApplied = 0;
+            SkipNoHoldWindow = 0;
+            SkipNothingHeld = 0;
+            SkipInputAlreadyStepped = 0;
+            SkipExpired = 0;
+            SkipRefusedByMovementModel = 0;
+            SkipNoDisplacement = 0;
+            StepIntervalSamples = 0;
+            StepIntervalResets = 0;
             _predicted = Vec2.Zero;
             _renderOffset = Vec2.Zero;
             _step = Vec2.Zero;
             _sinceInput = 0f;
             _inputInterval = 0f;
+            _stepInterval = 0f;
+            _lastStepAt = 0f;
             _lastInputAt = 0f;
             _elapsed = 0f;
             _baseTick = 1;
@@ -816,6 +967,7 @@ namespace Cuvara.Netcode.Prediction
             _heldFrom = 0;
             _lastMoveTick = 0;
             _seeded = false;
+            _baseTickSeeded = false;
             // Back to the configured fallback: the previous session's speed belonged to
             // a different entity, and possibly a different player.
             _speed = _settings.Speed;
@@ -828,6 +980,123 @@ namespace Cuvara.Netcode.Prediction
             DroppedInputs = 0;
             RejectedInputs = 0;
         }
+
+
+        /// <summary>
+        /// Records that a step just landed, and updates the interval the next one will be
+        /// spread across.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Smoothed, and bounded above by the hold window.</b> An exponential moving
+        /// average (α = 0.3, the same shape <c>WorldViewBinder</c> uses on snapshot
+        /// arrivals) converges on <c>_dt</c> during sustained movement, so the steady case
+        /// is exactly what it was before this existed.
+        /// </para>
+        /// <para>
+        /// A gap longer than the whole hold window is not a cadence — it means the hold
+        /// lapsed and this step begins a new burst rather than continuing one. Adopting it
+        /// would spread the next step across an idle period and leave the avatar crawling
+        /// behind its own simulation, which is the 0.12.3 defect in a new place. Such a gap
+        /// restarts the measurement instead, and the span falls back to its <c>_dt</c>
+        /// floor.
+        /// </para>
+        /// <para>
+        /// <b>Saturation is deliberately untouched.</b> <see cref="StepProgress"/> still
+        /// pins at 1, so a wider span makes the avatar reach the step later — never
+        /// further than the step an input actually produced.
+        /// </para>
+        /// </remarks>
+        private void NoteStep()
+        {
+            float gap = _elapsed - _lastStepAt;
+            _lastStepAt = _elapsed;
+
+            if (gap <= 0f || gap > HoldTicks * _dt)
+            {
+                _stepInterval = 0f;
+                StepIntervalResets++;
+                return;
+            }
+
+            _stepInterval = _stepInterval > 0f
+                ? _stepInterval * 0.7f + gap * 0.3f
+                : gap;
+            StepIntervalSamples++;
+        }
+
+        /// <summary>The measured interval between consecutive steps, in seconds.</summary>
+        /// <remarks>
+        /// Zero when the last gap was rejected as a pause, in which case
+        /// <see cref="EffectiveSmoothingSpan"/> falls back to its <c>_dt</c> floor.
+        /// </remarks>
+        public float ObservedStepInterval => _stepInterval;
+
+        /// <summary>Gaps folded into <see cref="ObservedStepInterval"/>.</summary>
+        public int StepIntervalSamples { get; private set; }
+
+        /// <summary>
+        /// Gaps rejected as a pause, which zero <see cref="ObservedStepInterval"/>.
+        /// </summary>
+        /// <remarks>
+        /// A high count against a low <see cref="StepIntervalSamples"/> means the interval
+        /// is being torn down faster than it is being built, and the span is effectively
+        /// always at its floor.
+        /// </remarks>
+        public int StepIntervalResets { get; private set; }
+
+        /// <summary>
+        /// Why a base tick's held step did not move the entity.
+        /// </summary>
+        /// <remarks>
+        /// A tick the hold declines is a tick on which <see cref="Position"/> is
+        /// bit-identical for its whole duration: <c>_predicted</c> does not move,
+        /// <c>_sinceInput</c> is not re-armed, <see cref="RenderStepProgress"/> stays
+        /// saturated and <c>remaining</c> stays zero. At a high frame rate that is a still
+        /// run one base tick long. The reasons need completely different responses, so
+        /// they are counted apart rather than summed.
+        /// </remarks>
+        private enum HoldSkip
+        {
+            /// <summary>The tick stepped; nothing was skipped.</summary>
+            None = 0,
+
+            /// <summary>No hold window is configured, so the hold is off entirely.</summary>
+            NoHoldWindow,
+
+            /// <summary>Nothing is held — an explicit stop, or no input yet.</summary>
+            NothingHeld,
+
+            /// <summary>An input already stepped this tick; rule 1 forbids a second.</summary>
+            InputAlreadyStepped,
+
+            /// <summary>The hold window has run out.</summary>
+            Expired,
+
+            /// <summary>The movement model refused the held vector.</summary>
+            RefusedByMovementModel,
+
+            /// <summary>The step produced no displacement.</summary>
+            NoDisplacement,
+        }
+
+        /// <summary>Base ticks the hold declined because no window is configured.</summary>
+        public int SkipNoHoldWindow { get; private set; }
+
+        /// <summary>Base ticks the hold declined because nothing was held.</summary>
+        public int SkipNothingHeld { get; private set; }
+
+        /// <summary>Base ticks the hold declined because an input had already stepped it.</summary>
+        public int SkipInputAlreadyStepped { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the window had run out.</summary>
+        public int SkipExpired { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the movement model refused.</summary>
+        public int SkipRefusedByMovementModel { get; private set; }
+
+        /// <summary>Base ticks the hold declined because the step produced no displacement.</summary>
+        public int SkipNoDisplacement { get; private set; }
 
         /// <summary>
         /// One simulation step, through the same <c>Shared.GameLogic</c> entry point the
@@ -849,25 +1118,62 @@ namespace Cuvara.Netcode.Prediction
         /// because an off-by-one here is a fixed fraction of every step and lands under
         /// the smoothing threshold — the failure mode this class has now produced twice.
         /// </remarks>
-        private bool ApplyHeld(ref Vec2 position, long baseTick) =>
-            ApplyHeld(ref position, baseTick, _heldFrom, _heldX, _heldY, ref _lastMoveTick);
+        private bool ApplyHeld(ref Vec2 position, long baseTick)
+        {
+            bool stepped = ApplyHeld(
+                ref position, baseTick, _heldFrom, _heldX, _heldY, ref _lastMoveTick,
+                out HoldSkip reason);
+
+            // Counted only on the live path. Reconcile replays the same guards over the
+            // unacknowledged timeline, and folding those in would make the counter a
+            // measure of how much replay ran rather than of how the rendered position
+            // behaved.
+            switch (reason)
+            {
+                case HoldSkip.NoHoldWindow: SkipNoHoldWindow++; break;
+                case HoldSkip.NothingHeld: SkipNothingHeld++; break;
+                case HoldSkip.InputAlreadyStepped: SkipInputAlreadyStepped++; break;
+                case HoldSkip.Expired: SkipExpired++; break;
+                case HoldSkip.RefusedByMovementModel: SkipRefusedByMovementModel++; break;
+                case HoldSkip.NoDisplacement: SkipNoDisplacement++; break;
+            }
+
+            return stepped;
+        }
 
         private bool ApplyHeld(
             ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
-            ref long lastMoveTick)
+            ref long lastMoveTick) =>
+            ApplyHeld(ref position, baseTick, heldFrom, heldX, heldY, ref lastMoveTick, out _);
+
+        private bool ApplyHeld(
+            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref long lastMoveTick, out HoldSkip reason)
         {
-            if (HoldTicks <= 1) return false;
-            if (heldFrom == 0) return false;                 // nothing held
-            if (heldFrom == baseTick) return false;          // the input already stepped it
-            if (baseTick - heldFrom >= HoldTicks) return false;   // expired
+            reason = HoldSkip.None;
+
+            if (HoldTicks <= 1) { reason = HoldSkip.NoHoldWindow; return false; }
+            if (heldFrom == 0) { reason = HoldSkip.NothingHeld; return false; }
+            if (heldFrom == baseTick) { reason = HoldSkip.InputAlreadyStepped; return false; }
+            if (baseTick - heldFrom >= HoldTicks) { reason = HoldSkip.Expired; return false; }
 
             // The hold path updates LastMoveTick server-side exactly as the packet path
             // does, so a held step banks time for the next one just the same.
             MoveResult result = StepResult(
-                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick), out Vec2 moved);
+                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
+                out Vec2 moved);
 
-            if (result is not (MoveResult.Accepted or MoveResult.Clamped)) return false;
-            if (moved.X == position.X && moved.Y == position.Y) return false;
+            if (result is not (MoveResult.Accepted or MoveResult.Clamped))
+            {
+                reason = HoldSkip.RefusedByMovementModel;
+                return false;
+            }
+
+            if (moved.X == position.X && moved.Y == position.Y)
+            {
+                reason = HoldSkip.NoDisplacement;
+                return false;
+            }
 
             position = moved;
             lastMoveTick = baseTick;
@@ -952,8 +1258,18 @@ namespace Cuvara.Netcode.Prediction
         /// than left to the server to impose.
         /// </para>
         /// </remarks>
-        private float StepDeltaTime(long baseTick, long lastMoveTick)
+        private float StepDeltaTime(long baseTick, long lastMoveTick, long heldFrom)
         {
+            // Nothing held means the entity was STOPPED, not stalled. The last thing the
+            // client said was "I am not moving", and a deadzone input clears the hold, so
+            // a player who releases the stick, waits, and presses again is owed nothing
+            // for the pause. Server-side this is the first guard in
+            // InputHandler.StepDeltaTime; the client did not have it, so every restart
+            // after an idle repaid the whole pause — capped at MaxBankedTicks — as a
+            // single lurching step the server never took. See the CHANGELOG for the
+            // measurement.
+            if (heldFrom == 0) return _dt;
+
             if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _dt;
 
             long elapsed = baseTick - lastMoveTick;

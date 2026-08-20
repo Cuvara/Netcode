@@ -62,7 +62,7 @@ with `CS0246: The type or namespace name 'VContainer' could not be found`.
   with the server.
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.8"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
 ```
 
 This one cannot be declared by the package. A UPM package's `dependencies` accepts
@@ -80,7 +80,7 @@ All four are imported from the Package Manager and all four need a running backe
 |---|---|
 | **Demo Bootstrap** | Minimal dev harness scene: press Play and the full connection flow runs against a local backend, logging every step. Mints its own development JWT from a shared secret in the config asset. |
 | **World View** | Renders replicated entities as primitive GameObjects so the world can be looked at rather than read from logs. Run one in a player build and one in the Editor to see two clients move around each other. |
-| **DOTS Sample** | The full client presented with DOTS/ECS: auth, both handshake hops, replicated entities, combat, economy, a map selector and a HUD. **WASD moves the local player**, with prediction on by default — this is the one to press Play on to judge how movement feels. |
+| **DOTS Sample** | The full client presented with DOTS/ECS: auth, both handshake hops, replicated entities, combat, economy, a map selector and a HUD. **WASD moves the local player**, with prediction on by default — this is the one to press Play on to judge how movement feels. A built player can be aimed at any backend with `-cuvara-gateway-host` / `-cuvara-nakama-host` (or `CUVARA_*` environment variables), and several instances authenticate as several distinct Nakama users — see "Pointing a build at a backend" in `Documentation~/NETCODE.md`. |
 | **E2E Certification** | Certification rig that drives the whole flow from the client with **no signing secret**: Nakama device auth, the `gateway_token` RPC, both handshake hops, the input/snapshot loop, resync, and a reconnect inside the server's 30 s entity hold. Exposes its results as static fields so they can be asserted on rather than read off the console. |
 
 ## Documentation
