@@ -5,6 +5,65 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.3] - 2026-08-20
+
+Test-harness only. No runtime assembly changed.
+
+### Added — `PredictionLatencyMeasurement` can measure the unseeded base tick
+
+`SeedBaseTick` shipped in v0.16.0 with a described mechanism and **no number**. The harness
+could not supply one: it drives the predictor through `WorldViewBinder`, and the binder seeds
+on every snapshot, so every run it had ever produced was already the *after*.
+
+`MeasureAsync` takes `seedBaseTick`, and the unseeded arm is interleaved with the other two.
+Reproducing the pre-fix state needs no production change: `SeedBaseTick` takes effect once and
+`_baseTick` starts at 1, so seeding it with **1** leaves the counter where it began and marks it
+seeded, which makes the binder's real call a no-op for the rest of the run.
+
+**Measured against a live backend, 2026-08-20** (medians of 3 interleaved runs, 20/20 usable
+samples, server-advertised 60 Hz and 60.0 Hz measured off the wire):
+
+| | unseeded | seeded |
+|---|---|---|
+| max correction | **0.0833** world units | **0.0000** |
+| corrections smoothed / snapped | — | 1 / 0 |
+| reconciles | 140 | 162 |
+
+`0.0833` is not an arbitrary figure: player speed 5 ÷ 60 Hz = 0.08333, i.e. **exactly one base
+tick of movement**. That is what a one-tick phase misalignment produces, so the number and the
+documented mechanism corroborate each other rather than merely coexisting.
+
+Reported, never asserted. It is a phase effect and the unseeded arm carries the widest spread of
+the three configurations (28 % of mean, against 6 % for the seeded arm) — the correction going to
+zero clears that comfortably, the reconcile count does not and should not be read as a result.
+
+## [0.16.2] - 2026-08-20
+
+Test-infrastructure only. No runtime assembly changed.
+
+### Fixed — `PredictionSurfaceContractTests` could not survive an added overload
+
+`Method(string name)` selected out of `GetMethods` with `SingleOrDefault(m => m.Name == name)`.
+`SingleOrDefault` throws `InvalidOperationException` — "Sequence contains more than one matching
+element" — as soon as two methods share a name, so the first overload added to
+`LocalMovePredictor` made the fixture throw.
+
+The fixture exists to guard the surface `com.cuvara.dots` drives, and its own remarks tell callers
+to extend that surface by **adding rather than changing**. An overload is the sanctioned way to add,
+and the guard reported the sanctioned move as a broken contract.
+
+Two things made it worse than a plain false positive:
+
+- it surfaced as an **exception**, not an assertion, so none of the explanatory messages this
+  fixture is built around were printed; and
+- it broke **every case sharing the fixture** — `AdvanceKeepsItsSignature` and the rest — none of
+  which the author had touched. The failure pointed away from the change that caused it.
+
+`Method` now matches on name **and** parameter types, so each case resolves the exact signature it
+is asserting and overloads are invisible to the others. Observed while prototyping a three-argument
+`Reconcile`; that prototype was rejected on its own merits and no overload is added here — this is
+the guard, fixed so the next addition fails for a real reason or not at all.
+
 ## [0.16.1] - 2026-08-19
 
 Sample-only release. No runtime assembly changed, so nothing about transport, codec,
