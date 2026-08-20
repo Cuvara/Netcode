@@ -5,6 +5,33 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-08-20
+
+Test-infrastructure only. No runtime assembly changed.
+
+### Fixed — `PredictionSurfaceContractTests` could not survive an added overload
+
+`Method(string name)` selected out of `GetMethods` with `SingleOrDefault(m => m.Name == name)`.
+`SingleOrDefault` throws `InvalidOperationException` — "Sequence contains more than one matching
+element" — as soon as two methods share a name, so the first overload added to
+`LocalMovePredictor` made the fixture throw.
+
+The fixture exists to guard the surface `com.cuvara.dots` drives, and its own remarks tell callers
+to extend that surface by **adding rather than changing**. An overload is the sanctioned way to add,
+and the guard reported the sanctioned move as a broken contract.
+
+Two things made it worse than a plain false positive:
+
+- it surfaced as an **exception**, not an assertion, so none of the explanatory messages this
+  fixture is built around were printed; and
+- it broke **every case sharing the fixture** — `AdvanceKeepsItsSignature` and the rest — none of
+  which the author had touched. The failure pointed away from the change that caused it.
+
+`Method` now matches on name **and** parameter types, so each case resolves the exact signature it
+is asserting and overloads are invisible to the others. Observed while prototyping a three-argument
+`Reconcile`; that prototype was rejected on its own merits and no overload is added here — this is
+the guard, fixed so the next addition fails for a real reason or not at all.
+
 ## [0.16.1] - 2026-08-19
 
 Sample-only release. No runtime assembly changed, so nothing about transport, codec,
