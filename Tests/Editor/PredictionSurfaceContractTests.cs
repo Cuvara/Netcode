@@ -35,17 +35,31 @@ namespace Cuvara.Netcode.Tests.Editor
     [TestFixture]
     public sealed class PredictionSurfaceContractTests
     {
-        private static MethodInfo Method(string name) =>
+        // Matched on name AND parameter types, not on name alone.
+        //
+        // What these tests guard is that a given SIGNATURE still exists. The remarks above
+        // tell callers to extend this surface by adding rather than changing -- and an
+        // overload is the sanctioned way to add. Selecting on the name alone made that
+        // sanctioned move fail: SingleOrDefault throws "Sequence contains more than one
+        // matching element" the moment a second overload appears, so the fixture reports an
+        // ADDITION as a broken contract, with an exception rather than an assertion message.
+        //
+        // The failure is also misdirected. Adding an overload to LocalMovePredictor breaks
+        // AdvanceKeepsItsSignature and every other case that shares the fixture, none of
+        // which the author touched. Found while prototyping a three-argument Reconcile.
+        private static MethodInfo Method(string name, params Type[] parameters) =>
             typeof(LocalMovePredictor)
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .SingleOrDefault(m => m.Name == name);
+                .SingleOrDefault(m => m.Name == name &&
+                    m.GetParameters().Select(p => p.ParameterType).SequenceEqual(parameters));
 
         private static void AssertSignature(string name, Type returnType, params Type[] parameters)
         {
-            var method = Method(name);
+            var method = Method(name, parameters);
             Assert.That(method, Is.Not.Null,
                 $"LocalMovePredictor.{name} is part of the contract com.cuvara.dots drives. " +
-                "Removing or renaming it breaks a consumer that is not compiled by this repo.");
+                "Removing or renaming it -- or changing its parameters rather than adding " +
+                "an overload -- breaks a consumer that is not compiled by this repo.");
 
             Assert.That(method.ReturnType, Is.EqualTo(returnType),
                 $"LocalMovePredictor.{name}'s return type is part of the cross-package contract.");
