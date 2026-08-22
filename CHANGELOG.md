@@ -53,6 +53,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     beside it, matching `INetLog`/`UnityNetLog`. `InternalsVisibleTo` appears nowhere in
     this package and would have been a new convention imported for one field.
 
+- **`RemoteInterpolationContinuityTests` — four tests that characterise remote
+  interpolation as a curve rather than as a point.** One remote entity travelling in a
+  straight line at a constant server speed, arrivals at the package's own 15 Hz and frames
+  every 5 ms, driven through the new `IViewClock` so arrival time and frame time are placed
+  independently. Each test asserts on the *frame-to-frame* displacement — its sign, its
+  size relative to the median step, and the rendered speed across an interval — never on an
+  absolute coordinate, because a coordinate cannot distinguish smooth motion from motion
+  that arrived by lurching.
+  - **Three of them fail on the current implementation, deliberately, and are committed
+    failing.** A suite that went straight from "does not exist" to "green" would never have
+    shown anyone the defect it was written for. They are not `[Ignore]`d: a test that proves
+    a defect has to run and be seen failing, and each carries a comment naming the specific
+    production line it fails at and the free-running render clock that will make it pass.
+  - **`APerfectlyPeriodicStreamRendersSmoothly` is the control and passes today.** Without
+    it a failing suite is indistinguishable from a broken harness — if the clock seam, the
+    frame pump or the sampling were wrong, everything would fail and the three failures
+    would prove nothing. It is held to a tighter bound (1.5x the median step, against 2.5x
+    for the others) because on a stream with no jitter the only irregularity left is the
+    frame that straddles an arrival, 5 ms not dividing 66.7 ms evenly.
+  - **The early-arrival case lurches FORWARD, and the test had to be written for that
+    rather than for the backward pop it was expected to show.** When a snapshot lands, the
+    interpolator shifts `From = To` and restarts the phase at 0, so it renders the *older
+    endpoint of the new pair* — which is ahead of wherever the previous frame had
+    interpolated to. Measured: a single frame moving **4.3x the median step** when the
+    snapshot arrives 16.7 ms early, with **no backward step anywhere in the run**. A test
+    asserting only "never moves backwards" — the obvious shape, and the one the defect
+    report called for — would therefore have **passed** here and left the real
+    early-arrival discontinuity uncovered. Both bounds are asserted for that reason.
+  - **The backward pop belongs to the late-arrival case**, where `t` runs to the `1.2`
+    extrapolation cap, the entity freezes, and the arriving snapshot then undoes the
+    extrapolated distance instead of absorbing it: measured at **0.2 units backwards after
+    2 stalled frames**, ~2.7x the median forward step. Stall-then-jump is what a player
+    reads as rubber-banding, and it is bounded by the cap rather than by how late the
+    snapshot was.
+  - **A skipped server tick renders at 1.54x speed**, measured. The entity never changed
+    speed — two units in two ticks is the same one unit per tick as always — but the binder
+    divides a doubled position delta by an interval its EMA has moved only 30 % of the way
+    (66.7 ms to ~86.7 ms), so a dropped packet reads on screen as sprinting and then
+    freezing. Asserted on the mean over the affected interval, which is the stable
+    statistic; the instantaneous peak is worse and is what is actually visible.
+
 - **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
   empties the pending buffer** (#53). The third argument is the base tick the snapshot was
   produced on.
