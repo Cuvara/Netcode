@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   samples it had never seen. It now copies every sample `package.json` declares.
   A list maintained by hand goes stale silently, which is the exact failure #30 was opened
   about — naming one sample in the fix reproduced it one sample at a time.
+  - Compiling all five immediately found a real break: **`WorldView` does not compile** in
+    the CI project. Its screenshot helper calls `Texture2D.EncodeToPNG`, an extension method
+    living in `com.unity.modules.imageconversion`, which a real Unity project has by default
+    and this job's hand-written manifest did not. The sample compiled everywhere except the
+    one place that was supposed to be checking it. Module added to the samples manifest.
 
 ### Added
 
