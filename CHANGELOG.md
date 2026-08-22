@@ -5,6 +5,25 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`develop` is the integration branch, and release tags are cut on it.** PRs target
+  `develop`; `main` is still built on push but nothing targets it by default.
+  - `release-reminder.yml` now watches `develop` instead of `main`. Watching `main` meant the
+    reminder fired on a branch nothing was merging into, so a version could sit untagged on
+    the branch people actually work on — which is how `develop` fell **two releases behind**
+    (`v0.16.3` and `v0.17.0` were both tagged on `main`) with nothing noticing. Anyone
+    branching from `develop` started without them.
+  - `ci.yml` accepts pull requests targeting either branch, so a PR aimed at `develop` is
+    built. It previously only ran on PRs into `main`.
+  - `release.yml` is unchanged and did not need changing: it triggers on the **tag**, not on
+    a branch, so a tag cut on `develop` already ran it. The branch decides where work lives,
+    not whether a release fires.
+  - The policy is written into `README.md` under *Branching and releases*, with the failure
+    that motivated it, so the next person does not have to reconstruct it.
+
 ## [0.17.0] - 2026-08-22
 
 ### Added
