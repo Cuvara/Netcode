@@ -378,6 +378,26 @@ None of the three can recur by construction: the clock is not reset by an arriva
 early sample waits in the ring instead of displacing the one being rendered, and
 bracketing by tick means a two-tick segment is given two ticks' worth of time.
 
+### Watching it, rather than reading it — `Samples~/InterpolationProbe`
+
+The numbers above are the tests' numbers, and numbers are not what the change was about.
+The **Interpolation Probe** sample drives a synthetic 15 Hz stream into this core — no
+server, no network — and renders it beside the pre-0.19 algorithm, so the lurch, the
+rubber-band and the sprint are visible as a difference between two dots. Buttons inject
+each of the three perturbations, a jitter slider runs to ±150 ms, and the readout reports
+the frame step, the largest step, whether anything went backwards, and the current render
+delay against the newest sample.
+
+Two things it makes visible that no assertion in this section does. **Where the buffer
+runs out**: at ±100 ms of arrival jitter against a 100 ms `TargetDelay`, the largest
+single-frame step goes from 1.25× the median to 4.52×. And **what survives past that**:
+at ±150 ms the motion is visibly uneven and has still not stepped backwards, because the
+clock rate is floored above zero whatever the config says.
+
+The old algorithm is duplicated inside that sample so the comparison can exist at all. It
+lives in `Samples~/InterpolationProbe/Scripts/ObsoleteResetOnArrivalInterpolator.cs` under
+a banner saying so, is referenced from nothing under `Runtime/`, and must never be reused.
+
 ## Prediction and reconciliation (0.5.0)
 
 Local player **movement** is predicted. Nothing else is.
