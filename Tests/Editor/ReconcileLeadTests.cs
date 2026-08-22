@@ -135,10 +135,10 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// Drives the client the way the live path does: an input on its own base tick, then
-        /// <see cref="LocalMovePredictor.Advance"/> on each of the remaining base ticks in the
-        /// send interval. Input <c>i</c> lands on base tick <c>1 + (i-1) * HoldTicks</c>,
-        /// matching <see cref="ServerThrough"/>'s schedule.
+        /// Drives the client the way the live path does: record input <c>i</c>, then
+        /// <see cref="LocalMovePredictor.Advance"/> once per base tick in the send interval.
+        /// The same driver <c>HeldMovementParityTests</c> uses, so the state it produces is
+        /// the one that fixture proves equals <see cref="ServerAfter"/>.
         /// </summary>
         private static void SendInputs(LocalMovePredictor p, int inputs, float x, float y)
         {
