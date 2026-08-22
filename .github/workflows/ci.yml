@@ -88,8 +88,19 @@ jobs:
 
           # Samples~ is invisible to Unity where it sits; importing a sample means
           # copying it under Assets/, which is exactly what the Package Manager does.
+          #
+          # Copy every sample package.json DECLARES rather than naming one here. The
+          # hardcoded list was already four samples stale: DemoBootstrap, WorldView,
+          # E2ECertification and ContentPipeline were all shipping with nothing
+          # compiling them, while this job reported success over samples it had never
+          # seen. A list maintained by hand goes stale silently — that is the failure
+          # mode issue #30 is about, and naming one sample here reproduces it one
+          # sample at a time.
           mkdir -p "Assets/Samples"
-          cp -r "package/Samples~/DOTSSample" "Assets/Samples/DOTSSample"
+          for rel in $(python3 -c "import json;[print(e['path']) for e in json.load(open('package/package.json')).get('samples',[])]"); do
+            cp -r "package/${rel}" "Assets/Samples/${rel##*/}"
+          done
+          echo "samples imported: $(ls Assets/Samples | tr '\n' ' ')"
 
           cat > Packages/manifest.json << 'JSON'
           {
