@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Remote entities no longer pop, stall or sprint when a snapshot is early, late or
+  dropped.** `WorldViewBinder` now renders them through the shared interpolation core
+  instead of its own arrival-phase arithmetic. Three separate visible defects, all of them
+  the same root cause and all of them previously invisible to the test suite, which
+  asserted only `Is.LessThan(1f)` at the instant a snapshot landed.
+  - **What a player saw before.** *Early arrival:* the avatar **lurched forward** — the
+    unrendered remainder of the current segment was discarded when the phase restarted at
+    zero, measured at **4.3x a normal frame's travel in a single frame**, on ordinary
+    jitter with **no packet loss required**. Note the direction: forward, not backward. A
+    test asserting only "never moves backwards" passes on the old code in this case, which
+    is how it stayed uncovered. *Late arrival:* the phase ran to the `t <= 1.2` clamp, the
+    entity **froze for two frames and then stepped backwards 0.2 units** — the extrapolated
+    fifth of a segment being undone rather than absorbed. That is what rubber-banding is.
+    *One dropped snapshot:* the entity rendered at **1.54x speed (23.1 units/s against
+    15.0) and then stalled**, though the server never changed its speed — it covered two
+    units in two ticks as always.
+  - **What a player sees now**, measured on the same three streams: a maximum single-frame
+    step of **1.15x the median** on the early arrival (against an assertion bound of 2.5x),
+    **1.06x** on the late one, **no backward step anywhere in any of the three**, and a
+    skipped tick rendering at **1.008x** its ordinary speed. The perfectly periodic control
+    stream is unchanged at 1.06x against its tighter 1.5x bound.
+  - **The mechanism, not the symptom.** The interpolation factor used to be
+    `(now - arrivalTime) / measuredArrivalInterval`, with the arrival stamped and the
+    factor read in the same `Tick` call — so it was exactly zero on every arriving
+    snapshot, whatever the previous frame had drawn. Where an entity was drawn was
+    therefore a function of when a packet arrived. It now comes from a free-running clock
+    that an arrival does not reset, samples are bracketed by their tick rather than by
+    time since arrival, and the interval is estimated per tick rather than per snapshot.
+    None of the three defects can recur by construction rather than by care.
+  - **The two-sample pair became an 8-deep ring**, which is what lets an early snapshot
+    *wait* instead of displacing the segment being rendered. Rings are pooled across
+    despawns: area-of-interest churn makes spawn and despawn steady-state events here, and
+    a fresh array per entry would hand that churn to the garbage collector. The per-frame
+    render path allocates **zero bytes**, measured — byte-for-byte identical to before this
+    change, including the one pre-existing 88 B/frame allocation that comes from
+    `foreach`-ing `WorldState.Entities`, an `IReadOnlyDictionary` whose enumerator boxes.
+    That one is untouched and is not new; fixing it means changing `WorldState`'s public
+    surface, which is a separate change.
+  - **Remote entities now render 100 ms behind the newest received tick** (about 1.5
+    snapshot intervals) where they previously ran one interval behind with no margin at
+    all — which is precisely why they extrapolated and popped. **The local player pays
+    none of it**: it is excluded from interpolation entirely and still renders at the
+    newest received position, or at the predicted one when a `LocalMovePredictor` is
+    supplied. Nothing about prediction, reconciliation or the `AdvanceFrame` clock-
+    ownership rule changed.
+  - `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock, InterpolationConfig)` is
+    a new overload for a deployment at a different world rate; every existing overload
+    keeps the defaults and every existing call site compiles unchanged. `RenderTick` is
+    exposed for diagnostics — it should sit a little under `TargetDelay` behind the newest
+    received tick, and a value drifting away from that is the shape of a rate-estimate
+    problem.
+
 - **The samples job compiled one sample out of five** (#30). The gate added to close that
   issue named `DOTSSample` directly, so `DemoBootstrap`, `WorldView`, `E2ECertification` and
   `ContentPipeline` shipped with nothing compiling them while the job reported success over
