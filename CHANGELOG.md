@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reading NETWORK, CACHE or LOCAL. All three verified against a real server; the second run
   reads CACHE, which is the 304 path working.
 
+### Changed
+
+- **CI pins `Shared.GameLogic` at `sgl-v0.2.2`**, up from `sgl-v0.1.9`. `Runtime/Content/`
+  compiles against `Shared.GameLogic.Content`, a namespace `0.1.9` does not have, so every
+  Unity job in this repo failed to compile until the pin moved — the package's own
+  `dependencies` do not name it, because it is supplied by the consuming project.
+
 ## [0.16.3] - 2026-08-20
 
 Test-harness only. No runtime assembly changed.
