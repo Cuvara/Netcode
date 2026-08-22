@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sync-main.yml` — `main` now follows the release tag by itself.** Runs on a `v*` push and
+  opens an auto-merging pull request moving `main` to the tagged commit.
+  - It opens a PR instead of pushing: `main` requires a pull request and four passing checks,
+    and a workflow that bypassed that would be removing the gate from the branch other people
+    read. No approval is required there, so a green PR lands on its own.
+  - No-ops when `main` already contains the tag, and warns instead of forcing when the move
+    would not be a fast-forward.
+  - `workflow_dispatch` accepts a tag, for a tag pushed while this was broken or a sync PR
+    that was closed.
+  - Written because a `main` that drifts is worse than one that is obviously abandoned: it
+    *looks* current while being stale, which is exactly how `develop` sat two releases behind
+    with nothing noticing.
+
 ### Changed
 
 - **`develop` is the integration branch, and release tags are cut on it.** PRs target

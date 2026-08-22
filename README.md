@@ -111,6 +111,20 @@ branch matters for where the work lives, not for whether the release fires.
 It never tags and never publishes: pushing a `v*` tag is the last gate before `npm publish`,
 which cannot be undone — a bad version can only be superseded, never withdrawn.
 
+### `main` syncs itself
+
+`sync-main.yml` runs on the tag push and opens a pull request moving `main` to the tagged
+commit, set to auto-merge. Nothing to remember and nothing to do by hand.
+
+It opens a PR rather than pushing because `main` requires one plus four passing checks, and
+a workflow that bypassed that would be quietly removing the gate from the branch other
+people read. When the tag is already reachable from `main` it does nothing and says so; when
+the move would not be a fast-forward it opens the PR anyway and warns, rather than choosing
+for you.
+
+`workflow_dispatch` takes a tag, for when a tag was pushed while the workflow was broken or
+a sync PR was closed.
+
 ### Why this is written down
 
 `develop` fell two releases behind `main` (`v0.16.3` and `v0.17.0` were both tagged on
