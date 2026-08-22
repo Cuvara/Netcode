@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="InterpolationProbeView.uss" />
+
+    <!-- picking-mode Ignore on the root so the empty area does not eat mouse events from
+         the scene behind it; only the panel itself is interactive. -->
+    <engine:VisualElement name="interp-probe" class="cuvara-probe" picking-mode="Ignore">
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Remote interpolation probe" class="cuvara-probe__title" />
+            <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                          text="A synthetic 15 Hz snapshot stream — no server, no network — rendered twice: by the free-running render clock that ships, and by the reset-on-arrival algorithm it replaced in 0.19.0." />
+
+            <engine:VisualElement class="cuvara-probe__legend">
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--current" />
+                <engine:Label text="green = production core" class="cuvara-probe__legend-text" />
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--obsolete" />
+                <engine:Label text="orange = pre-0.19 algorithm (sample only)" class="cuvara-probe__legend-text" />
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--truth" />
+                <engine:Label text="grey = server truth, now" class="cuvara-probe__legend-text" />
+            </engine:VisualElement>
+
+            <engine:Label text="Inject one perturbation" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="inject-early" text="Early arrival" class="cuvara-probe__button" />
+                <engine:Button name="inject-late" text="Late arrival" class="cuvara-probe__button" />
+                <engine:Button name="inject-skip" text="Skip a tick" class="cuvara-probe__button" />
+                <engine:Button name="reset" text="Reset"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Or perturb continuously" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <!-- choices are filled from C# so the dropdown and the Perturbation enum
+                     cannot drift apart. -->
+                <engine:DropdownField name="repeat" label="Repeat" class="cuvara-probe__dropdown" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Slider name="jitter" label="Arrival jitter" low-value="0" high-value="150"
+                               class="cuvara-probe__slider" />
+                <engine:Label name="jitter-value" text="± 0 ms" class="cuvara-probe__slider-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Toggle name="pause" label="Pause" class="cuvara-probe__toggle" />
+                <engine:Toggle name="show-obsolete" label="Show the old algorithm"
+                               class="cuvara-probe__toggle" />
+            </engine:VisualElement>
+
+            <engine:Label text="Rendered motion" class="cuvara-probe__section" />
+
+            <engine:VisualElement class="cuvara-probe__tracks">
+
+                <engine:VisualElement class="cuvara-probe__track cuvara-probe__track--current">
+                    <engine:Label text="Free-running clock — 0.19.0, production"
+                                  class="cuvara-probe__track-title" />
+
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="frame step" class="cuvara-probe__key" />
+                        <engine:Label name="current-step" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__bar">
+                        <engine:VisualElement name="current-bar" class="cuvara-probe__bar-fill" />
+                    </engine:VisualElement>
+
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="largest step" class="cuvara-probe__key" />
+                        <engine:Label name="current-max" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="backward steps" class="cuvara-probe__key" />
+                        <engine:Label name="current-back" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="render delay" class="cuvara-probe__key" />
+                        <engine:Label name="current-delay" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                </engine:VisualElement>
+
+                <engine:VisualElement class="cuvara-probe__track cuvara-probe__track--obsolete">
+                    <engine:Label text="Reset-on-arrival — pre-0.19, SAMPLE ONLY"
+                                  class="cuvara-probe__track-title" />
+
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="frame step" class="cuvara-probe__key" />
+                        <engine:Label name="obsolete-step" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__bar">
+                        <engine:VisualElement name="obsolete-bar" class="cuvara-probe__bar-fill" />
+                    </engine:VisualElement>
+
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="largest step" class="cuvara-probe__key" />
+                        <engine:Label name="obsolete-max" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="backward steps" class="cuvara-probe__key" />
+                        <engine:Label name="obsolete-back" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                    <engine:VisualElement class="cuvara-probe__stat">
+                        <engine:Label text="render delay" class="cuvara-probe__key" />
+                        <engine:Label name="obsolete-delay" text="—" class="cuvara-probe__value" />
+                    </engine:VisualElement>
+                </engine:VisualElement>
+
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" text="—" class="cuvara-probe__verdict" />
+            <engine:Label name="stream-line" text="—" class="cuvara-probe__mono" />
+            <engine:Label name="clock-line" text="—" class="cuvara-probe__mono" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>
