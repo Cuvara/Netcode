@@ -23,6 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ReconcileLeadTests` — a harness that actually measures the prediction lead** (#53).
+  The defect is unfixed; this is the instrument a fix can be judged with, which #53 says has
+  to exist first.
+  - An earlier fixture of this name was shipped `[Ignore]`d by its own author because every
+    configuration returned a constant `1.000` step — zero latency and both code paths alike.
+    It never reached `develop` and no longer exists. A fix evaluated against it would have
+    been evaluated against nothing.
+  - What makes this one trustworthy is two tests, not the numbers: `ZeroLead_CorrectsByNothing`
+    reads **0** where there is no lead to lose, and `PendingInputSurvives_TheLeadIsRebuilt`
+    reads **materially different values on the anchored and unanchored paths** — compared
+    against each other rather than a threshold, since indistinguishable readings were the old
+    fixture's whole failure.
+  - Three drafts were needed and each was corrected by a measurement rather than by reasoning:
+    passing base ticks where `RecordInput` expects input ticks read one step off at every lead
+    including zero; advancing after a consumed hold window produced no lead at all and looked
+    like the defect being absent; and an anchor recorded *after* the held ticks rebuilt nothing,
+    reading identically to the unanchored path. That last one is a real property of the replay
+    and is documented at the call site.
+  - The defect is pinned as characterization: `EmptyBuffer_DiscardsTheLead...` asserts the
+    correction tracks the acknowledgement interval — 1, 2 and 3 steps for 1, 2 and 3 held
+    ticks — and says at the call site that the expected value becomes `0` once #53 is fixed.
+    These pass today. A fixture that failed would be reverted or ignored, and an ignored
+    fixture is how the last one died.
+
 - **`Generated Wire.cs matches the backend` CI job** (#20).
   `Runtime/Protocol/Generated/Wire.cs` is the third generated copy of `wire.proto` and the
   only one nothing guarded; the backend's two are covered by its
