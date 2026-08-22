@@ -310,7 +310,15 @@ namespace Cuvara.Netcode.View
                         // "not sent", so the configured fallback stands.
                         _predictor.SeedBaseTick(world.Tick);
                         _predictor.SetServerSpeed(e.Speed);
-                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick);
+
+                        // world.Tick is the tick this snapshot was produced on, and
+                        // SeedBaseTick has already put it in the same space as the
+                        // predictor's base tick. Passing it keeps the prediction lead when
+                        // the acknowledgement empties the pending buffer, which happens in
+                        // ordinary play: inputs go at ~15 Hz against a 60 Hz base tick, so
+                        // there is a window of up to four base ticks after an
+                        // acknowledgement before the next input is recorded (#53).
+                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick, world.Tick);
                     }
 
                     // Only the time no frame has advanced yet. AdvanceFrame is the

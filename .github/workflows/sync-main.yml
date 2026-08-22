@@ -1,0 +1,158 @@
+name: Sync main to the released tag
+
+# `develop` is the integration branch and release tags are cut there, so `main` only
+# tracks the released state. Left to a human it does not get updated: it fell two
+# releases behind before anyone noticed, and a `main` that LOOKS current while being
+# stale is worse than one that is obviously abandoned.
+#
+# So this runs off the tag, which is the moment "released" becomes true.
+#
+# It opens a pull request rather than pushing. `main` requires a PR and four status
+# checks, and a workflow that bypassed that would be quietly removing the gate from
+# the branch other people read. The PR is set to auto-merge, so it lands by itself
+# once those checks pass — no approval is required on this branch, only green CI.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Recoverable by hand when a tag was pushed while this workflow was broken, or when
+  # a sync PR was closed and needs re-opening. Takes the tag to sync to.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to sync main to (e.g. v0.17.0)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Two tags pushed together would otherwise race to create the same branch, and the
+  # loser fails on a ref that already exists. Not cancel-in-progress: the first sync
+  # should finish rather than be abandoned half-done.
+  group: sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Open a sync PR for main
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole job is a question about history, and a shallow clone cannot
+          # answer whether main already contains the tag.
+          fetch-depth: 0
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::${TAG} is not a tag in this repository."
+            exit 1
+          fi
+
+          # ^{commit} because an annotated tag is its own object, and a branch must
+          # point at a commit. Without it the ref update fails on a tag object.
+          SHA=$(git rev-parse "${TAG}^{commit}")
+          echo "tag=${TAG}"  >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"  >> "$GITHUB_OUTPUT"
+          echo "Tag ${TAG} -> ${SHA}"
+
+      - name: Is main already there?
+        id: check
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.tag.outputs.sha }}"
+
+          if git merge-base --is-ancestor "${SHA}" origin/main; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### main already contains ${{ steps.tag.outputs.tag }}"
+              echo ""
+              echo "Nothing to sync."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Already synced::main already contains ${{ steps.tag.outputs.tag }}."
+            exit 0
+          fi
+
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+
+          # Whether this is a fast-forward decides how much a reviewer needs to look at,
+          # so say it rather than leaving it to be discovered on the PR page.
+          if git merge-base --is-ancestor origin/main "${SHA}"; then
+            echo "ff=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ff=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Not a fast-forward::main has commits ${{ steps.tag.outputs.tag }} does not contain. The sync PR will be a real merge — review it."
+          fi
+
+      - name: Push a branch at the tag
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          # --force so a re-run after a closed PR reuses the branch instead of failing
+          # on a ref that already exists. The branch is machine-owned and named per
+          # tag, so nothing human-authored can be behind it.
+          git push --force origin \
+            "${{ steps.tag.outputs.sha }}:refs/heads/sync-main/${{ steps.tag.outputs.tag }}"
+
+      - name: Open the PR and let it auto-merge
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          BRANCH="sync-main/${TAG}"
+
+          if [ "${{ steps.check.outputs.ff }}" = "true" ]; then
+            NOTE="This is a **fast-forward**: \`main\` has no commits \`${TAG}\` lacks, so nothing is discarded and no conflict is possible."
+          else
+            NOTE="⚠️ This is **not** a fast-forward — \`main\` carries commits \`${TAG}\` does not contain. Review the diff before letting it land."
+          fi
+
+          BODY=$(cat <<EOF
+          Opened automatically when \`${TAG}\` was pushed.
+
+          \`develop\` is the integration branch and releases are tagged there, so \`main\` only tracks the released state. This moves it to \`${TAG}\`.
+
+          ${NOTE}
+
+          Auto-merge is enabled: this lands by itself once the required checks pass. It is a pull request rather than a direct push because \`main\` requires one, and a workflow that bypassed that would be removing the gate from the branch other people read.
+
+          Raised by \`.github/workflows/sync-main.yml\`.
+          EOF
+          )
+
+          # A PR may already exist from a re-run; reuse it rather than failing.
+          EXISTING=$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')
+          if [ -n "${EXISTING}" ]; then
+            echo "Reusing open PR #${EXISTING}"
+            PR="${EXISTING}"
+          else
+            gh pr create --base main --head "${BRANCH}" \
+              --title "chore: sync main to ${TAG}" --body "${BODY}"
+            PR=$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number')
+          fi
+
+          # Not a hard failure: if auto-merge is unavailable the PR still stands and a
+          # human can merge it. Losing the PR would be the real failure.
+          gh pr merge "${PR}" --auto --merge \
+            || echo "::warning title=Auto-merge not set::PR #${PR} is open and must be merged by hand."
+
+          {
+            echo "### Sync PR for ${TAG}"
+            echo ""
+            echo "PR #${PR} targets \`main\` from \`${BRANCH}\`, set to auto-merge."
+          } >> "$GITHUB_STEP_SUMMARY"
