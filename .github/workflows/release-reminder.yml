@@ -3,11 +3,17 @@ name: Release reminder
 # Releasing is deliberately manual: pushing a `v*` tag is the last gate before
 # `npm publish`, which cannot be undone — a bad version can only be superseded,
 # never withdrawn. So this workflow never tags and never publishes. It only
-# notices that `main` carries a version nobody has tagged yet, and says so.
+# notices that `develop` carries a version nobody has tagged yet, and says so.
+#
+# Watches `develop` because that is the integration branch: PRs land there and
+# release tags are cut there. Watching `main` meant the reminder fired on a branch
+# nothing was merging into, so a version could sit untagged on develop for two
+# releases without anything noticing — which is exactly what happened through
+# v0.16.3 and v0.17.0.
 
 on:
   push:
-    branches: [main]
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
