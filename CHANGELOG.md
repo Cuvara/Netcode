@@ -23,6 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A shared snapshot-interpolation core in `Runtime/Interpolation/` — no Unity types, no
+  ECS types, no allocation, no managed fields.** `InterpolationSample`,
+  `InterpolationConfig`, `InterpolationClock`, `ISampleBuffer`, `InterpolationRing` and
+  the static `SnapshotInterpolation`. Nothing consumes it in this entry; it is added
+  first, tested first, and wired in separately, so the swap can be reviewed as a swap.
+  - **Extracted rather than fixed in place, because a second copy is the real risk.** The
+    math has lived exactly once, in `WorldViewBinder`, and the DOTS path consumes its
+    output through `IEntityView.SetState` rather than reimplementing it. Fixing it inside
+    the binder would have kept that true only until the ECS path needed to evaluate at
+    frame rate in a job, at which point there would have been two implementations of a
+    thing whose entire job is that the client and the renderer agree. `Evaluate` is
+    generic over `where TBuffer : struct, ISampleBuffer` precisely so Burst can specialise
+    it per concrete buffer: the GameObject path passes a struct over a pooled array, the
+    ECS path will pass a struct over a `DynamicBuffer`, and neither boxes.
+  - **The render moment is a fractional server tick, not a phase between two samples.**
+    `InterpolationClock.RenderTick` advances with real frame time and is steered toward
+    `NewestTick - TargetDelay / SecondsPerTick` by running slightly fast or slightly slow,
+    capped at 10 %. It is never snapped. The rate is `1 + adjust` and is floored above
+    zero whatever the config says, so `RenderTick` is **strictly increasing for any
+    positive frame delta** — which is what turns "a remote entity never steps backwards
+    between two frames" from a hope into a property of the design, because the rendered
+    position is a monotonic function of a monotonic clock along a fixed path.
+  - **The target is built from a tick number, so arrival jitter cannot move it.** A tick
+    is an exact integer off the wire. The cost is that the effective delay settles about
+    half a tick beyond `TargetDelay`, since the target steps on arrivals while the clock
+    runs continuously; 33 ms at 15 Hz, and worth paying for a target nothing can jitter.
+  - **Seconds-per-tick, not seconds-per-snapshot.** The estimate is an EMA of
+    `arrivalGap / tickGap`, seeded from `TickRateEstimator.SnapshotTickGap` — which was
+    already being computed and handed to the predictor two lines away, and which the
+    interpolator ignored. Because a dropped snapshot carries a proportionally larger tick
+    delta, the ratio does not move. The first real measurement replaces the seed outright
+    rather than being smoothed into it, so a join at a rate the seed guessed wrong does
+    not render at the wrong speed for several seconds.
+  - **Every magic number is now a named field with a stated reason.** `TargetDelay`
+    100 ms (~1.5 intervals at 15 Hz: one interval is the minimum that can work at all,
+    the extra half is jitter margin sized against the measured 8-13 ms RTT spread plus
+    ±16 ms of scheduling jitter on a 60 Hz client); `MaxExtrapolation` 50 ms replacing the
+    bare `t <= 1.2`; `RingCapacity` 8, ~0.53 s of history and the size that keeps a DOTS
+    `DynamicBuffer` in chunk memory. `default(InterpolationConfig)` is all zeroes, so
+    `Normalized()` fills any non-positive field from the defaults — except
+    `MaxExtrapolation`, where zero is a deliberate "never extrapolate" and defaulting it
+    would silently overrule a deployment that asked for no guessing.
+  - **24 tests in `Tests/Editor/InterpolationCoreTests.cs`** pin the edges the four
+    continuity tests cannot reach, because those are integration-level and would cover a
+    single-sample buffer or a ring wrap only by accident: clock seeding and catch-up
+    bounds, strict monotonicity under sustained maximum error, out-of-order rejection,
+    empty and single-sample buffers, bracketing inside a deep buffer, the two-tick segment,
+    the extrapolation cap and its disable, ring wraparound and ordering across several
+    wraps, duplicate-tick refusal, and reuse after `Clear`.
+
 - **`IViewClock` — `WorldViewBinder`'s interpolation clock is injectable.** A third
   constructor overload, `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock)`,
   takes the time source remote interpolation is derived from; passing null (or using
