@@ -23,6 +23,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Generated Wire.cs matches the backend` CI job** (#20).
+  `Runtime/Protocol/Generated/Wire.cs` is the third generated copy of `wire.proto` and the
+  only one nothing guarded; the backend's two are covered by its
+  `proto-generated-up-to-date` job.
+  - A stale copy is the expensive kind of wrong: it **decodes cleanly**, reading any field
+    added since generation as that type's default, so the symptom is a feature that looks
+    wired up and silently does nothing while every test on both sides passes.
+  - It diffs against the backend's **committed generated file** rather than running
+    `protoc`. Both sides generate from one schema with one generator, so the artefacts are
+    byte-identical by construction — md5 `c77092611a6e7815` on both when this landed.
+    Regenerating here would mean pinning `protoc` and the C# plugin to the backend's exact
+    versions, since generated output moves between generator versions; that yields diffs
+    which are not drift, and a gate that cries wolf gets switched off.
+  - It compares against the backend's `develop`, unpinned on purpose. A schema change
+    landing there **should** turn this red until this package regenerates. A pin would hide
+    the drift until someone moved it — the failure mode of the stale copy itself. The cost
+    is that a backend change can redden a netcode PR that did not cause it; that is the
+    two-repo protocol contract being enforced, not a defect.
+  - On failure it prints the diff and names the trap the issue documented: a bare
+    `--csharp_out` nests output under the `csharp_namespace`, writing
+    `Generated/RpgMmo/Wire/V1/Wire.cs` and leaving the committed `Generated/Wire.cs`
+    untouched **while reporting success**.
+
 - **`sync-main.yml` — `main` now follows the release tag by itself.** Runs on a `v*` push and
   opens an auto-merging pull request moving `main` to the tagged commit.
   - It opens a PR instead of pushing: `main` requires a pull request and four passing checks,
