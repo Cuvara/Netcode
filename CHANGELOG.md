@@ -23,6 +23,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
+  empties the pending buffer** (#53). The third argument is the base tick the snapshot was
+  produced on.
+  - An **overload, never a change**: the two-argument form is a cross-package contract
+    enforced by `PredictionSurfaceContractTests` and driven by `com.cuvara.dots`. Callers
+    that cannot supply the tick keep today's behaviour exactly, including today's defect,
+    and a test pins that.
+  - `WorldViewBinder` passes `world.Tick`, which it already had — it was feeding the same
+    value to `SeedBaseTick` one line above, so the two clocks were already in one space and
+    the plumbing was a single argument.
+  - **Why the tick is genuinely required.** The cheaper fix was implemented first and
+    measured: anchor the replay to the acknowledged input's own base tick, which the
+    predictor already holds, needing no new parameter. It rebuilds the lead correctly and
+    then over-replays whenever the snapshot already covers the hold window — **3 steps of
+    phantom correction on a case with no lead at all**. The anchor supplies a start; only
+    the snapshot's tick supplies the end. That attempt is not in any branch; the test that
+    rejected it is.
+  - Two things are deliberately not replayed, each an earlier attempt's measured failure:
+    the acknowledged input's own step (the server applied it, so it is in `authoritative`),
+    and anything at or before the snapshot's tick (the snapshot already includes it).
+
+- **`ReconcileLeadTests` — a harness that actually measures the prediction lead** (#53).
+  The defect is unfixed; this is the instrument a fix can be judged with, which #53 says has
+  to exist first.
+  - An earlier fixture of this name was shipped `[Ignore]`d by its own author because every
+    configuration returned a constant `1.000` step — zero latency and both code paths alike.
+    It never reached `develop` and no longer exists. A fix evaluated against it would have
+    been evaluated against nothing.
+  - What makes this one trustworthy is two tests, not the numbers: `ZeroLead_CorrectsByNothing`
+    reads **0** where there is no lead to lose, and `PendingInputSurvives_TheLeadIsRebuilt`
+    reads **materially different values on the anchored and unanchored paths** — compared
+    against each other rather than a threshold, since indistinguishable readings were the old
+    fixture's whole failure.
+  - Three drafts were needed and each was corrected by a measurement rather than by reasoning:
+    passing base ticks where `RecordInput` expects input ticks read one step off at every lead
+    including zero; advancing after a consumed hold window produced no lead at all and looked
+    like the defect being absent; and an anchor recorded *after* the held ticks rebuilt nothing,
+    reading identically to the unanchored path. That last one is a real property of the replay
+    and is documented at the call site.
+  - The defect is pinned as characterization: `EmptyBuffer_DiscardsTheLead...` asserts the
+    correction tracks the acknowledgement interval — 1, 2 and 3 steps for 1, 2 and 3 held
+    ticks — and says at the call site that the expected value becomes `0` once #53 is fixed.
+    These pass today. A fixture that failed would be reverted or ignored, and an ignored
+    fixture is how the last one died.
+
 - **`Generated Wire.cs matches the backend` CI job** (#20).
   `Runtime/Protocol/Generated/Wire.cs` is the third generated copy of `wire.proto` and the
   only one nothing guarded; the backend's two are covered by its

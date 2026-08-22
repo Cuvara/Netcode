@@ -646,7 +646,39 @@ namespace Cuvara.Netcode.Prediction
         /// to compare against, and treating an initial spawn position as a correction
         /// would count a snap that never happened.
         /// </remarks>
-        public void Reconcile(Vec2 authoritative, long ackTick)
+        public void Reconcile(Vec2 authoritative, long ackTick) =>
+            Reconcile(authoritative, ackTick, NoServerTick);
+
+        /// <summary>Sentinel for "the caller did not tell us when the snapshot was produced".</summary>
+        private const long NoServerTick = long.MinValue;
+
+        /// <summary>
+        /// As <see cref="Reconcile(Vec2,long)"/>, plus the base tick the snapshot was
+        /// produced on — which is what lets the prediction lead survive an acknowledgement
+        /// that empties the pending buffer (#53).
+        /// </summary>
+        /// <param name="serverBaseTick">
+        /// The tick the authoritative position is FROM, in the same space as
+        /// <see cref="BaseTick"/>. <see cref="SeedBaseTick"/> puts the two clocks in one
+        /// space; without that seeding this value is meaningless and should not be passed.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// An overload rather than a changed signature: the two-argument form is a
+        /// cross-package contract enforced by <c>PredictionSurfaceContractTests</c> and
+        /// driven by <c>com.cuvara.dots</c>. Callers that cannot supply the tick keep
+        /// today's behaviour exactly, including today's defect.
+        /// </para>
+        /// <para>
+        /// <b>Why the tick is genuinely needed.</b> The obvious cheaper fix — anchoring the
+        /// replay to the acknowledged input's own base tick, which the predictor already
+        /// holds — was implemented and measured. It rebuilds the lead correctly and then
+        /// over-replays whenever the snapshot already includes the hold window, producing a
+        /// phantom correction as large as the defect: 3 steps where there was no lead at
+        /// all. The anchor supplies a start; only the snapshot's tick supplies the end.
+        /// </para>
+        /// </remarks>
+        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick)
         {
             if (!IsEnabled)
             {
@@ -731,6 +763,35 @@ namespace Cuvara.Netcode.Prediction
 
                     if (!stepped &&
                         ApplyHeld(ref replayed, t, heldFrom, heldX, heldY, ref replayLastMove))
+                    {
+                        ReplayedSteps++;
+                    }
+                }
+            }
+            else if (serverBaseTick != NoServerTick && serverBaseTick < _baseTick)
+            {
+                // Nothing outstanding, but the client has held its direction forward since the
+                // tick the snapshot was produced on. That motion is the prediction lead, and
+                // dropping it produced a backward pull at snapshot rate whose size tracked the
+                // acknowledgement interval rather than any disagreement (#53).
+                //
+                // Two things are deliberately NOT replayed here, and each is a measured
+                // failure of an earlier attempt:
+                //
+                //  - the acknowledged input's own step. The server applied it, which is what
+                //    "acknowledged" means, so it is already in `authoritative`.
+                //  - anything at or before `serverBaseTick`. The snapshot already includes it.
+                //    Anchoring to the acknowledged INPUT's tick instead of the snapshot's put
+                //    3 steps of phantom correction on a case with no lead at all.
+                //
+                // The held state is the live one, because no input has arrived since: these
+                // are exactly the ticks Advance integrated, replayed with the same guards so
+                // the hold window expires at the same place.
+                long replayLastMove = serverBaseTick;
+
+                for (long t = serverBaseTick + 1; t <= _baseTick; t++)
+                {
+                    if (ApplyHeld(ref replayed, t, _heldFrom, _heldX, _heldY, ref replayLastMove))
                     {
                         ReplayedSteps++;
                     }
