@@ -5,6 +5,45 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-08-22
+
+### Added
+
+- **Content pipeline client** (`Runtime/Content/`, sample `Samples~/ContentPipeline`).
+  Game content lives as JSON on the game server and is served over HTTP at `/content`, so a
+  content change reaches players through a server restart rather than a client build, a
+  `Shared.GameLogic` tag and a `packages-lock.json` bump (ADR-19). Until now the only channel
+  between the repos was a package pinned by exact commit — right for simulation rules, which
+  must change on both sides at once or prediction diverges, and fatal for content, whose
+  whole value is iteration speed.
+  - `ContentClient` caches **by hash, never by time**. Content does not expire; it changes
+    when a server restarts with different files, and the hash is how that is detected. A TTL
+    cache would either re-download unchanged content or serve content that had changed.
+  - Prefers `X-Content-Hash` over `ETag`: `UnityWebRequest` and several proxies rewrite or
+    strip `ETag`, and a client that cannot read back its own hash can never send `?hash=` —
+    so every launch silently re-downloads the full set while appearing to work.
+  - Treats a `304` arriving as a `UnityWebRequestException` as success. Unity raises any
+    non-2xx as a protocol error, so the successful steady-state answer would otherwise report
+    a content failure on every launch after the first.
+  - A `304` against an empty cache clears the stored hash rather than looping on a response
+    it cannot satisfy.
+  - `ContentJsonReader` builds the **same `Shared.GameLogic.Content` types the server
+    simulates against** and runs the **same validator**. The parser is per-side and the
+    schema is not — forced rather than preferred: Unity compiles `Shared.GameLogic` as source
+    and has no `System.Text.Json`, while the server is NativeAOT and cannot reflect.
+  - Client-side validation grants the client nothing: it answers "is this content coherent",
+    never "may this player have this item".
+- **`Samples~/ContentPipeline`** — a UXML scene listing every fetched item with a chip
+  reading NETWORK, CACHE or LOCAL. All three verified against a real server; the second run
+  reads CACHE, which is the 304 path working.
+
+### Changed
+
+- **CI pins `Shared.GameLogic` at `sgl-v0.2.2`**, up from `sgl-v0.1.9`. `Runtime/Content/`
+  compiles against `Shared.GameLogic.Content`, a namespace `0.1.9` does not have, so every
+  Unity job in this repo failed to compile until the pin moved — the package's own
+  `dependencies` do not name it, because it is supplied by the consuming project.
+
 ## [0.16.3] - 2026-08-20
 
 Test-harness only. No runtime assembly changed.

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="ContentPipelineView.uss" />
+
+    <engine:VisualElement name="content-probe" class="cuvara-probe">
+
+        <engine:Label text="Content pipeline" class="cuvara-probe__title" />
+        <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                      text="Fetches /content from a game server and lists what it got." />
+
+        <engine:VisualElement class="cuvara-probe__row">
+            <engine:Label text="Server" class="cuvara-probe__field-label" />
+            <engine:TextField name="server-url" class="cuvara-probe__url" />
+            <engine:Button name="fetch" text="Fetch" class="cuvara-probe__button" />
+            <engine:Button name="clear-cache" text="Clear cache"
+                           class="cuvara-probe__button cuvara-probe__button--secondary" />
+        </engine:VisualElement>
+
+        <engine:VisualElement class="cuvara-probe__row cuvara-probe__row--status">
+            <engine:Label name="source-chip" text="NONE" class="cuvara-probe__chip" />
+            <engine:Label name="status" class="cuvara-probe__status" text="idle" />
+        </engine:VisualElement>
+
+        <engine:Label name="summary" class="cuvara-probe__summary" text="0 items" />
+
+        <!-- ListView rather than a ScrollView of Labels: it recycles rows, so a content
+             set with thousands of items costs the same as one with eight. -->
+        <engine:ListView name="items"
+                         class="cuvara-probe__list"
+                         virtualization-method="DynamicHeight"
+                         show-alternating-row-backgrounds="None"
+                         selection-type="None" />
+
+    </engine:VisualElement>
+</engine:UXML>

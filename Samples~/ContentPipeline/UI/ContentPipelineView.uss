@@ -1,0 +1,125 @@
+/* Content pipeline probe.
+ *
+ * Class names carry the cuvara- prefix, matching the convention com.cuvara.uitoolkit
+ * enforces on its own exported classes: USS class names are public API, and a scene that
+ * invents an unprefixed name collides with whatever a host project already calls that.
+ */
+
+.cuvara-probe {
+    flex-grow: 1;
+    padding: 16px 18px;
+    background-color: rgb(24, 26, 31);
+}
+
+.cuvara-probe__title {
+    font-size: 20px;
+    -unity-font-style: bold;
+    color: rgb(233, 237, 243);
+    margin-bottom: 2px;
+}
+
+.cuvara-probe__subtitle {
+    font-size: 12px;
+    color: rgb(140, 152, 166);
+    margin-bottom: 14px;
+    white-space: normal;
+}
+
+.cuvara-probe__row {
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.cuvara-probe__row--status {
+    margin-bottom: 12px;
+}
+
+.cuvara-probe__field-label {
+    color: rgb(140, 152, 166);
+    font-size: 12px;
+    width: 52px;
+}
+
+.cuvara-probe__url {
+    width: 300px;
+    margin-right: 8px;
+}
+
+.cuvara-probe__button {
+    min-width: 84px;
+    height: 24px;
+    margin-right: 6px;
+}
+
+.cuvara-probe__button--secondary {
+    opacity: 0.75;
+}
+
+/* The chip is the point of the scene: it says whether the body crossed the wire or the
+ * server answered 304. Colour-coded so a glance is enough, with the text carrying the same
+ * information for anyone who cannot separate the hues. */
+.cuvara-probe__chip {
+    font-size: 10px;
+    -unity-font-style: bold;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 2px;
+    margin-right: 10px;
+    background-color: rgb(46, 50, 58);
+    color: rgb(160, 172, 186);
+}
+
+.cuvara-probe__chip--network {
+    background-color: rgb(58, 43, 18);
+    color: rgb(227, 166, 75);
+}
+
+.cuvara-probe__chip--cache {
+    background-color: rgb(16, 49, 47);
+    color: rgb(91, 189, 183);
+}
+
+.cuvara-probe__chip--local {
+    background-color: rgb(59, 27, 24);
+    color: rgb(232, 129, 122);
+}
+
+.cuvara-probe__status {
+    font-size: 12px;
+    color: rgb(176, 187, 199);
+    white-space: normal;
+    flex-shrink: 1;
+}
+
+.cuvara-probe__summary {
+    font-size: 13px;
+    -unity-font-style: bold;
+    color: rgb(233, 237, 243);
+    margin-bottom: 6px;
+}
+
+.cuvara-probe__list {
+    flex-grow: 1;
+    border-width: 1px;
+    border-color: rgb(46, 50, 58);
+    border-radius: 3px;
+}
+
+.cuvara-probe__item {
+    padding: 7px 10px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(38, 42, 50);
+}
+
+.cuvara-probe__item-name {
+    font-size: 13px;
+    color: rgb(233, 237, 243);
+    -unity-font-style: bold;
+}
+
+.cuvara-probe__item-detail {
+    font-size: 11px;
+    color: rgb(140, 152, 166);
+    white-space: normal;
+}
