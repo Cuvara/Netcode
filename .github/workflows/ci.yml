@@ -414,3 +414,77 @@ jobs:
             grep -rhoE "error CS[0-9]+: [^\"]{0,120}" $SCAN 2>/dev/null | sort -u | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
             grep -rhA3 "An error occurred while resolving packages:" $SCAN 2>/dev/null | head -20 | tee -a $GITHUB_STEP_SUMMARY || true
           fi
+
+  wire:
+    name: Generated Wire.cs matches the backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Diffs against the backend's COMMITTED generated file rather than running protoc
+      # here. Both repos generate from the same wire.proto with the same generator, so the
+      # two files are byte-identical by construction — this repo's copy and
+      # rpg-mmo-server's GameServer/Net/Generated/.../Wire.cs had md5 c77092611a6e7815 on
+      # both sides when this job was written.
+      #
+      # Regenerating instead would mean pinning protoc AND the C# plugin to the exact
+      # versions the backend used, because generated output moves between generator
+      # versions. That produces diffs which are not drift, and a gate that cries wolf gets
+      # switched off. Comparing the artefacts asks the question that actually matters: do
+      # the two sides decode the same wire?
+      - name: Fetch the backend's generated Wire.cs
+        env:
+          # develop is the backend's integration branch. Deliberately not a pinned ref: a
+          # schema change landing there SHOULD turn this red until this package regenerates.
+          # That is the drift the gate exists to catch, and pinning would hide it until
+          # someone remembered to move the pin — which is the failure mode of the stale
+          # copy itself.
+          UPSTREAM: https://raw.githubusercontent.com/Cuvara/rpg-mmo-server/develop/backend/gameserver-dotnet/GameServer/Net/Generated/RpgMmo/Wire/V1/Wire.cs
+        run: |
+          set -euo pipefail
+          curl -fsSL "${UPSTREAM}" -o /tmp/upstream-Wire.cs
+          echo "fetched $(wc -c < /tmp/upstream-Wire.cs) bytes"
+
+      - name: Compare
+        run: |
+          set -uo pipefail
+          MINE="Runtime/Protocol/Generated/Wire.cs"
+
+          if cmp -s "${MINE}" /tmp/upstream-Wire.cs; then
+            echo "::notice title=Wire.cs in sync::$(md5sum "${MINE}" | cut -d' ' -f1)"
+            {
+              echo "### Generated Wire.cs is in sync"
+              echo ""
+              echo "Byte-identical to the backend's copy."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # A stale copy DECODES CLEANLY: a field added to the schema since generation
+          # reads as its type default, with no exception and no failed test. Saying what
+          # differs is the whole value here — "they differ" would leave the reader to
+          # rediscover it.
+          {
+            echo "### Generated Wire.cs has drifted from the backend"
+            echo ""
+            echo "\`Runtime/Protocol/Generated/Wire.cs\` is not byte-identical to"
+            echo "\`rpg-mmo-server\`'s generated copy on \`develop\`."
+            echo ""
+            echo "A stale copy does not fail loudly. It decodes cleanly and reads any field"
+            echo "added since generation as that type's default — zero for a number, empty for"
+            echo "a string — so the symptom is a feature that looks wired up and silently does"
+            echo "nothing, with every test on both sides still passing."
+            echo ""
+            echo '```diff'
+            diff -u "${MINE}" /tmp/upstream-Wire.cs | head -60 || true
+            echo '```'
+            echo ""
+            echo "Fix: regenerate, or copy the backend's file over this one. Note protoc nests"
+            echo "output under the csharp_namespace, so a bare --csharp_out writes"
+            echo "\`Generated/RpgMmo/Wire/V1/Wire.cs\` and leaves the committed"
+            echo "\`Generated/Wire.cs\` untouched while reporting success."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error::Generated Wire.cs differs from the backend's copy — see the job summary."
+          exit 1
