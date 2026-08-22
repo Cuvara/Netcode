@@ -10,33 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Content pipeline client** (`Runtime/Content/`, sample `Samples~/ContentPipeline`).
-  Game content — item definitions today, more content types later — lives as JSON on the
-  game server and is served over HTTP at `/content`, so a content change reaches players
-  through a server restart rather than a client build, an `sgl-v` tag and a
-  `packages-lock.json` bump (ADR-19).
-  - `ContentClient` — fetches `/content` and caches **by hash, never by time**. Content does
-    not expire; it changes when a server restarts with different files, and the hash is how
-    that is detected. A TTL cache would either re-download unchanged content or serve
-    content that had changed.
-  - Prefers the `X-Content-Hash` header over `ETag`. `UnityWebRequest` and several proxies
-    rewrite or strip `ETag`, and a client that cannot read back its own hash can never send
-    `?hash=` — so every launch silently re-downloads the full set while appearing to work.
-  - Treats `304` arriving as a `UnityWebRequestException` as success. Unity raises any
-    non-2xx as a protocol error, so the successful steady-state answer would otherwise be
-    reported as a content failure on every launch after the first.
-  - Recovers from a `304` against an empty cache by clearing the stored hash, instead of
-    looping on a response it cannot satisfy.
-  - `ContentJsonReader` — parses with this package's own reader and builds the **same
-    `Shared.GameLogic.Content` types the server simulates against**, then runs the **same
-    validator**. The parser is per-side and the schema is not: Unity compiles
-    `Shared.GameLogic` as source and has no `System.Text.Json`, the server is NativeAOT and
-    cannot reflect, so no single parser satisfies both runtimes.
-  - Client-side validation grants the client nothing. It answers "is this content coherent",
-    never "may this player have this item" — the server still owns every gameplay decision.
+  Game content lives as JSON on the game server and is served over HTTP at `/content`, so a
+  content change reaches players through a server restart rather than a client build, a
+  `Shared.GameLogic` tag and a `packages-lock.json` bump (ADR-19). Until now the only channel
+  between the repos was a package pinned by exact commit — right for simulation rules, which
+  must change on both sides at once or prediction diverges, and fatal for content, whose
+  whole value is iteration speed.
+  - `ContentClient` caches **by hash, never by time**. Content does not expire; it changes
+    when a server restarts with different files, and the hash is how that is detected. A TTL
+    cache would either re-download unchanged content or serve content that had changed.
+  - Prefers `X-Content-Hash` over `ETag`: `UnityWebRequest` and several proxies rewrite or
+    strip `ETag`, and a client that cannot read back its own hash can never send `?hash=` —
+    so every launch silently re-downloads the full set while appearing to work.
+  - Treats a `304` arriving as a `UnityWebRequestException` as success. Unity raises any
+    non-2xx as a protocol error, so the successful steady-state answer would otherwise report
+    a content failure on every launch after the first.
+  - A `304` against an empty cache clears the stored hash rather than looping on a response
+    it cannot satisfy.
+  - `ContentJsonReader` builds the **same `Shared.GameLogic.Content` types the server
+    simulates against** and runs the **same validator**. The parser is per-side and the
+    schema is not — forced rather than preferred: Unity compiles `Shared.GameLogic` as source
+    and has no `System.Text.Json`, while the server is NativeAOT and cannot reflect.
+  - Client-side validation grants the client nothing: it answers "is this content coherent",
+    never "may this player have this item".
+- **`Samples~/ContentPipeline`** — a UXML scene listing every fetched item with a chip
+  reading NETWORK, CACHE or LOCAL. All three verified against a real server; the second run
+  reads CACHE, which is the 304 path working.
 
-- **`Samples~/ContentPipeline`** — a scene that fetches content and lists every item with a
-  chip reading NETWORK, CACHE or LOCAL. The second run reads **CACHE**, which is the 304
-  path working and is the thing the sample exists to show. Built in UXML/UI Toolkit.
+### Changed
+
+- **CI pins `Shared.GameLogic` at `sgl-v0.2.2`**, up from `sgl-v0.1.9`. `Runtime/Content/`
+  compiles against `Shared.GameLogic.Content`, a namespace `0.1.9` does not have, so every
+  Unity job in this repo failed to compile until the pin moved — the package's own
+  `dependencies` do not name it, because it is supplied by the consuming project.
 
 ## [0.16.3] - 2026-08-20
 
