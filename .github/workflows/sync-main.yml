@@ -141,9 +141,48 @@ jobs:
             echo "Reusing open PR #${EXISTING}"
             PR="${EXISTING}"
           else
-            gh pr create --base main --head "${BRANCH}" \
-              --title "chore: sync main to ${TAG}" --body "${BODY}"
-            PR=$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number')
+            # Creating a PR from Actions is gated by a repository/organisation
+            # setting ("Allow GitHub Actions to create and approve pull
+            # requests"), NOT by the token permissions this workflow declares.
+            # With it off, `gh pr create` fails with
+            #   GraphQL: GitHub Actions is not permitted to create or approve
+            #   pull requests
+            # no matter what `permissions:` says above.
+            #
+            # That is not a reason to fail the run. The branch is already
+            # pushed, which is the part only this workflow can do -- it is the
+            # one thing that goes stale if nobody runs it. Opening a PR from a
+            # branch that exists is thirty seconds of human work. Failing red
+            # here would mean a release tag looks broken because of a settings
+            # toggle, and a red run that is always red teaches people to ignore
+            # this workflow entirely.
+            #
+            # So: try, and if the refusal is that specific one, degrade to a
+            # notice that names the branch AND the setting to change. Any other
+            # error is a real failure and still fails the run.
+            CREATE_ERR=$(gh pr create --base main --head "${BRANCH}" \
+              --title "chore: sync main to ${TAG}" --body "${BODY}" 2>&1) || true
+
+            PR=$(gh pr list --base main --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')
+
+            if [ -z "${PR}" ]; then
+              if echo "${CREATE_ERR}" | grep -q "not permitted to create or approve pull requests"; then
+                {
+                  echo "### Branch pushed, PR not opened"
+                  echo ""
+                  echo "\`${BRANCH}\` is pushed and points at \`${TAG}\`. Open the PR against \`main\` by hand:"
+                  echo ""
+                  echo "    gh pr create --base main --head ${BRANCH} --title 'chore: sync main to ${TAG}'"
+                  echo ""
+                  echo "To let this run unattended, enable **Settings -> Actions -> General -> Allow GitHub Actions to create and approve pull requests**."
+                  echo "Note that toggle also permits Actions to *approve* pull requests, so it is a review-policy decision, not just a convenience."
+                } >> "$GITHUB_STEP_SUMMARY"
+                echo "::warning title=PR not opened::Actions may not create pull requests in this repository. Branch ${BRANCH} is pushed; open the PR by hand, or enable the setting named in the job summary."
+                exit 0
+              fi
+              echo "::error::Could not open the sync PR for ${TAG}: ${CREATE_ERR}"
+              exit 1
+            fi
           fi
 
           # Not a hard failure: if auto-merge is unavailable the PR still stands and a
