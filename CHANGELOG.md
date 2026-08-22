@@ -23,6 +23,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`IViewClock` — `WorldViewBinder`'s interpolation clock is injectable.** A third
+  constructor overload, `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock)`,
+  takes the time source remote interpolation is derived from; passing null (or using
+  either existing overload) gets `StopwatchViewClock`, which is the same self-starting
+  `Stopwatch` the binder has always held privately. **Nothing observable changes at
+  runtime** — no production call site passes a clock, and the default reads the same
+  `Stopwatch.Elapsed.TotalMilliseconds` from the same two places it always did.
+  - **Why it had to exist before anything else could be asserted.** The interpolation
+    factor is `(now − arrival) / measuredInterval`, so every property worth asserting
+    about the rendered motion — that it never steps backwards between frames, that a
+    skipped server tick does not double the rendered speed — is a property of the curve
+    *between* arrivals. With the clock private and self-starting, a test can only sample
+    the instant it happened to execute at, and immediately after handing the binder a
+    snapshot that instant is `t ≈ 0`: the one point on the curve where continuity is
+    trivially true no matter how discontinuous the curve is elsewhere. That is why the
+    existing interpolation tests assert `Is.LessThan(1f)` and nothing sharper, and their
+    own fixture remark says so.
+  - **Arrival time and frame time move independently through it**, which is the property
+    that matters, because the defect being characterised is precisely the relationship
+    between the two. The binder stamps an arrival with whatever the clock reads on the
+    pass carrying a new snapshot and computes the render phase with whatever it reads on
+    every other pass, so setting the clock before each `Tick` places arrivals and frames
+    at chosen, unrelated instants on one timeline. A single knob that advanced both
+    together would not have been enough.
+  - Shaped as a null-defaulting constructor overload rather than an `internal` field plus
+    `InternalsVisibleTo`, matching how the same class already takes its optional
+    `LocalMovePredictor`, and as an interface in its own file with its implementation
+    beside it, matching `INetLog`/`UnityNetLog`. `InternalsVisibleTo` appears nowhere in
+    this package and would have been a new convention imported for one field.
+
 - **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
   empties the pending buffer** (#53). The third argument is the base tick the snapshot was
   produced on.

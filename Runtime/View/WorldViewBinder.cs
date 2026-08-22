@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.World;
 using Shared.GameLogic.Components;
@@ -93,7 +92,7 @@ namespace Cuvara.Netcode.View
         private readonly List<string> _gone = new List<string>();
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
-        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly IViewClock _clock;
         private string _localId = string.Empty;
         private long _lastWorldTick;
         private double _lastSnapshotTimeMs;
@@ -111,7 +110,7 @@ namespace Cuvara.Netcode.View
         /// Binds a view with no prediction: the local entity renders at the newest
         /// received position.
         /// </summary>
-        public WorldViewBinder(IEntityView view) : this(view, null)
+        public WorldViewBinder(IEntityView view) : this(view, null, null)
         {
         }
 
@@ -159,9 +158,43 @@ namespace Cuvara.Netcode.View
         /// second-guess it with an approximation.
         /// </param>
         public WorldViewBinder(IEntityView view, LocalMovePredictor predictor)
+            : this(view, predictor, null)
+        {
+        }
+
+        /// <summary>
+        /// Binds a view, driving interpolation from a supplied <see cref="IViewClock"/>
+        /// instead of from a <see cref="StopwatchViewClock"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A test seam, not a runtime option.</b> Remote interpolation is a function of
+        /// time since arrival divided by the measured arrival interval, and every
+        /// interesting property of the rendered motion lives <i>between</i> arrivals.
+        /// With the clock fixed to a self-starting <c>Stopwatch</c>, a test can only
+        /// sample the instant it executed at — which, immediately after handing the binder
+        /// a snapshot, is <c>t ≈ 0</c>, the one point where continuity is trivially true.
+        /// That is why the existing interpolation tests assert <c>Is.LessThan(1f)</c> and
+        /// nothing sharper.
+        /// </para>
+        /// <para>
+        /// Callers in production pass nothing here and get the same
+        /// <c>Stopwatch</c> this class has always used. Supplying a clock does not
+        /// change what the binder computes, only where the numbers it computes from come
+        /// from.
+        /// </para>
+        /// </remarks>
+        /// <param name="clock">
+        /// Time source for interpolation, or null for <see cref="StopwatchViewClock"/>.
+        /// Null rather than an overload without the parameter for the same reason
+        /// <paramref name="predictor"/> accepts null: the default is applied in one place,
+        /// so no call site can construct a binder with no clock at all.
+        /// </param>
+        public WorldViewBinder(IEntityView view, LocalMovePredictor predictor, IViewClock clock)
         {
             _view = view;
             _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
+            _clock = clock ?? new StopwatchViewClock();
         }
 
         /// <summary>
@@ -234,7 +267,7 @@ namespace Cuvara.Netcode.View
 
             RelocalizeIfLocalIdChanged(localId);
 
-            double nowMs = _clock.Elapsed.TotalMilliseconds;
+            double nowMs = _clock.NowMs;
             bool newSnapshot = world.Tick > _lastWorldTick;
 
             // Measure actual snapshot interval from wall-clock arrivals
@@ -499,7 +532,7 @@ namespace Cuvara.Netcode.View
             // clock, stayed smooth throughout. "Only the player I control stutters" is the
             // signature of exactly this.
             _frameDriven = true;
-            _lastRenderMs = _clock.Elapsed.TotalMilliseconds;
+            _lastRenderMs = _clock.NowMs;
 
             var predicted = _predictor.Position;
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
