@@ -88,9 +88,28 @@ jobs:
 
           # Samples~ is invisible to Unity where it sits; importing a sample means
           # copying it under Assets/, which is exactly what the Package Manager does.
+          #
+          # Copy every sample package.json DECLARES rather than naming one here. The
+          # hardcoded list was already four samples stale: DemoBootstrap, WorldView,
+          # E2ECertification and ContentPipeline were all shipping with nothing
+          # compiling them, while this job reported success over samples it had never
+          # seen. A list maintained by hand goes stale silently — that is the failure
+          # mode issue #30 is about, and naming one sample here reproduces it one
+          # sample at a time.
           mkdir -p "Assets/Samples"
-          cp -r "package/Samples~/DOTSSample" "Assets/Samples/DOTSSample"
+          for rel in $(python3 -c "import json;[print(e['path']) for e in json.load(open('package/package.json')).get('samples',[])]"); do
+            cp -r "package/${rel}" "Assets/Samples/${rel##*/}"
+          done
+          echo "samples imported: $(ls Assets/Samples | tr '\n' ' ')"
 
+          # com.unity.modules.imageconversion is here for WorldView: its screenshot
+          # helper calls Texture2D.EncodeToPNG, an extension method that lives in that
+          # module. A real Unity project has it by default; this hand-written manifest
+          # does not, so the sample compiled everywhere except in this job. The gap only
+          # became visible once the job stopped compiling one sample and compiled all five.
+          #
+          # Note this block is JSON, not YAML — a '#' comment inside the heredoc below
+          # makes the manifest unparseable and Unity rejects the whole project.
           cat > Packages/manifest.json << 'JSON'
           {
             "dependencies": {
@@ -104,7 +123,8 @@ jobs:
               "com.unity.collections": "2.6.8",
               "com.unity.mathematics": "1.3.2",
               "com.unity.inputsystem": "1.18.0",
-              "com.unity.render-pipelines.universal": "17.3.0"
+              "com.unity.render-pipelines.universal": "17.3.0",
+              "com.unity.modules.imageconversion": "1.0.0"
             },
             "scopedRegistries": [
               {

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The samples job compiled one sample out of five** (#30). The gate added to close that
+  issue named `DOTSSample` directly, so `DemoBootstrap`, `WorldView`, `E2ECertification` and
+  `ContentPipeline` shipped with nothing compiling them while the job reported success over
+  samples it had never seen. It now copies every sample `package.json` declares.
+  A list maintained by hand goes stale silently, which is the exact failure #30 was opened
+  about — naming one sample in the fix reproduced it one sample at a time.
+  - Compiling all five immediately found a real break: **`WorldView` does not compile** in
+    the CI project. Its screenshot helper calls `Texture2D.EncodeToPNG`, an extension method
+    living in `com.unity.modules.imageconversion`, which a real Unity project has by default
+    and this job's hand-written manifest did not. The sample compiled everywhere except the
+    one place that was supposed to be checking it. Module added to the samples manifest.
+
 ### Added
 
 - **`sync-main.yml` — `main` now follows the release tag by itself.** Runs on a `v*` push and
