@@ -23,6 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
+  empties the pending buffer** (#53). The third argument is the base tick the snapshot was
+  produced on.
+  - An **overload, never a change**: the two-argument form is a cross-package contract
+    enforced by `PredictionSurfaceContractTests` and driven by `com.cuvara.dots`. Callers
+    that cannot supply the tick keep today's behaviour exactly, including today's defect,
+    and a test pins that.
+  - `WorldViewBinder` passes `world.Tick`, which it already had — it was feeding the same
+    value to `SeedBaseTick` one line above, so the two clocks were already in one space and
+    the plumbing was a single argument.
+  - **Why the tick is genuinely required.** The cheaper fix was implemented first and
+    measured: anchor the replay to the acknowledged input's own base tick, which the
+    predictor already holds, needing no new parameter. It rebuilds the lead correctly and
+    then over-replays whenever the snapshot already covers the hold window — **3 steps of
+    phantom correction on a case with no lead at all**. The anchor supplies a start; only
+    the snapshot's tick supplies the end. That attempt is not in any branch; the test that
+    rejected it is.
+  - Two things are deliberately not replayed, each an earlier attempt's measured failure:
+    the acknowledged input's own step (the server applied it, so it is in `authoritative`),
+    and anything at or before the snapshot's tick (the snapshot already includes it).
+
 - **`ReconcileLeadTests` — a harness that actually measures the prediction lead** (#53).
   The defect is unfixed; this is the instrument a fix can be judged with, which #53 says has
   to exist first.

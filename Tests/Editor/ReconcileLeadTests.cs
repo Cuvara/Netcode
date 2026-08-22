@@ -358,6 +358,85 @@ namespace Cuvara.Netcode.Tests.Editor
                 "failure that made the previous fixture worthless.");
         }
 
+        // ── The three-argument overload: the lead survives ────────────────────────────
+
+        /// <summary>
+        /// Given the tick the snapshot was produced on, an acknowledgement that empties the
+        /// buffer keeps the lead instead of discarding it.
+        /// </summary>
+        /// <remarks>
+        /// The same construction as
+        /// <see cref="EmptyBuffer_DiscardsTheLead_ScalingWithTheAcknowledgementInterval"/>,
+        /// differing only in which overload is called — so the pair isolates the parameter
+        /// rather than comparing two differently-built situations.
+        /// </remarks>
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        public void WithTheSnapshotTick_TheLeadSurvives(int leadTicks)
+        {
+            var p = Predictor();
+            var (authoritative, ackTick) = HoldPast(p, Inputs, leadTicks, 1f, 0f);
+
+            // The snapshot is from the tick the acknowledged input was applied on; the client
+            // has held forward for `leadTicks` since.
+            long serverBaseTick = p.BaseTick - leadTicks;
+
+            p.Reconcile(authoritative, ackTick, serverBaseTick);
+
+            Assert.That(p.PendingCount, Is.Zero, "precondition: the buffer must be empty");
+            Assert.That(p.ReplayedSteps, Is.EqualTo(leadTicks),
+                $"the {leadTicks} held tick(s) since the snapshot must be replayed");
+            Assert.That(CorrectionInSteps(p), Is.EqualTo(0f).Within(0.05f),
+                "with the lead rebuilt there is nothing to correct. A non-zero reading means " +
+                "the replay window is wrong at one end or the other — the two ways the " +
+                "earlier attempts failed.");
+        }
+
+        /// <summary>
+        /// With no lead, the overload changes nothing. This is the case that rejected the
+        /// cheaper fix, and it is here so a regression to that shape fails immediately.
+        /// </summary>
+        /// <remarks>
+        /// Anchoring the replay to the acknowledged input's base tick — available locally,
+        /// no parameter needed — rebuilt the lead correctly and then over-replayed whenever
+        /// the snapshot already covered the hold window, reading <b>2.99999 steps</b> here
+        /// where the answer is zero. The anchor gives a start; only the snapshot's tick
+        /// gives the end.
+        /// </remarks>
+        [Test]
+        public void WithTheSnapshotTick_ZeroLeadStillCorrectsByNothing()
+        {
+            var p = Predictor();
+            SendInputs(p, Inputs, 1f, 0f);
+
+            p.Reconcile(ServerAfter(Inputs, 1f, 0f), Inputs, p.BaseTick);
+
+            Assert.That(p.PendingCount, Is.Zero);
+            Assert.That(p.ReplayedSteps, Is.Zero,
+                "the snapshot is current, so there is nothing after it to replay");
+            Assert.That(CorrectionInSteps(p), Is.EqualTo(0f).Within(0.01f),
+                "no lead, no correction");
+        }
+
+        /// <summary>
+        /// The two-argument form is untouched, which is the contract
+        /// <c>com.cuvara.dots</c> depends on.
+        /// </summary>
+        [Test]
+        public void TheTwoArgumentFormIsUnchanged()
+        {
+            var withoutTick = Predictor();
+            var (authA, ackA) = HoldPast(withoutTick, Inputs, 3, 1f, 0f);
+            withoutTick.Reconcile(authA, ackA);
+
+            Assert.That(withoutTick.ReplayedSteps, Is.Zero,
+                "without the tick there is still no anchor, so the replay is still skipped");
+            Assert.That(CorrectionInSteps(withoutTick), Is.EqualTo(3).Within(0.25f),
+                "and the lead is still discarded — callers that cannot supply the tick keep " +
+                "today's behaviour exactly, including today's defect");
+        }
+
         /// <summary>
         /// The discarded lead is smoothed rather than snapped at these sizes, which is why the
         /// defect survived: it reads as ordinary netcode softness, not as a teleport.
