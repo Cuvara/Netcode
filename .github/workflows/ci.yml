@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop, main]
   pull_request:
-    branches: [main]
+    # develop is the integration branch: PRs land here, releases are tagged here,
+    # and the consuming client pins those tags. main is kept in the push list so a
+    # direct push to it is still built, but nothing targets it by default.
+    branches: [develop, main]
 
 permissions:
   contents: read
