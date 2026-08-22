@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using Cuvara.Netcode.Interpolation;
 using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.World;
 using Shared.GameLogic.Components;
@@ -28,17 +28,40 @@ namespace Cuvara.Netcode.View
     /// depend on it.
     /// </para>
     /// <para>
-    /// <b>Interpolation</b>: entity positions are interpolated between the two most
-    /// recent snapshot states so movement appears smooth at render frame rate instead
-    /// of teleporting every server tick (~66ms at 15 Hz). The interpolation factor is
-    /// derived from wall-clock time elapsed since the last snapshot, divided by the
-    /// measured snapshot interval. HP values are not interpolated — they snap to the
-    /// latest value.
+    /// <b>Interpolation</b>: remote entity positions are interpolated between buffered
+    /// snapshot states so movement appears smooth at render frame rate instead of
+    /// teleporting every server tick (~66 ms at 15 Hz). The math is not here — it lives in
+    /// <see cref="Cuvara.Netcode.Interpolation.SnapshotInterpolation"/>, which this class
+    /// calls and which the DOTS path calls from a Burst job, so there is one
+    /// implementation rather than two that drift. HP is never interpolated; it snaps,
+    /// because a half-applied hit is not a state the server was ever in.
     /// </para>
     /// <para>
-    /// <b>The local player is excluded from interpolation.</b> Interpolating between the
-    /// previous and the newest snapshot renders an entity behind the newest authoritative
-    /// position by up to one snapshot interval — deliberate for remote entities, whose
+    /// <b>The render moment comes from a free-running clock, not from the last arrival.</b>
+    /// <see cref="Cuvara.Netcode.Interpolation.InterpolationClock"/> holds a fractional
+    /// server tick that advances with real time and is steered — never snapped — toward
+    /// <see cref="Cuvara.Netcode.Interpolation.InterpolationConfig.TargetDelay"/> behind
+    /// the newest received tick. Samples are bracketed by their <i>tick</i>, so where an
+    /// entity is drawn is a function of what the server said and when, and not of when a
+    /// packet happened to arrive.
+    /// </para>
+    /// <para>
+    /// <b>This replaced a phase that restarted at zero on every arrival</b>, which is
+    /// worth recording because the symptoms were subtle and were being read as network
+    /// problems. A snapshot arriving a little early threw away the unrendered remainder of
+    /// the current segment, and the avatar lurched forward — measured at 4.3x a normal
+    /// frame's travel in one frame, on ordinary jitter with no packet loss. A late one ran
+    /// to a clamp, froze, and then stepped backwards by up to a fifth of a segment when
+    /// the snapshot landed, which reads as rubber-banding. And a single dropped snapshot
+    /// made an entity render at over 1.5x speed and then stall, because a doubled position
+    /// delta was divided by an arrival-interval average that had moved only 30 % of the
+    /// way. All three are covered by <c>RemoteInterpolationContinuityTests</c>.
+    /// </para>
+    /// <para>
+    /// <b>The local player is excluded from interpolation.</b> Rendering against a
+    /// deliberately delayed clock puts an entity behind the newest authoritative position
+    /// by <see cref="Cuvara.Netcode.Interpolation.InterpolationConfig.TargetDelay"/> —
+    /// deliberate for remote entities, whose
     /// smoothness is the entire reason this code exists, and indefensible for the one
     /// entity whose response delay the player is holding a key to feel. The local id is
     /// rendered at the newest received position instead.
@@ -48,9 +71,14 @@ namespace Cuvara.Netcode.View
     /// received position. It does not extrapolate. There is nothing honest to extrapolate
     /// from — the client does not simulate the local player, so a guess would be the
     /// binder inventing motion the server never confirmed, and it would have to be
-    /// visibly undone when the real snapshot lands. Remote entities still extrapolate up
-    /// to <c>t = 1.2</c>, because for them the alternative is a visible stall and the
+    /// visibly undone when the real snapshot lands. Remote entities may still carry
+    /// motion a little past the newest sample —
+    /// <see cref="Cuvara.Netcode.Interpolation.InterpolationConfig.MaxExtrapolation"/>,
+    /// 50 ms by default — because for them the alternative is a visible stall and the
     /// correction is somebody else's avatar drifting slightly, not the player's own.
+    /// Unlike the <c>t = 1.2</c> clamp this replaced, the carried distance is not stepped
+    /// back out when the snapshot arrives: the render clock is not reset by an arrival, so
+    /// the next segment absorbs it.
     /// </para>
     /// <para>
     /// <b>Excluding the local entity from interpolation is not prediction.</b> On its own
@@ -77,13 +105,21 @@ namespace Cuvara.Netcode.View
     /// </remarks>
     public sealed class WorldViewBinder
     {
-        /// <summary>Per-entity interpolation state: two most recent snapshot positions.</summary>
+        /// <summary>
+        /// Per-entity presentation state: the retained samples the shared interpolator
+        /// reads, plus the HP that is snapped rather than interpolated.
+        /// </summary>
+        /// <remarks>
+        /// This used to hold exactly two positions and a flag. Two is the fewest that can
+        /// be lerped between and one fewer than continuity needs: with only a pair, a
+        /// snapshot arriving early had nowhere to wait, so it displaced the segment being
+        /// rendered and the entity lurched. The ring lets an early arrival be buffered and
+        /// consumed when the render clock reaches it, which is what a jitter buffer is.
+        /// </remarks>
         private struct InterpEntry
         {
-            public float FromX, FromY;
-            public float ToX, ToY;
+            public EntitySampleRing Ring;
             public int Hp, MaxHp;
-            public bool HasFrom;
         }
 
         private readonly IEntityView _view;
@@ -93,10 +129,21 @@ namespace Cuvara.Netcode.View
         private readonly List<string> _gone = new List<string>();
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
-        private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+        /// <summary>
+        /// Rings of despawned entities, kept for the next spawn. Area-of-interest churn
+        /// makes spawn/despawn a steady-state event rather than a rare one, and a fresh
+        /// array per entry would put that churn on the garbage collector.
+        /// </summary>
+        private readonly Stack<EntitySampleRing> _ringPool = new Stack<EntitySampleRing>();
+
+        private readonly InterpolationConfig _interpConfig;
+        private InterpolationClock _interpClock;
+        private double _lastInterpAdvanceMs = -1.0;
+
+        private readonly IViewClock _clock;
         private string _localId = string.Empty;
         private long _lastWorldTick;
-        private double _lastSnapshotTimeMs;
         private double _lastRenderMs;
 
         /// <summary>Set once AdvanceFrame is driving the clock, which then owns it.</summary>
@@ -104,14 +151,12 @@ namespace Cuvara.Netcode.View
         private int _localHp;
         private int _localMaxHp;
         private bool _localSeen;
-        private double _snapshotIntervalMs = 1000.0 / 15.0; // default 15 Hz, refined from actual arrivals
-        private bool _firstSnapshot = true;
 
         /// <summary>
         /// Binds a view with no prediction: the local entity renders at the newest
         /// received position.
         /// </summary>
-        public WorldViewBinder(IEntityView view) : this(view, null)
+        public WorldViewBinder(IEntityView view) : this(view, null, null)
         {
         }
 
@@ -159,10 +204,81 @@ namespace Cuvara.Netcode.View
         /// second-guess it with an approximation.
         /// </param>
         public WorldViewBinder(IEntityView view, LocalMovePredictor predictor)
+            : this(view, predictor, null)
+        {
+        }
+
+        /// <summary>
+        /// Binds a view, driving interpolation from a supplied <see cref="IViewClock"/>
+        /// instead of from a <see cref="StopwatchViewClock"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A test seam, not a runtime option.</b> Remote interpolation is a function of
+        /// time since arrival divided by the measured arrival interval, and every
+        /// interesting property of the rendered motion lives <i>between</i> arrivals.
+        /// With the clock fixed to a self-starting <c>Stopwatch</c>, a test can only
+        /// sample the instant it executed at — which, immediately after handing the binder
+        /// a snapshot, is <c>t ≈ 0</c>, the one point where continuity is trivially true.
+        /// That is why the existing interpolation tests assert <c>Is.LessThan(1f)</c> and
+        /// nothing sharper.
+        /// </para>
+        /// <para>
+        /// Callers in production pass nothing here and get the same
+        /// <c>Stopwatch</c> this class has always used. Supplying a clock does not
+        /// change what the binder computes, only where the numbers it computes from come
+        /// from.
+        /// </para>
+        /// </remarks>
+        /// <param name="clock">
+        /// Time source for interpolation, or null for <see cref="StopwatchViewClock"/>.
+        /// Null rather than an overload without the parameter for the same reason
+        /// <paramref name="predictor"/> accepts null: the default is applied in one place,
+        /// so no call site can construct a binder with no clock at all.
+        /// </param>
+        public WorldViewBinder(IEntityView view, LocalMovePredictor predictor, IViewClock clock)
+            : this(view, predictor, clock, InterpolationConfig.Default)
+        {
+        }
+
+        /// <summary>
+        /// Binds a view with explicit interpolation tuning.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The defaults are what every other overload uses and what the package is tuned
+        /// for at a 15 Hz world rate; this exists so a deployment at a different rate, or
+        /// a test pinning an edge of the algorithm, can say so rather than discover it.
+        /// Any non-positive field is replaced by its default —
+        /// <c>default(InterpolationConfig)</c> is all zeroes, and a zero interval or ring
+        /// capacity would divide by zero or buffer nothing.
+        /// </para>
+        /// <para>
+        /// A struct rather than a <c>ScriptableObject</c> deliberately: stage 4 reads the
+        /// same type from a <c>[BurstCompile]</c> job, which cannot follow a managed asset
+        /// reference. Both paths configured by one type is the point.
+        /// </para>
+        /// </remarks>
+        public WorldViewBinder(IEntityView view, LocalMovePredictor predictor, IViewClock clock,
+                               InterpolationConfig interpolation)
         {
             _view = view;
             _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
+            _clock = clock ?? new StopwatchViewClock();
+            _interpConfig = interpolation.Normalized();
         }
+
+        /// <summary>
+        /// The interpolation tuning in force, after defaulting.
+        /// </summary>
+        public InterpolationConfig Interpolation => _interpConfig;
+
+        /// <summary>
+        /// The moment, in server ticks, remote entities are currently being rendered at.
+        /// Diagnostics: it should sit a little under
+        /// <see cref="InterpolationConfig.TargetDelay"/> behind the newest received tick.
+        /// </summary>
+        public double RenderTick => _interpClock.RenderTick;
 
         /// <summary>
         /// Whether the local entity is driven by prediction rather than by the newest
@@ -234,23 +350,12 @@ namespace Cuvara.Netcode.View
 
             RelocalizeIfLocalIdChanged(localId);
 
-            double nowMs = _clock.Elapsed.TotalMilliseconds;
+            double nowMs = _clock.NowMs;
+            double nowSeconds = nowMs / 1000.0;
             bool newSnapshot = world.Tick > _lastWorldTick;
 
-            // Measure actual snapshot interval from wall-clock arrivals
             if (newSnapshot)
             {
-                if (!_firstSnapshot)
-                {
-                    double measured = nowMs - _lastSnapshotTimeMs;
-                    // Exponential moving average (α = 0.3) to smooth jitter
-                    if (measured > 1.0 && measured < 500.0) // sanity bounds
-                    {
-                        _snapshotIntervalMs = _snapshotIntervalMs * 0.7 + measured * 0.3;
-                    }
-                }
-                _firstSnapshot = false;
-                _lastSnapshotTimeMs = nowMs;
                 _lastWorldTick = world.Tick;
 
                 // The tick carried here is a BASE tick, so its rate is the movement
@@ -262,18 +367,28 @@ namespace Cuvara.Netcode.View
                 // direction. Handing it to the predictor here means no consumer has to
                 // know the number, and none can configure it wrongly.
                 _predictor?.SetHoldTicks(TickRate.SnapshotTickGap);
+
+                // The same confirmed gap seeds the interpolation clock's
+                // seconds-per-tick. It was already being computed two lines above and
+                // handed to the predictor; the interpolator ignored it and measured
+                // arrival intervals instead, which is why a dropped snapshot changed the
+                // rendered speed. SnapshotTickGap is a MINIMUM and is only adopted after
+                // two sightings, so a drop never widens it.
+                _interpClock.NoteSnapshot(world.Tick, nowSeconds, TickRate.SnapshotTickGap, _interpConfig);
             }
 
-            // Compute interpolation factor: 0 = at "from", 1 = at "to"
-            // Allow slight extrapolation (up to 1.2) so a late snapshot doesn't
-            // cause a visible stall at t=1 — the entity keeps drifting in the
-            // same direction at reduced speed. Capped to prevent runaway drift.
-            double elapsed = nowMs - _lastSnapshotTimeMs;
-            float t = _snapshotIntervalMs > 0.0
-                ? (float)(elapsed / _snapshotIntervalMs)
-                : 1f;
-            if (t < 0f) t = 0f;
-            if (t > 1.2f) t = 1.2f;
+            // Advance the render timeline by real frame time. Tick is called once per
+            // rendered frame by a real client, so this delta is the frame time; a pass
+            // that carries a snapshot is still just a frame. Tracked separately from
+            // _lastRenderMs because that field belongs to the predictor's clock-ownership
+            // rule (see AdvanceFrame) and conflating the two is how the double-advance
+            // bug happened the first time.
+            if (_lastInterpAdvanceMs >= 0.0)
+            {
+                _interpClock.Advance((nowMs - _lastInterpAdvanceMs) / 1000.0, _interpConfig);
+            }
+
+            _lastInterpAdvanceMs = nowMs;
 
             foreach (var kv in world.Entities)
             {
@@ -367,48 +482,54 @@ namespace Cuvara.Netcode.View
 
                 if (newSnapshot)
                 {
-                    // Shift To → From, store new snapshot as To
-                    if (_interp.TryGetValue(id, out var prev))
+                    if (!_interp.TryGetValue(id, out var fresh))
                     {
-                        prev.FromX = prev.ToX;
-                        prev.FromY = prev.ToY;
-                        prev.ToX = e.X;
-                        prev.ToY = e.Y;
-                        prev.Hp = e.Hp;
-                        prev.MaxHp = e.MaxHp;
-                        prev.HasFrom = true;
-                        _interp[id] = prev;
+                        fresh = new InterpEntry { Ring = RentRing() };
                     }
-                    else
+
+                    // Rejected for a tick that is not strictly newer, which the
+                    // evaluator's bracketing must never see. Nothing is lost: a
+                    // superseded state is not worth rendering.
+                    fresh.Ring.TryPush(new InterpolationSample
                     {
-                        _interp[id] = new InterpEntry
-                        {
-                            FromX = e.X, FromY = e.Y,
-                            ToX = e.X, ToY = e.Y,
-                            Hp = e.Hp, MaxHp = e.MaxHp,
-                            HasFrom = false
-                        };
-                    }
+                        Tick = world.Tick,
+                        ReceiveTime = nowSeconds,
+                        X = e.X,
+                        Y = e.Y
+                    });
+
+                    // HP is snapped, never interpolated. A half-applied hit is not a
+                    // state the server ever occupied.
+                    fresh.Hp = e.Hp;
+                    fresh.MaxHp = e.MaxHp;
+                    _interp[id] = fresh;
                 }
 
-                // Interpolate position, snap HP
-                if (_interp.TryGetValue(id, out var entry))
+                if (_interp.TryGetValue(id, out var entry) && entry.Ring.Length > 0)
                 {
                     float ix, iy;
-                    // 'id != localId': the local player renders at the newest received
-                    // position, never behind it. See the class remarks — this is a render
-                    // delay removal, not prediction, and a late snapshot holds rather
-                    // than extrapolates.
-                    if (entry.HasFrom && !isLocal)
+
+                    // 'isLocal': the local player renders at the newest received position,
+                    // never behind it. See the class remarks — this is a render delay
+                    // removal, not prediction, and a late snapshot holds rather than
+                    // extrapolates. The jitter buffer is for entities whose smoothness is
+                    // worth a delay; the one the player is holding a key to move is not
+                    // one of them.
+                    if (isLocal)
                     {
-                        ix = entry.FromX + (entry.ToX - entry.FromX) * t;
-                        iy = entry.FromY + (entry.ToY - entry.FromY) * t;
+                        var newest = entry.Ring[entry.Ring.Length - 1];
+                        ix = newest.X;
+                        iy = newest.Y;
                     }
-                    else
+                    else if (!SnapshotInterpolation.Evaluate(
+                                 new EntitySampleBuffer(entry.Ring), _interpClock, _interpConfig,
+                                 out ix, out iy))
                     {
-                        ix = entry.ToX;
-                        iy = entry.ToY;
+                        var newest = entry.Ring[entry.Ring.Length - 1];
+                        ix = newest.X;
+                        iy = newest.Y;
                     }
+
                     _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
                 }
                 else
@@ -434,7 +555,7 @@ namespace Cuvara.Netcode.View
             {
                 var id = _gone[i];
                 _live.Remove(id);
-                _interp.Remove(id);
+                ReleaseRing(id);
                 _view.Despawn(id);
 
                 if (_explicitlyRemoved.Remove(id))
@@ -499,7 +620,7 @@ namespace Cuvara.Netcode.View
             // clock, stayed smooth throughout. "Only the player I control stutters" is the
             // signature of exactly this.
             _frameDriven = true;
-            _lastRenderMs = _clock.Elapsed.TotalMilliseconds;
+            _lastRenderMs = _clock.NowMs;
 
             var predicted = _predictor.Position;
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
@@ -515,7 +636,14 @@ namespace Cuvara.Netcode.View
             }
 
             _live.Clear();
+            foreach (var kv in _interp)
+            {
+                Recycle(kv.Value.Ring);
+            }
+
             _interp.Clear();
+            _interpClock.Reset();
+            _lastInterpAdvanceMs = -1.0;
             _explicitlyRemoved.Clear();
             _predictor?.Reset();
             TickRate.Reset();
@@ -523,7 +651,6 @@ namespace Cuvara.Netcode.View
             _localHp = 0;
             _localMaxHp = 0;
             _localSeen = false;
-            _firstSnapshot = true;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
@@ -585,6 +712,40 @@ namespace Cuvara.Netcode.View
         /// Drops one id from the presentation so the next pass treats it as new. No-op for
         /// an id that is not currently presented.
         /// </summary>
+        /// <summary>A ring from the pool, or a new one when the pool is dry.</summary>
+        private EntitySampleRing RentRing()
+        {
+            return _ringPool.Count > 0
+                ? _ringPool.Pop()
+                : new EntitySampleRing(_interpConfig.RingCapacity);
+        }
+
+        /// <summary>Drops an entity's interpolation state and keeps its ring for reuse.</summary>
+        private void ReleaseRing(string id)
+        {
+            if (_interp.TryGetValue(id, out var entry))
+            {
+                Recycle(entry.Ring);
+                _interp.Remove(id);
+            }
+        }
+
+        /// <summary>
+        /// Returns a ring to the pool, emptied. Emptying matters: a reused ring still
+        /// holding the previous entity's samples would interpolate a newly spawned entity
+        /// from wherever the last one stood.
+        /// </summary>
+        private void Recycle(EntitySampleRing ring)
+        {
+            if (ring == null)
+            {
+                return;
+            }
+
+            ring.Clear();
+            _ringPool.Push(ring);
+        }
+
         private void Forget(string id)
         {
             if (string.IsNullOrEmpty(id) || !_live.Remove(id))
@@ -592,7 +753,7 @@ namespace Cuvara.Netcode.View
                 return;
             }
 
-            _interp.Remove(id);
+            ReleaseRing(id);
             _view.Despawn(id);
             Relocalizations++;
         }

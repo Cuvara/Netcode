@@ -7,9 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-22
+
 ## [0.18.0] - 2026-08-22
 
 ### Fixed
+
+- **Remote entities no longer pop, stall or sprint when a snapshot is early, late or
+  dropped.** `WorldViewBinder` now renders them through the shared interpolation core
+  instead of its own arrival-phase arithmetic. Three separate visible defects, all of them
+  the same root cause and all of them previously invisible to the test suite, which
+  asserted only `Is.LessThan(1f)` at the instant a snapshot landed.
+  - **What a player saw before.** *Early arrival:* the avatar **lurched forward** — the
+    unrendered remainder of the current segment was discarded when the phase restarted at
+    zero, measured at **4.3x a normal frame's travel in a single frame**, on ordinary
+    jitter with **no packet loss required**. Note the direction: forward, not backward. A
+    test asserting only "never moves backwards" passes on the old code in this case, which
+    is how it stayed uncovered. *Late arrival:* the phase ran to the `t <= 1.2` clamp, the
+    entity **froze for two frames and then stepped backwards 0.2 units** — the extrapolated
+    fifth of a segment being undone rather than absorbed. That is what rubber-banding is.
+    *One dropped snapshot:* the entity rendered at **1.54x speed (23.1 units/s against
+    15.0) and then stalled**, though the server never changed its speed — it covered two
+    units in two ticks as always.
+  - **What a player sees now**, measured on the same three streams: a maximum single-frame
+    step of **1.15x the median** on the early arrival (against an assertion bound of 2.5x),
+    **1.06x** on the late one, **no backward step anywhere in any of the three**, and a
+    skipped tick rendering at **1.008x** its ordinary speed. The perfectly periodic control
+    stream is unchanged at 1.06x against its tighter 1.5x bound.
+  - **The mechanism, not the symptom.** The interpolation factor used to be
+    `(now - arrivalTime) / measuredArrivalInterval`, with the arrival stamped and the
+    factor read in the same `Tick` call — so it was exactly zero on every arriving
+    snapshot, whatever the previous frame had drawn. Where an entity was drawn was
+    therefore a function of when a packet arrived. It now comes from a free-running clock
+    that an arrival does not reset, samples are bracketed by their tick rather than by
+    time since arrival, and the interval is estimated per tick rather than per snapshot.
+    None of the three defects can recur by construction rather than by care.
+  - **The two-sample pair became an 8-deep ring**, which is what lets an early snapshot
+    *wait* instead of displacing the segment being rendered. Rings are pooled across
+    despawns: area-of-interest churn makes spawn and despawn steady-state events here, and
+    a fresh array per entry would hand that churn to the garbage collector. The per-frame
+    render path allocates **zero bytes**, measured — byte-for-byte identical to before this
+    change, including the one pre-existing 88 B/frame allocation that comes from
+    `foreach`-ing `WorldState.Entities`, an `IReadOnlyDictionary` whose enumerator boxes.
+    That one is untouched and is not new; fixing it means changing `WorldState`'s public
+    surface, which is a separate change.
+  - **Remote entities now render 100 ms behind the newest received tick** (about 1.5
+    snapshot intervals) where they previously ran one interval behind with no margin at
+    all — which is precisely why they extrapolated and popped. **The local player pays
+    none of it**: it is excluded from interpolation entirely and still renders at the
+    newest received position, or at the predicted one when a `LocalMovePredictor` is
+    supplied. Nothing about prediction, reconciliation or the `AdvanceFrame` clock-
+    ownership rule changed.
+  - `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock, InterpolationConfig)` is
+    a new overload for a deployment at a different world rate; every existing overload
+    keeps the defaults and every existing call site compiles unchanged. `RenderTick` is
+    exposed for diagnostics — it should sit a little under `TargetDelay` behind the newest
+    received tick, and a value drifting away from that is the shape of a rate-estimate
+    problem.
 
 - **The samples job compiled one sample out of five** (#30). The gate added to close that
   issue named `DOTSSample` directly, so `DemoBootstrap`, `WorldView`, `E2ECertification` and
@@ -24,6 +78,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     one place that was supposed to be checking it. Module added to the samples manifest.
 
 ### Added
+
+- **A shared snapshot-interpolation core in `Runtime/Interpolation/` — no Unity types, no
+  ECS types, no allocation, no managed fields.** `InterpolationSample`,
+  `InterpolationConfig`, `InterpolationClock`, `ISampleBuffer`, `InterpolationRing` and
+  the static `SnapshotInterpolation`. Nothing consumes it in this entry; it is added
+  first, tested first, and wired in separately, so the swap can be reviewed as a swap.
+  - **Extracted rather than fixed in place, because a second copy is the real risk.** The
+    math has lived exactly once, in `WorldViewBinder`, and the DOTS path consumes its
+    output through `IEntityView.SetState` rather than reimplementing it. Fixing it inside
+    the binder would have kept that true only until the ECS path needed to evaluate at
+    frame rate in a job, at which point there would have been two implementations of a
+    thing whose entire job is that the client and the renderer agree. `Evaluate` is
+    generic over `where TBuffer : struct, ISampleBuffer` precisely so Burst can specialise
+    it per concrete buffer: the GameObject path passes a struct over a pooled array, the
+    ECS path will pass a struct over a `DynamicBuffer`, and neither boxes.
+  - **The render moment is a fractional server tick, not a phase between two samples.**
+    `InterpolationClock.RenderTick` advances with real frame time and is steered toward
+    `NewestTick - TargetDelay / SecondsPerTick` by running slightly fast or slightly slow,
+    capped at 10 %. It is never snapped. The rate is `1 + adjust` and is floored above
+    zero whatever the config says, so `RenderTick` is **strictly increasing for any
+    positive frame delta** — which is what turns "a remote entity never steps backwards
+    between two frames" from a hope into a property of the design, because the rendered
+    position is a monotonic function of a monotonic clock along a fixed path.
+  - **The target is built from a tick number, so arrival jitter cannot move it.** A tick
+    is an exact integer off the wire. The cost is that the effective delay settles about
+    half a tick beyond `TargetDelay`, since the target steps on arrivals while the clock
+    runs continuously; 33 ms at 15 Hz, and worth paying for a target nothing can jitter.
+  - **Seconds-per-tick, not seconds-per-snapshot.** The estimate is an EMA of
+    `arrivalGap / tickGap`, seeded from `TickRateEstimator.SnapshotTickGap` — which was
+    already being computed and handed to the predictor two lines away, and which the
+    interpolator ignored. Because a dropped snapshot carries a proportionally larger tick
+    delta, the ratio does not move. The first real measurement replaces the seed outright
+    rather than being smoothed into it, so a join at a rate the seed guessed wrong does
+    not render at the wrong speed for several seconds.
+  - **Every magic number is now a named field with a stated reason.** `TargetDelay`
+    100 ms (~1.5 intervals at 15 Hz: one interval is the minimum that can work at all,
+    the extra half is jitter margin sized against the measured 8-13 ms RTT spread plus
+    ±16 ms of scheduling jitter on a 60 Hz client); `MaxExtrapolation` 50 ms replacing the
+    bare `t <= 1.2`; `RingCapacity` 8, ~0.53 s of history and the size that keeps a DOTS
+    `DynamicBuffer` in chunk memory. `default(InterpolationConfig)` is all zeroes, so
+    `Normalized()` fills any non-positive field from the defaults — except
+    `MaxExtrapolation`, where zero is a deliberate "never extrapolate" and defaulting it
+    would silently overrule a deployment that asked for no guessing.
+  - **24 tests in `Tests/Editor/InterpolationCoreTests.cs`** pin the edges the four
+    continuity tests cannot reach, because those are integration-level and would cover a
+    single-sample buffer or a ring wrap only by accident: clock seeding and catch-up
+    bounds, strict monotonicity under sustained maximum error, out-of-order rejection,
+    empty and single-sample buffers, bracketing inside a deep buffer, the two-tick segment,
+    the extrapolation cap and its disable, ring wraparound and ordering across several
+    wraps, duplicate-tick refusal, and reuse after `Clear`.
+
+- **`IViewClock` — `WorldViewBinder`'s interpolation clock is injectable.** A third
+  constructor overload, `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock)`,
+  takes the time source remote interpolation is derived from; passing null (or using
+  either existing overload) gets `StopwatchViewClock`, which is the same self-starting
+  `Stopwatch` the binder has always held privately. **Nothing observable changes at
+  runtime** — no production call site passes a clock, and the default reads the same
+  `Stopwatch.Elapsed.TotalMilliseconds` from the same two places it always did.
+  - **Why it had to exist before anything else could be asserted.** The interpolation
+    factor is `(now − arrival) / measuredInterval`, so every property worth asserting
+    about the rendered motion — that it never steps backwards between frames, that a
+    skipped server tick does not double the rendered speed — is a property of the curve
+    *between* arrivals. With the clock private and self-starting, a test can only sample
+    the instant it happened to execute at, and immediately after handing the binder a
+    snapshot that instant is `t ≈ 0`: the one point on the curve where continuity is
+    trivially true no matter how discontinuous the curve is elsewhere. That is why the
+    existing interpolation tests assert `Is.LessThan(1f)` and nothing sharper, and their
+    own fixture remark says so.
+  - **Arrival time and frame time move independently through it**, which is the property
+    that matters, because the defect being characterised is precisely the relationship
+    between the two. The binder stamps an arrival with whatever the clock reads on the
+    pass carrying a new snapshot and computes the render phase with whatever it reads on
+    every other pass, so setting the clock before each `Tick` places arrivals and frames
+    at chosen, unrelated instants on one timeline. A single knob that advanced both
+    together would not have been enough.
+  - Shaped as a null-defaulting constructor overload rather than an `internal` field plus
+    `InternalsVisibleTo`, matching how the same class already takes its optional
+    `LocalMovePredictor`, and as an interface in its own file with its implementation
+    beside it, matching `INetLog`/`UnityNetLog`. `InternalsVisibleTo` appears nowhere in
+    this package and would have been a new convention imported for one field.
+
+- **`RemoteInterpolationContinuityTests` — four tests that characterise remote
+  interpolation as a curve rather than as a point.** One remote entity travelling in a
+  straight line at a constant server speed, arrivals at the package's own 15 Hz and frames
+  every 5 ms, driven through the new `IViewClock` so arrival time and frame time are placed
+  independently. Each test asserts on the *frame-to-frame* displacement — its sign, its
+  size relative to the median step, and the rendered speed across an interval — never on an
+  absolute coordinate, because a coordinate cannot distinguish smooth motion from motion
+  that arrived by lurching.
+  - **Three of them fail on the current implementation, deliberately, and are committed
+    failing.** A suite that went straight from "does not exist" to "green" would never have
+    shown anyone the defect it was written for. They are not `[Ignore]`d: a test that proves
+    a defect has to run and be seen failing, and each carries a comment naming the specific
+    production line it fails at and the free-running render clock that will make it pass.
+  - **`APerfectlyPeriodicStreamRendersSmoothly` is the control and passes today.** Without
+    it a failing suite is indistinguishable from a broken harness — if the clock seam, the
+    frame pump or the sampling were wrong, everything would fail and the three failures
+    would prove nothing. It is held to a tighter bound (1.5x the median step, against 2.5x
+    for the others) because on a stream with no jitter the only irregularity left is the
+    frame that straddles an arrival, 5 ms not dividing 66.7 ms evenly.
+  - **The early-arrival case lurches FORWARD, and the test had to be written for that
+    rather than for the backward pop it was expected to show.** When a snapshot lands, the
+    interpolator shifts `From = To` and restarts the phase at 0, so it renders the *older
+    endpoint of the new pair* — which is ahead of wherever the previous frame had
+    interpolated to. Measured: a single frame moving **4.3x the median step** when the
+    snapshot arrives 16.7 ms early, with **no backward step anywhere in the run**. A test
+    asserting only "never moves backwards" — the obvious shape, and the one the defect
+    report called for — would therefore have **passed** here and left the real
+    early-arrival discontinuity uncovered. Both bounds are asserted for that reason.
+  - **The backward pop belongs to the late-arrival case**, where `t` runs to the `1.2`
+    extrapolation cap, the entity freezes, and the arriving snapshot then undoes the
+    extrapolated distance instead of absorbing it: measured at **0.2 units backwards after
+    2 stalled frames**, ~2.7x the median forward step. Stall-then-jump is what a player
+    reads as rubber-banding, and it is bounded by the cap rather than by how late the
+    snapshot was.
+  - **A skipped server tick renders at 1.54x speed**, measured. The entity never changed
+    speed — two units in two ticks is the same one unit per tick as always — but the binder
+    divides a doubled position delta by an interval its EMA has moved only 30 % of the way
+    (66.7 ms to ~86.7 ms), so a dropped packet reads on screen as sprinting and then
+    freezing. Asserted on the mean over the affected interval, which is the stable
+    statistic; the instantaneous peak is worse and is what is actually visible.
 
 - **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
   empties the pending buffer** (#53). The third argument is the base tick the snapshot was
