@@ -883,6 +883,14 @@ namespace DOTSSample
         private int _lastSmoothed;
         private int _lastReconciles;
         private float _healthWindowStart;
+
+        // Two clocks over the same window. The netcode reads Stopwatch (StopwatchViewClock);
+        // this health line reads Time.realtimeSinceStartup. A snapshot rate that looks low
+        // is either frames that did not arrive or a second that is not a second, and only
+        // measuring both separates them.
+        private readonly System.Diagnostics.Stopwatch _healthStopwatch =
+            System.Diagnostics.Stopwatch.StartNew();
+        private double _healthStopwatchMark;
         private int _healthFrames;
         private int _snapshotsApplied;
         private int _lastSnapshotsApplied;
@@ -899,6 +907,10 @@ namespace DOTSSample
 
             float window = Mathf.Max(1e-3f, Time.realtimeSinceStartup - _healthWindowStart);
             _healthWindowStart = Time.realtimeSinceStartup;
+
+            double swNow = _healthStopwatch.Elapsed.TotalSeconds;
+            double swWindow = swNow - _healthStopwatchMark;
+            _healthStopwatchMark = swNow;
             float fps = _healthFrames / window;
             float appliedPerSec = (_snapshotsApplied - _lastSnapshotsApplied) / window;
             long framesRx = _client.Session?.FramesReceived ?? 0L;
@@ -938,6 +950,8 @@ namespace DOTSSample
                 $"staleness={_binder.Staleness.StalenessTicks:F2}t " +
                 $"skew={_binder.Staleness.SkewPpm:F0}ppm " +
                 $"baseline={_binder.Staleness.BaselineSeconds:F0}s " +
+                $"unityWin={window:F3}s swWin={swWindow:F3}s " +
+                $"clockRatio={(swWindow > 0 ? window / swWindow : 0):F4} " +
                 $"fits={_binder.Staleness.Fits}");
         }
 

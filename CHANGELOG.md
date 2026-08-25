@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (diagnostics)
+
+- **The health line measures both clocks over the same window.** A snapshot rate that reads
+  low is either frames that did not arrive or a second that is not a second, and only
+  measuring both separates them. `unityWin` (`Time.realtimeSinceStartup`) against `swWin`
+  (`System.Diagnostics.Stopwatch`, which is what the netcode itself reads) settled it in one
+  run: `clockRatio=1.0000` over five seconds against `framesRx=13.8/s` from a server proven to
+  send 15.000/s. The seconds are real and the frames are genuinely missing — see #49.
+
+
 ### Changed (sample)
 
 - **The DOTS sample stops logging once a second for the lifetime of the client.** An
