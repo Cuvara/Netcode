@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (sample)
+
+- **The DOTS sample stops logging once a second for the lifetime of the client.** An
+  `[Debug] AttackRequest count:` line fired every second unconditionally, and every consumed
+  attack request logged as well. Both are kept — they were clearly useful once — behind a new
+  `verboseLogging` inspector flag, off by default. The timer itself now ticks only when the
+  flag is on.
+
+- **The three Nakama pollers back off and stop repeating themselves.** `PollLeaderboardAsync`,
+  `PollEconomyAsync` and `PollServerStatusAsync` each looped at a fixed cadence forever. Against
+  a backend where the leaderboard has not been created that is a 404 and a warning every ten
+  seconds for the whole session; against a backend that is simply down it is two HTTP requests
+  every `statusPollInterval` with nothing to draw either way.
+
+  One shared `PollBackoff` helper now doubles the interval per consecutive failure to a 60 s
+  ceiling and resets on the first success. The log reports **state changes**: one line when a
+  poll starts failing, one when it recovers carrying the failure count, and nothing in between.
+  A poll that has been failing for ten minutes used to produce sixty identical warnings, which
+  is the shape that hides a real change — see #48, where a token expiring at T+60 s was
+  invisible inside exactly that noise. Per-poll response and body logs move behind
+  `verboseLogging`. The on-screen error panels are untouched.
+
+
 ## [0.20.0] - 2026-08-25
 
 ### Added

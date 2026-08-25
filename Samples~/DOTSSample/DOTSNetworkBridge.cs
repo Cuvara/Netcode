@@ -178,6 +178,13 @@ namespace DOTSSample
                  "two or more draw the map selector and wait for a click.")]
         [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
 
+        [Header("Diagnostics")]
+        [Tooltip("Per-frame attack bridge counters and per-poll HTTP responses. Off by " +
+                 "default: the attack counter alone fired once a second for the whole " +
+                 "session, and it only says anything while the attack path or a Nakama " +
+                 "endpoint is actually under investigation.")]
+        [SerializeField] private bool verboseLogging = false;
+
         private GUIStyle _serverPanelStyle;
         private GUIStyle _mapButtonStyle;
 
@@ -786,11 +793,14 @@ namespace DOTSSample
 
                 int attackCount = _attackRequestQuery.CalculateEntityCount();
 
-                _attackDebugTimer -= Time.deltaTime;
-                if (_attackDebugTimer <= 0f)
+                if (verboseLogging)
                 {
-                    _attackDebugTimer = 1f;
-                    Debug.Log($"[Debug] AttackRequest count: {attackCount}, pending: '{_pendingAttackTarget}'");
+                    _attackDebugTimer -= Time.deltaTime;
+                    if (_attackDebugTimer <= 0f)
+                    {
+                        _attackDebugTimer = 1f;
+                        Debug.Log($"[Debug] AttackRequest count: {attackCount}, pending: '{_pendingAttackTarget}'");
+                    }
                 }
 
                 if (attackCount > 0)
@@ -800,7 +810,8 @@ namespace DOTSSample
                     {
                         var req = dotsWorld.EntityManager.GetComponentData<AttackRequest>(entities[i]);
                         var targetId = req.TargetId.ToString();
-                        Debug.Log($"[Debug] AttackRequest consumed: '{targetId}'");
+                        if (verboseLogging)
+                            Debug.Log($"[Debug] AttackRequest consumed: '{targetId}'");
                         if (!string.IsNullOrEmpty(targetId))
                             _pendingAttackTarget = targetId;
                         dotsWorld.EntityManager.DestroyEntity(entities[i]);
@@ -1047,6 +1058,8 @@ namespace DOTSSample
             await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
                 PlayerLoopTiming.Update, ct);
 
+            var backoff = new PollBackoff("ServerStatus", statusPollInterval);
+
             while (!ct.IsCancellationRequested)
             {
                 // Poll Nakama health
@@ -1093,7 +1106,16 @@ namespace DOTSSample
                     _gameServerOk = false;
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(statusPollInterval),
+                // Both URLs answer from the same local backend stack, so they are one
+                // health signal here: with neither of them up the panel has nothing new
+                // to draw, and asking every statusPollInterval only fills the log of
+                // whichever layer times out first.
+                if (_nakamaOk || _gameServerOk)
+                    backoff.OnSuccess();
+                else
+                    backoff.OnFailure("Nakama and game server both unreachable");
+
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds),
                     DelayType.Realtime, PlayerLoopTiming.Update, ct);
             }
         }
@@ -1157,8 +1179,57 @@ namespace DOTSSample
                     : "  (no data)");
         }
 
+        // Cadence and log volume for one background poll loop. Motivated by a backend
+        // whose leaderboard had never been created: every poll answered 404, so the
+        // loop produced one warning every 10s and kept asking at full rate for the
+        // entire session. Failures widen the interval instead, and only the edges
+        // (first failure, recovery) reach the log.
+        private sealed class PollBackoff
+        {
+            private const float MaxIntervalSeconds = 60f;
+
+            private readonly string _tag;
+            private readonly float _baseInterval;
+            private float _interval;
+            private int _consecutiveFailures;
+
+            public PollBackoff(string tag, float baseInterval)
+            {
+                _tag = tag;
+                _baseInterval = baseInterval;
+                _interval = baseInterval;
+            }
+
+            public float IntervalSeconds => _interval;
+
+            public void OnSuccess()
+            {
+                if (_consecutiveFailures > 0)
+                {
+                    Debug.Log($"[{_tag}] Recovered after {_consecutiveFailures} failed poll(s)");
+                    _consecutiveFailures = 0;
+                }
+
+                _interval = _baseInterval;
+            }
+
+            public void OnFailure(string reason)
+            {
+                _consecutiveFailures++;
+                if (_consecutiveFailures == 1)
+                {
+                    Debug.LogWarning(
+                        $"[{_tag}] Poll failing: {reason} — backing off, silent until it recovers");
+                }
+
+                _interval = Mathf.Min(_interval * 2f, MaxIntervalSeconds);
+            }
+        }
+
         private async UniTaskVoid PollEconomyAsync(CancellationToken ct)
         {
+            var backoff = new PollBackoff("Economy", 5f);
+
             while (!ct.IsCancellationRequested)
             {
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
@@ -1184,20 +1255,22 @@ namespace DOTSSample
                                 var wallet = JsonUtility.FromJson<WalletData>(account.wallet);
                                 _goldServer = wallet.gold;
                             }
+
+                            backoff.OnSuccess();
                         }
                         else
                         {
-                            Debug.LogWarning($"[Economy] Poll failed: {req.responseCode} {req.error}");
+                            backoff.OnFailure($"{req.responseCode} {req.error}");
                         }
                     }
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[Economy] Poll exception: {ex.Message}");
+                    backoff.OnFailure(ex.Message);
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(5), DelayType.Realtime,
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds), DelayType.Realtime,
                     PlayerLoopTiming.Update, ct);
             }
         }
@@ -1208,11 +1281,14 @@ namespace DOTSSample
             await UniTask.Delay(TimeSpan.FromSeconds(1), DelayType.Realtime,
                 PlayerLoopTiming.Update, ct);
 
+            var backoff = new PollBackoff("Leaderboard", 10f);
+
             while (!ct.IsCancellationRequested)
             {
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
                 {
-                    Debug.LogWarning("[Leaderboard] No session token yet, skipping poll");
+                    if (verboseLogging)
+                        Debug.LogWarning("[Leaderboard] No session token yet, skipping poll");
                     await UniTask.Delay(TimeSpan.FromSeconds(3), DelayType.Realtime,
                         PlayerLoopTiming.Update, ct);
                     continue;
@@ -1227,12 +1303,14 @@ namespace DOTSSample
                         req.SetRequestHeader("Authorization", "Bearer " + _nakamaSessionToken);
                         await req.SendWebRequest().ToUniTask(cancellationToken: ct);
 
-                        Debug.Log($"[Leaderboard] Poll response: {req.responseCode} result={req.result}");
+                        if (verboseLogging)
+                            Debug.Log($"[Leaderboard] Poll response: {req.responseCode} result={req.result}");
 
                         if (req.result == UnityWebRequest.Result.Success)
                         {
                             var raw = req.downloadHandler.text;
-                            Debug.Log($"[Leaderboard] Body: {(raw.Length > 200 ? raw.Substring(0, 200) : raw)}");
+                            if (verboseLogging)
+                                Debug.Log($"[Leaderboard] Body: {(raw.Length > 200 ? raw.Substring(0, 200) : raw)}");
                             if (raw != _prevLeaderboardRaw)
                             {
                                 _prevLeaderboardRaw = raw;
@@ -1240,10 +1318,12 @@ namespace DOTSSample
                                 _leaderboardRecords = response.records ?? Array.Empty<LeaderboardRecord>();
                                 RebuildLeaderboardPanel();
                             }
+
+                            backoff.OnSuccess();
                         }
                         else
                         {
-                            Debug.LogWarning($"[Leaderboard] Poll failed: {req.responseCode} {req.error}");
+                            backoff.OnFailure($"{req.responseCode} {req.error}");
                             // Show error state but keep panel visible
                             _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Error " + req.responseCode + "</color>";
                         }
@@ -1252,11 +1332,11 @@ namespace DOTSSample
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[Leaderboard] Poll exception: {ex.Message}");
+                    backoff.OnFailure(ex.Message);
                     _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Connection error</color>";
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(10), DelayType.Realtime,
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds), DelayType.Realtime,
                     PlayerLoopTiming.Update, ct);
             }
         }
