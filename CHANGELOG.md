@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The read path could not keep up with the snapshot stream below ~34 fps.** Every await in
+  `TcpTransport` goes through `UniTask`, whose continuation is scheduled on Unity's
+  `SynchronizationContext` and therefore costs a whole player-loop frame.
+  `ReadFrameAsync` performed **two** awaits per frame — one for the 4-byte length header, one
+  for the body — which caps the read loop at **half the player-loop rate**. Measured against a
+  15/s server: 15.0/s at 60 fps, 10.00/s at 20 fps, **5.00/s at 10 fps**, with the socket
+  backlog growing without bound below the knee.
+
+  `ReadFrameAsync` now parses frames out of a 16 KiB receive buffer and touches the socket
+  only when the buffer cannot satisfy the next frame; a `UniTask` that completes synchronously
+  never hops the player loop, so a backlog drains within one frame instead of one frame per
+  frame. The same sweep afterwards: **15.0/s held all the way down to 5 fps**.
+  `ReadExactAsync` becomes `ReadSomeAsync` — one read, no read-exactly loop, because on a real
+  network a split body made it three awaits per frame and dropped the ceiling to a third.
+
+  Also removes `FlushAsync` from `WriteFrameAsync`: `NetworkStream.Flush` is a documented
+  no-op, and on the player loop that await was not free. At 60 Hz input the write path had the
+  same ceiling, so below ~120 fps a client could not send the input it was producing.
+
+  **Irrelevant on a desktop at 480 fps, which is where this was investigated. Not irrelevant
+  on Android**, where 30 fps is a normal target and 30 fps is exactly the knee.
+
+### Not a defect, recorded because it cost an investigation
+
+- **A client whose clock runs fast reports a low snapshot rate, and nothing is wrong.** On the
+  development machine the Windows performance counter — which `Stopwatch` and
+  `Time.realtimeSinceStartup` both read — runs measurably fast against the Linux clock the
+  server ticks on (60.502 s against 58.290 s over one interval). A client counting frames in
+  its own seconds therefore reads **13.7/s from a server sending 15.0/s**, its observed tick
+  stream reads 54/s against 60, and `SkewPpm` reports ~81,400.
+
+  All of that is the estimator working: it fits offset **and** rate, measured the real 8 %
+  difference, and the steering absorbed it — which is why `Snaps` stays 0 and the reconcile
+  correction stays near 0.02 units on a client whose clock disagrees with the server's by 8 %.
+  The pre-0.20.0 design, a minimum-filtered offset with no rate term, would have read this as
+  an offset growing forever.
+
+  Two lessons worth keeping. **Agreement between a client's own clocks proves nothing** —
+  `clockRatio = 1.0000` between `Time.realtimeSinceStartup` and `Stopwatch` was taken as
+  evidence the seconds were real, and both read the same wrong counter. And **the 10 % clamp
+  on the fit is closer to load-bearing than it looks**: one ordinary development machine eats
+  8 % of it.
+
+
 ## [0.21.0] - 2026-08-25
 
 ### Changed (diagnostics)
