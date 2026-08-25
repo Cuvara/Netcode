@@ -1,0 +1,7 @@
+# Files this client adds on top of the upstream package. A file listed here may
+# exist ONLY in the vendored copy; it may not DIFFER from an upstream file of the
+# same path, or a real drift could hide behind the exemption.
+#
+# Empty since Netcode v0.16.1: BackendCommandLine and the DOTS sample's use of it
+# were upstreamed, so the vendored copy is now byte-identical to its release.
+# Keep this file — an empty allowlist is a statement, and the drift check reads it.

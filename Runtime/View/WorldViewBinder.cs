@@ -298,6 +298,87 @@ namespace Cuvara.Netcode.View
         /// </remarks>
         public TickRateEstimator TickRate { get; } = new TickRateEstimator();
 
+        /// <summary>
+        /// Base tick carried by the newest snapshot applied, or 0 before the first one.
+        /// </summary>
+        /// <remarks>
+        /// Exposed for diagnostics: compared against <c>LocalMovePredictor.BaseTick</c> it is
+        /// the prediction lead in ticks, which is the one number that says whether the two
+        /// clocks are keeping step. Nothing in the package reads it.
+        /// </remarks>
+        public long LastServerTick => _lastWorldTick;
+
+        /// <summary>Round-trip time in milliseconds, as last reported by the session.</summary>
+        /// <remarks>
+        /// Set by the consumer; 0 until then, which makes the steering target degrade to one
+        /// snapshot interval rather than to something invented.
+        /// </remarks>
+        public long RoundTripMs { get; set; }
+
+        /// <summary>
+        /// Measures how old the newest snapshot is by the time it is used. See
+        /// <see cref="Prediction.SnapshotStalenessEstimator"/>.
+        /// </summary>
+        public SnapshotStalenessEstimator Staleness { get; } = new SnapshotStalenessEstimator();
+
+        /// <summary>
+        /// Base ticks the client's clock should sit ahead of the newest snapshot's tick: how
+        /// old that snapshot already is when it is acted on.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The clock is steered onto the newest snapshot's tick, and that tick is old by the
+        /// time it is read. Steering to it with no allowance drags the client's clock behind
+        /// the server's real one by exactly that age, and a tick number then stops naming the
+        /// same moment on both sides: the client's tick N carries inputs the server will not
+        /// apply until its own tick N + age. The reconcile reports that as a correction of one
+        /// input interval, on every snapshot.
+        /// </para>
+        /// <para>
+        /// <b>Measured, with a derived fallback.</b> <see cref="Staleness"/> fits the server's
+        /// clock to the client's — offset and rate — and reports the height of the newest
+        /// snapshot above that line, which is its age beyond the best the route has shown.
+        /// Until it has a line, the old derived figure stands: one snapshot interval, because
+        /// the newest snapshot describes the tick it was produced on and the next is a whole
+        /// interval behind it. The derived figure is quantised to whole ticks while the real
+        /// age is fractional, which is what left an unlucky join phase with a constant
+        /// 0.3333-unit correction; it is a fallback for the first seconds of a session, not
+        /// the answer.
+        /// </para>
+        /// <para>
+        /// Either way the half round trip is added on top: the one-way delay sits inside the
+        /// fitted offset, inseparable from the difference between the two clocks' origins, so
+        /// no arrival-time measurement can recover it and the caller must supply it.
+        /// </para>
+        /// <para>
+        /// <b>The ceiling is not decoration.</b> This number steers a clock, and a measurement
+        /// that can run away will take the simulation with it — the clock follows, the
+        /// reconcile reports the growing gap as a correction, and both keep going. An earlier
+        /// estimator that fitted the offset alone did exactly that, reaching 613 ticks with
+        /// the lead tracking it the whole way. Two snapshot intervals plus a round trip is
+        /// past anything a healthy link produces and far short of a runaway.
+        /// </para>
+        /// </remarks>
+        private int TargetLeadTicks()
+        {
+            int gap = TickRate.SnapshotTickGap > 0 ? TickRate.SnapshotTickGap : 1;
+
+            float lead = Staleness.IsUsable ? Staleness.StalenessTicks : gap;
+
+            int rttTicks = 0;
+            if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
+            {
+                rttTicks = (int)Math.Round(RoundTripMs * TickRate.EstimatedHz / 1000.0);
+                lead += rttTicks * 0.5f;
+            }
+
+            int ticks = (int)Math.Round(lead);
+            if (ticks < 0) ticks = 0;
+
+            int ceiling = gap * 2 + rttTicks;
+            return ticks > ceiling ? ceiling : ticks;
+        }
+
         /// <summary>Entities currently presented.</summary>
         public int LiveCount => _live.Count;
 
@@ -425,6 +506,32 @@ namespace Cuvara.Netcode.View
                         // "not sent", so the configured fallback stands.
                         _predictor.SeedBaseTick(world.Tick);
                         _predictor.SetServerSpeed(e.Speed);
+
+                        // ...and keep them together afterwards. Seeding aligns the two
+                        // clocks once, at join; from then on each counts base ticks off its
+                        // own wall clock and nothing bounds the difference. Measured live,
+                        // the client's tick ran 456 ticks -- 7.6 seconds -- past the newest
+                        // snapshot and was still climbing, with every correction counter
+                        // reading clean, because Reconcile replays that whole span as
+                        // prediction lead. See LocalMovePredictor.SteerToServerTick.
+                        //
+                        // The target lead is what the client has to predict THROUGH to be
+                        // showing "now": one snapshot interval, because that is how stale
+                        // the newest snapshot already is when it arrives, plus half a round
+                        // trip for the journey. Both are measured rather than assumed.
+                        // Sampled at the moment of USE, not of arrival, so the wait for this
+                        // frame is inside the measurement -- that wait is a real part of how
+                        // old the snapshot is when the client acts on it, and it is the part
+                        // that varies with a client's join phase.
+                        // The ADVERTISED rate, not the one measured off the wire. The
+                        // measurement converts a tick to a time, so it has to use the rate the
+                        // server stamped that tick at; an estimate's error becomes a drift
+                        // against the wall clock, and a 57.7 Hz reading of a 60 Hz server took
+                        // this from a stable figure to 613 ticks and climbing in under a
+                        // minute, dragging the steering with it.
+                        Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
+
+                        _predictor.SteerToServerTick(world.Tick, TargetLeadTicks());
 
                         // world.Tick is the tick this snapshot was produced on, and
                         // SeedBaseTick has already put it in the same space as the
@@ -647,6 +754,11 @@ namespace Cuvara.Netcode.View
             _explicitlyRemoved.Clear();
             _predictor?.Reset();
             TickRate.Reset();
+
+            // The floor describes one route to one server; carrying it across a session
+            // boundary measures the new connection against the old one's best case, and a
+            // best case that is no longer achievable reads as constant staleness.
+            Staleness.Reset();
             _localId = string.Empty;
             _localHp = 0;
             _localMaxHp = 0;

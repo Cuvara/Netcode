@@ -80,14 +80,15 @@ namespace Cuvara.Netcode.Prediction
         /// thing that can be configured wrongly.
         /// </para>
         /// <para>
-        /// <b>This measures the snapshot cadence. It is used as the hold window, and
-        /// those are two different facts about the server.</b> They are equal only
-        /// because the server passes <c>_rates.WorldEvery</c> as <c>holdTicks</c> to
-        /// <c>ApplyHeldMovement</c> and also emits one snapshot per world tick — a
-        /// coincidence of construction, not a guarantee anything on the wire makes. If
-        /// the server ever holds for a window it does not send on, this returns the wrong
-        /// number and the client mis-predicts by a fixed ratio, which is the failure this
-        /// package has now hit four times and which no correction counter can see.
+        /// <b>This measures the snapshot cadence, and that is all it measures now.</b> It
+        /// used to be taken as the hold window too, on the grounds that the server passed
+        /// <c>_rates.WorldEvery</c> as <c>holdTicks</c> to <c>ApplyHeldMovement</c> and also
+        /// emitted one snapshot per world tick. That was a coincidence of construction and
+        /// not a guarantee anything on the wire made — and it stopped being true: the hold
+        /// window is a silence timeout the two sides share as a constant, and the server
+        /// does not size it from any rate. The prediction path reads
+        /// <c>LocalMovePredictor.MaxBankedTicks</c>; a cadence measured here that is wrong
+        /// now costs interpolation smoothness rather than a fixed mis-prediction ratio.
         /// </para>
         /// <para>
         /// It is not left to go unnoticed. A hold window wrong by a ratio produces a
@@ -117,14 +118,15 @@ namespace Cuvara.Netcode.Prediction
         /// for the whole session.
         /// </para>
         /// <para>
-        /// The consequence is not a wrong number in a diagnostic. It is fed straight to
-        /// <c>LocalMovePredictor.SetHoldTicks</c>, and the predictor stops stepping the
-        /// held direction several base ticks before the server does
-        /// (<c>ApplyHeld</c>'s <c>baseTick - heldFrom &gt;= HoldTicks</c> guard). At
-        /// <c>HoldTicks == 1</c> the hold is switched off outright. The rendered position
-        /// then finishes the step it was given, <c>StepProgress</c> pins at 1, and the
-        /// avatar holds still until something else moves it — visible as the render
-        /// advancing for part of a tick and freezing for the rest.
+        /// <b>That consequence has since been removed at the source, and the two-sighting
+        /// rule below is kept anyway.</b> This number used to be fed straight to
+        /// <c>LocalMovePredictor.SetHoldTicks</c> and used as the hold window, so a gap
+        /// pinned at 1 by the join keyframe switched the hold off outright for the whole
+        /// session and the avatar advanced for part of a tick and froze for the rest. The
+        /// predictor now takes its window from <c>MaxBankedTicks</c> — the same silence
+        /// timeout the server compiles against — and <c>SetHoldTicks</c> is diagnostic. The
+        /// number still reaches the interpolation clock, where being wrong is a visible
+        /// smoothness defect rather than a movement one, so it still has to be right.
         /// </para>
         /// <para>
         /// <b>So a narrower gap must be seen twice before it is adopted.</b> The true
