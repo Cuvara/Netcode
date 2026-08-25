@@ -41,7 +41,14 @@ namespace DOTSSample
             var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
             ground.name = "Ground";
             ground.transform.position = Vector3.zero;
-            ground.transform.localScale = new Vector3(2.5f, 1f, 2.5f);
+            // Unity's Plane is 10x10 at scale 1, so this is 120x120 -- ground out to +/-60
+            // units. It used to be 2.5 (+/-12.5), which was larger than the fixed camera could
+            // see and therefore never noticed. With the camera following the player it is the
+            // ground, not the viewport, that decides how far you can walk before the world
+            // visibly runs out, and +/-12.5 is about three seconds. Sized past the 50-unit
+            // area-of-interest radius so a player can reach the edge of what the server will
+            // even tell them about while still standing on something.
+            ground.transform.localScale = new Vector3(12f, 1f, 12f);
             var groundMat = Resources.Load<Material>("DOTSGroundMaterial");
             if (groundMat != null)
                 ground.GetComponent<Renderer>().material = groundMat;
