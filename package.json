@@ -50,14 +50,14 @@
       "path": "Samples~/DOTSSample"
     },
     {
-      "displayName": "Content Pipeline",
-      "description": "Fetches game content from a running game server over /content, caches it by hash, and lists every item with the source it came from. Second run reads CACHE, which is the 304 path working.",
-      "path": "Samples~/ContentPipeline"
-    },
-    {
       "displayName": "Interpolation Probe",
       "description": "Drives a synthetic 15 Hz snapshot stream into the remote-interpolation core — no server, no network — and renders it beside the reset-on-arrival algorithm 0.19.0 replaced, so an early arrival, a late arrival and a dropped snapshot can be seen rather than read about. Buttons inject each perturbation, a slider pushes arrival jitter past the 100 ms buffer, and the readout reports frame step, largest step, backward steps and render delay.",
       "path": "Samples~/InterpolationProbe"
+    },
+    {
+      "displayName": "Content Pipeline",
+      "description": "Fetches game content from a running game server over /content, caches it by hash, and lists every item with the source it came from. Second run reads CACHE, which is the 304 path working.",
+      "path": "Samples~/ContentPipeline"
     }
   ],
   "testables": [

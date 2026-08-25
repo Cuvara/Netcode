@@ -378,6 +378,107 @@ None of the three can recur by construction: the clock is not reset by an arriva
 early sample waits in the ring instead of displacing the one being rendered, and
 bracketing by tick means a two-tick segment is given two ticks' worth of time.
 
+### Watching it, rather than reading it — `Samples~/InterpolationProbe`
+
+The numbers above are the tests' numbers, and numbers are not what the change was about.
+The **Interpolation Probe** sample drives a synthetic 15 Hz stream into this core — no
+server, no network — and renders it beside the pre-0.19 algorithm, so the lurch, the
+rubber-band and the sprint are visible as a difference between two dots. Buttons inject
+each of the three perturbations, a jitter slider runs to ±150 ms, and the readout reports
+the frame step, the largest step, whether anything went backwards, and the current render
+delay against the newest sample.
+
+Two things it makes visible that no assertion in this section does. **Where the buffer
+runs out**: at ±100 ms of arrival jitter against a 100 ms `TargetDelay`, the largest
+single-frame step goes from 1.25× the median to 4.52×. And **what survives past that**:
+at ±150 ms the motion is visibly uneven and has still not stepped backwards, because the
+clock rate is floored above zero whatever the config says.
+
+The old algorithm is duplicated inside that sample so the comparison can exist at all. It
+lives in `Samples~/InterpolationProbe/Scripts/ObsoleteResetOnArrivalInterpolator.cs` under
+a banner saying so, is referenced from nothing under `Runtime/`, and must never be reused.
+
+## Remote entity interpolation
+
+Remote entities are not drawn where the newest snapshot put them. They are drawn where
+the world was a fixed moment ago, and that moment advances with a clock of the client's
+own rather than with packet arrivals. The code is
+`Runtime/Interpolation/`; `WorldViewBinder` calls it, and the DOTS path will call the
+same `SnapshotInterpolation.Evaluate` from a Burst job rather than reimplement it.
+
+| Type | What it is |
+|---|---|
+| `InterpolationSample` | one received state: `Tick`, `ReceiveTime`, `X`, `Y` |
+| `InterpolationConfig` | every tunable, blittable so a Burst job can read it |
+| `InterpolationClock` | the render moment, in fractional server ticks — **one per connection** |
+| `ISampleBuffer` | read-only view of one entity's samples, oldest first |
+| `SnapshotInterpolation` | the math: bracket by tick, lerp, extrapolate to a cap |
+| `InterpolationRing` | ring index arithmetic and the strictly-increasing-tick admission rule |
+
+**Ticks place a sample; receive time does not.** The tick is the server's statement of
+when a state was true. The receive time is a statement about the network and carries
+every millisecond of queueing, batching and scheduling jitter between the two machines.
+`ReceiveTime` is kept only so the clock can measure how long a tick takes in real
+seconds — `arrivalGap / tickGap`, per tick and not per snapshot, which is why a dropped
+snapshot does not move the estimate: the gap doubled and so did the tick delta.
+
+**The clock is steered, never snapped.** `RenderTick` advances with real frame time and
+is pulled toward `NewestTick - TargetDelay / SecondsPerTick` by running slightly fast or
+slightly slow, capped at `MaxClockRateAdjust`. The rate is `1 + adjust` and is floored
+above zero, so `RenderTick` is strictly increasing for any positive frame delta. That
+single invariant is what makes "a remote entity never steps backwards between frames"
+a property of the design rather than a hope: the rendered position is a monotonic
+function of a monotonic clock along a fixed path.
+
+Because the target moves only when the server advances a tick — an exact integer off the
+wire — arrival jitter cannot move it. The effective delay settles about half a tick
+beyond `TargetDelay`, because the target steps on arrivals while the clock runs
+continuously; that is 33 ms at 15 Hz and is the price of a target nothing can jitter.
+
+### The numbers, and why
+
+| Field | Default | Why |
+|---|---|---|
+| `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
+| `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
+| `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
+| `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
+
+Configure with the `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock,
+InterpolationConfig)` overload; every other overload uses `InterpolationConfig.Default`.
+Any non-positive field is replaced by its default, because `default(InterpolationConfig)`
+is all zeroes and a zero interval divides by zero. `MaxExtrapolation` is exempt — zero
+there is a deliberate "never extrapolate". It is a struct and not a `ScriptableObject`
+on purpose: a `[BurstCompile]` job cannot follow a managed asset reference.
+
+**The local player is not interpolated and pays none of this delay.** It renders at the
+newest received position, or at the predicted one when a `LocalMovePredictor` is
+supplied. The jitter buffer is for entities whose smoothness is worth a delay; the one
+the player is holding a key to move is not one of them.
+
+### What this replaced, and what a player used to see
+
+The interpolation factor used to be `(now - arrivalTime) / measuredArrivalInterval`, with
+the arrival stamped and the factor read in the same pass — so the phase restarted at zero
+on every snapshot, whatever the previous frame had drawn. Three visible consequences,
+each now covered by a test in `Tests/Editor/RemoteInterpolationContinuityTests.cs`:
+
+- **An early snapshot lurched the avatar forward.** The unrendered remainder of the
+  current segment was discarded. Measured at 4.3× a normal frame's travel in a single
+  frame, on ordinary jitter with no packet loss. Note the direction: *forward*, not
+  backward — a test asserting only "never moves backwards" passes on the old code here.
+- **A late snapshot stalled and then stepped back.** The factor ran to a `t <= 1.2` clamp,
+  the entity froze, and the arriving snapshot reset the phase to zero — undoing the
+  extrapolated fifth of a segment instead of absorbing it. That is rubber-banding.
+- **One dropped snapshot rendered at over 1.5× speed and then froze.** The doubled
+  position delta was divided by an EMA of arrival intervals that had moved only 30 % of
+  the way toward the doubled gap.
+
+None of the three can recur by construction: the clock is not reset by an arrival, an
+early sample waits in the ring instead of displacing the one being rendered, and
+bracketing by tick means a two-tick segment is given two ticks' worth of time.
+
 ## Prediction and reconciliation (0.5.0)
 
 Local player **movement** is predicted. Nothing else is.

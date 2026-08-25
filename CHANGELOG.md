@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.20.0] - 2026-08-25
 
+### Added
+
+- **A test scene for remote interpolation, which 0.19.0 owed and did not ship.**
+  `Samples~/InterpolationProbe` drives a synthetic 15 Hz snapshot stream into the
+  interpolation core — no server, no network, no backend to start — and renders it beside
+  the reset-on-arrival algorithm the same release deleted, so the pop is visible as a
+  difference between two dots instead of a paragraph.
+  - **Why a shipped feature was still short something.** The free-running render clock
+    landed with a changelog entry, a `Documentation~/NETCODE.md` section and four tests in
+    `RemoteInterpolationContinuityTests`. Every one of those describes the fix in *numbers*.
+    None of them carries what the change was actually about, which is how the motion
+    **looks** — "stepped backwards 0.2000 units" is a sentence, whereas a dot snapping back
+    is the defect itself. The standing rule here is that a feature ships a changelog entry,
+    documentation **and** a scene; the scene is the deliverable that gets forgotten, and it
+    was forgotten precisely because the other two were unusually thorough. Nobody could
+    have looked at this fix and judged it by eye until now.
+  - **What the scene shows.** One entity on a circle at a constant server speed, three
+    dots: server truth now, the production core, and the pre-0.19 algorithm. Buttons inject
+    a single early arrival, late arrival or skipped tick — the same three scenarios
+    `RemoteInterpolationContinuityTests` constructs, reused rather than reinvented so the
+    scene demonstrates what the suite actually defends. A repeat mode applies any of them to
+    every *other* snapshot, and a jitter slider runs to ±150 ms.
+  - **Measured by replaying the scene's own loop headlessly**, at 200 fps against 15 Hz
+    snapshots, as a multiple of the median frame step: an injected early arrival renders at
+    **1.13× on the production track against 4.36× on the old one** — reproducing the 4.3×
+    the 0.19.0 entry reported, from an independent harness; a late arrival, **1.09× against
+    7.86×** with two backward steps on the old track; a skipped tick, **1.05× against
+    7.44×**. Continuous ±15 ms jitter costs the production track nothing and gives the old
+    one **48 backward steps**. The production track's backward-step count is **zero in every
+    scenario the scene can produce**, and the readout says in words that a non-zero one is
+    a bug worth reporting.
+  - **The jitter slider deliberately runs past the buffer.** `TargetDelay` is 100 ms, and
+    at ±100 ms of arrival jitter the production track's largest step jumps from 1.25× to
+    **4.52×** — the buffer emptying, exactly where its own depth says it should. Past that,
+    at ±150 ms, motion is visibly uneven and **still has not stepped backwards once**,
+    because the clock rate is floored above zero unconditionally whatever the config says.
+    A slider that stopped below 100 ms could never have shown either half of that.
+  - **The old algorithm is duplicated inside the sample, on purpose and under a banner.**
+    `Scripts/ObsoleteResetOnArrivalInterpolator.cs` reimplements the deleted pre-0.19
+    arithmetic — arrival-stamped phase, `t <= 1.2` clamp, EMA of arrival gaps — because a
+    side-by-side is a far stronger demonstration than a description, and there is nothing
+    left in `Runtime/` to compare against. It is referenced from nothing outside
+    `Samples~/`, it is not tested, and the file opens with a block saying it must never be
+    fixed, extended or reused: improving it would destroy the only thing it is for.
+  - UI is UXML and USS, like every scene in this package — no IMGUI and no uGUI canvas —
+    and every asset in the sample carries its committed `.meta`.
+
+
 ### Added — the snapshot's age is measured, and it steers the prediction clock
 
 - **`SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and* rate
