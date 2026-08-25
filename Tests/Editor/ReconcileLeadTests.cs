@@ -54,7 +54,16 @@ namespace Cuvara.Netcode.Tests.Editor
     {
         private const int BaseHz = 60;
         private const int SendHz = 15;
-        private const int HoldTicks = BaseHz / SendHz;   // 4
+        /// <summary>Base ticks between two sends at <see cref="SendHz"/> — the cadence.</summary>
+        private const int SendEvery = BaseHz / SendHz;   // 4
+
+        /// <summary>
+        /// Base ticks a held direction survives after the input that set it — the silence
+        /// timeout both sides read from <see cref="GameConstants.MaxBankedMovementMs"/>.
+        /// Fifteen at 60Hz, and no longer the same number as <see cref="SendEvery"/>: the
+        /// window stopped being inferred from the client's own send cadence.
+        /// </summary>
+        private static readonly int HoldWindow = GameConstants.MaxBankedMovementTicks(BaseHz);
         private const float Speed = 5f;
 
         private static float Dt => MovementSystem.DeltaTimeForTickRate(BaseHz);
@@ -76,7 +85,7 @@ namespace Cuvara.Netcode.Tests.Editor
         private static LocalMovePredictor Predictor()
         {
             var p = new LocalMovePredictor(new PredictionSettings(BaseHz, Speed, Bounds));
-            p.SetHoldTicks(HoldTicks);
+            p.SetHoldTicks(SendEvery);
             // The first Reconcile only seeds; it does not measure. Every test starts past it.
             p.Reconcile(Vec2.Zero, 0);
             return p;
@@ -93,24 +102,30 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var position = Vec2.Zero;
             long heldFrom = 0;
-            long tick = 0;
+            long lastMove = 0;
+            long tick = 1;                 // the base tick the first input lands on
 
             for (var i = 0; i < inputs; i++)
             {
-                for (var k = 0; k < HoldTicks; k++)
+                // Rule 1 on the input's own tick: a tick the hold already stepped coalesces
+                // into it rather than stepping twice. Unreachable under the old window,
+                // where the hold expired on exactly the tick the next input arrived on --
+                // which is why this model could count the input tick as one of the
+                // interval's four and still agree.
+                if (lastMove != tick && StepOnce(ref position, moveX, moveY))
+                {
+                    heldFrom = tick;
+                    lastMove = tick;
+                }
+
+                for (var k = 0; k < SendEvery; k++)
                 {
                     tick++;
-                    bool isInputTick = k == 0;
 
-                    if (isInputTick)
+                    if (heldFrom != 0 && tick != heldFrom && tick - heldFrom <= HoldWindow
+                        && StepOnce(ref position, moveX, moveY))
                     {
-                        if (StepOnce(ref position, moveX, moveY)) heldFrom = tick;
-                        continue;
-                    }
-
-                    if (heldFrom != 0 && tick - heldFrom < HoldTicks)
-                    {
-                        StepOnce(ref position, moveX, moveY);
+                        lastMove = tick;
                     }
                 }
             }
@@ -154,7 +169,7 @@ namespace Cuvara.Netcode.Tests.Editor
             for (var i = 1; i <= inputs; i++)
             {
                 p.RecordInput(i, x, y);
-                for (var k = 0; k < HoldTicks; k++)
+                for (var k = 0; k < SendEvery; k++)
                 {
                     p.Advance(1f / BaseHz);
                 }
@@ -167,7 +182,7 @@ namespace Cuvara.Netcode.Tests.Editor
         /// </summary>
         /// <remarks>
         /// Only produces motion while the hold window is open, which is
-        /// <see cref="HoldTicks"/> base ticks from the last input. Advancing past that moves
+        /// <see cref="HoldWindow"/> base ticks from the last input. Advancing past that moves
         /// nothing, so a lead has to be built inside the window — the first draft of this
         /// fixture advanced after a fully-consumed window and measured a correction of
         /// exactly zero at every lead, which looked like the defect being absent.
@@ -210,6 +225,65 @@ namespace Cuvara.Netcode.Tests.Editor
 
         /// <summary>Correction in steps rather than world units, so a reading is legible.</summary>
         private static float CorrectionInSteps(LocalMovePredictor p) => p.LastCorrection / StepLength;
+
+        // ── The gap between the snapshot and the first unacknowledged input ──
+
+        /// <summary>
+        /// The ticks between the snapshot's own tick and the first input the server has not
+        /// seen are replayed, not skipped.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>authoritative</c> is where the entity stood on <c>serverBaseTick</c>. Starting
+        /// the replay at the first pending input's tick — which is what it did — silently
+        /// drops every tick in between, and with them the held motion the server took over
+        /// that stretch.
+        /// </para>
+        /// <para>
+        /// <b>It is not an edge case.</b> Inputs go at 15 Hz against a 60 Hz base tick and an
+        /// acknowledgement normally rides the snapshot that carries it, so the gap is one
+        /// full input interval on EVERY reconcile. Measured against a live server it read as
+        /// a correction of exactly <b>4.01 steps</b>, snapshot after snapshot, with the
+        /// prediction clock in step and every other counter clean: a backward tug fifteen
+        /// times a second, which is what a player calls jerky and what no counter names.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheGapBetweenTheSnapshotAndTheOldestPendingInputIsReplayed()
+        {
+            var p = Predictor();
+
+            // Six inputs, a tick apart, so the buffer holds a real timeline.
+            SendInputs(p, Inputs, 1f, 0f);
+
+            // The server has acknowledged everything up to the last input and produced its
+            // snapshot at that moment; the client has held on for part of an interval since.
+            long ackTick = Inputs;
+            Vec2 authoritative = p.SimulatedPosition;
+            long snapshotTick = p.BaseTick;
+
+            HoldFor(p, 2);
+
+            // One more input, unacknowledged, a further two ticks on -- so there are ticks
+            // between the snapshot and it that only the hold covers.
+            HoldFor(p, 2);
+            p.RecordInput(ackTick + 1, 1f, 0f);
+
+            Vec2 expected = p.SimulatedPosition;
+
+            p.Reconcile(authoritative, ackTick, snapshotTick);
+
+            float error = System.Math.Abs(p.SimulatedPosition.X - expected.X);
+
+            Assert.That(p.PendingCount, Is.GreaterThan(0),
+                "the unacknowledged input must survive, or this is not the path under test");
+
+            Assert.That(error, Is.LessThan(StepLength * 0.5f),
+                $"reconciling moved the prediction {error / StepLength:F2} steps. The ticks " +
+                "between the snapshot and the oldest pending input carry held motion the " +
+                "server took; skipping them subtracts them from the client on every " +
+                "snapshot.");
+        }
 
         // ── Calibration ───────────────────────────────────────────────────────────────
         //
@@ -382,15 +456,33 @@ namespace Cuvara.Netcode.Tests.Editor
             // has held forward for `leadTicks` since.
             long serverBaseTick = p.BaseTick - leadTicks;
 
+            int replayedBefore = p.ReplayedSteps;
             p.Reconcile(authoritative, ackTick, serverBaseTick);
 
             Assert.That(p.PendingCount, Is.Zero, "precondition: the buffer must be empty");
-            Assert.That(p.ReplayedSteps, Is.EqualTo(leadTicks),
-                $"the {leadTicks} held tick(s) since the snapshot must be replayed");
+
+            // THE OUTCOME, not the mechanism. This asserted `ReplayedSteps == leadTicks`,
+            // which pinned how the lead was preserved rather than that it was: the reconcile
+            // rebuilt the held motion since the snapshot by replaying it forward from the
+            // server's answer. It does not replay any more. It compares the snapshot against
+            // where the client believed it was AT THAT SNAPSHOT'S TICK, from a recorded
+            // history, and everything the client did since is kept by construction rather
+            // than reconstructed.
+            //
+            // Why that replaced it: extrapolating forward is only right when the tick lead
+            // is travel the server has not seen. When it is clock phase -- ticks advanced
+            // before the first input, or ticks an input had already stepped -- the replay
+            // adds motion the client never made. Measured live at an 8-tick lead it added
+            // six steps per snapshot, fifteen times a second, with every counter clean.
             Assert.That(CorrectionInSteps(p), Is.EqualTo(0f).Within(0.05f),
-                "with the lead rebuilt there is nothing to correct. A non-zero reading means " +
-                "the replay window is wrong at one end or the other — the two ways the " +
-                "earlier attempts failed.");
+                "the lead was discarded: the client was pulled back to a position it had " +
+                "already moved on from, which is the backward tug at snapshot rate that " +
+                "#53 is about.");
+
+            Assert.That(p.ReplayedSteps, Is.EqualTo(replayedBefore),
+                "the history answered, so nothing needed replaying. A replay here means the " +
+                "history did not reach the snapshot's tick, which for a lead of " +
+                $"{leadTicks} tick(s) would be a bug in the ring rather than in the lead.");
         }
 
         /// <summary>

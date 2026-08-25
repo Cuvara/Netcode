@@ -92,10 +92,18 @@ namespace Cuvara.Netcode.Tests.Editor
             var p = Seeded();
             p.RecordInput(1, 1f, 0f);
 
+            // What the input's own step reached. The comparison is against THIS and not
+            // against the simulated position an interval later, because the hold takes
+            // another step in the meantime: the renderer is always travelling toward the
+            // newest step, so demanding it equal the newest simulated position is demanding
+            // it teleport. The property is that a step is fully shown within the interval
+            // it was taken in, and that is what this reads.
+            float stepTarget = p.SimulatedPosition.X;
+
             p.Advance(Dt);
 
-            Assert.That(p.Position.X, Is.EqualTo(p.SimulatedPosition.X).Within(1e-5f),
-                "after one interval the rendered position must have caught up exactly");
+            Assert.That(p.Position.X, Is.GreaterThanOrEqualTo(stepTarget - 1e-5f),
+                "after one interval the step taken at the start of it must be fully shown");
         }
 
         // ── The case that decides whether this is safe ──
@@ -116,6 +124,18 @@ namespace Cuvara.Netcode.Tests.Editor
             var p = Seeded();
             p.RecordInput(1, 1f, 0f);
 
+            p.Advance(Dt);
+
+            // The furthest the SIMULATION ever went: the input's step plus the hold's. The
+            // release below rolls the hold's step back -- rule 1, the tick's one step is the
+            // newest input's and that input is a stop -- so the rendered position has to
+            // come back to `target` without ever having gone past `peak`. Bounding it by
+            // `target` alone would be bounding it by a position the simulation left and
+            // returned to, which is not what extrapolation means.
+            float peak = p.SimulatedPosition.X;
+
+            p.RecordInput(2, 0f, 0f);
+
             float target = p.SimulatedPosition.X;
 
             // Ten intervals of silence — far past the one the step covers.
@@ -123,10 +143,10 @@ namespace Cuvara.Netcode.Tests.Editor
             {
                 p.Advance(Dt / 10f);
 
-                Assert.That(p.Position.X, Is.LessThanOrEqualTo(target + 1e-5f),
-                    "the rendered position ran past the step the player actually asked " +
-                    "for — that is extrapolation, and the snap back is worse than the " +
-                    "stutter it was trying to hide");
+                Assert.That(p.Position.X, Is.LessThanOrEqualTo(peak + 1e-5f),
+                    "the rendered position ran past anything the simulation reached — that " +
+                    "is extrapolation, and the snap back is worse than the stutter it was " +
+                    "trying to hide");
             }
 
             Assert.That(p.Position.X, Is.EqualTo(target).Within(1e-5f),
@@ -138,7 +158,20 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var p = Seeded();
             p.RecordInput(1, 1f, 0f);
-            p.Advance(Dt * 2f);
+            // A tick, then the release. Both halves are load-bearing. Without the release
+            // the held direction keeps stepping for the silence timeout and there is no
+            // stationary avatar to measure -- the hold used to be off in this fixture
+            // because no snapshot gap had been measured, and it is on unconditionally now.
+            // Without the tick the release lands on the tick the move input stepped, and
+            // rule 1 makes the newest input the tick's only step, so the step under test
+            // would be rolled back and there would be no motion to render either.
+            p.Advance(Dt);
+            p.RecordInput(2, 0f, 0f);
+
+            // Long enough for the rollback's render offset to retire. It decays rather than
+            // snapping -- that is the whole point of carrying it -- so "settled" has to be
+            // sampled after the decay, not two ticks into it.
+            for (var i = 0; i < 60; i++) p.Advance(Dt);
 
             float settled = p.Position.X;
             for (var i = 0; i < 20; i++)

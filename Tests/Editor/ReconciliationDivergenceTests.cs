@@ -83,11 +83,12 @@ namespace Cuvara.Netcode.Tests.Editor
             var p = Seeded(clientSpeed);
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) p.Advance(Dt);
                 p.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                p.Advance(Dt);
             }
             return p;
         }

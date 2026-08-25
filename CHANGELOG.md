@@ -7,6 +7,208 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the snapshot's age is measured, and it steers the prediction clock
+
+- **`SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and* rate
+  — and reports how old the newest snapshot is when it is acted on.** A snapshot stamped with
+  base tick `T` was produced at server time `T / hz` and observed at local time `t`, so
+  `t = offset + skew * (T / hz) + delay` with `delay >= 0`. Because the delay is never
+  negative the samples lie **above** a line and touch it at their best moments; fitting that
+  lower envelope gives the offset and the rate, and a sample's height above it is that
+  snapshot's age. Least squares would be wrong — it fits the middle of a distribution whose
+  upper side is unbounded delay, so every bad frame drags the answer.
+
+  The envelope is fitted through two anchors, each the lowest sample of its own epoch, kept
+  far apart so the delay is largely divided out: the long baseline is what makes a small rate
+  difference measurable at all. It is the cheap form of the convex-hull method used for clock
+  synchronisation over paths with unknown delay. Sampled at the moment of **use**, so the wait
+  for a client frame — the term a fixed formula cannot express — is inside it. `SkewPpm`,
+  `BaselineSeconds` and `Fits` report the fit. 17 tests, all driven by a synthetic clock so a
+  reading is a property of the arithmetic rather than of the machine.
+
+- **`WorldViewBinder` steers on it**, with the derived figure (one snapshot interval plus the
+  rounded half round trip) as the fallback for the first seconds of a session, and a ceiling
+  of two snapshot intervals plus a round trip. The ceiling is not decoration: this number
+  steers a clock, and a measurement that can run away takes the simulation with it.
+
+- **`LocalMovePredictor.TickRateHz`** — the rate the predictor was built with, so a tick → time
+  conversion uses the rate the *server* stamped ticks at rather than one estimated off the
+  wire.
+
+**Why it is measured rather than derived.** The derived figure is whole ticks while the real
+age is fractional and set by where a client's frame loop falls against the server's send
+cadence — a phase fixed at join that then holds for the session. Two clients on one machine
+against one server, started six seconds apart: an unlucky phase left one with a constant
+**0.3333-unit, 4.00-step** correction on every snapshot while the other sat at 0.0033.
+
+**Why the rate term is not optional, and what it cost to learn.** A first version fitted the
+offset alone against a fixed rate. A minimum-filtered offset cannot see a rate difference, and
+one it cannot see appears as an offset that grows without bound. Wired to the steering target
+it made a live client categorically worse, twice: fed a rate measured off the wire (57.7 Hz
+for a 60 Hz server) it drifted 4 %/s, the reading passed **613 ticks** with the target
+following it and snaps reached **71 per five-second window**; fed the advertised rate it still
+settled around **205 ticks** where two or three was right. Both are one defect — a term the
+model did not have. `ARateDifferenceIsMeasuredRatherThanAccumulated` now covers 500, 5 000 and
+40 000 ppm, the last being exactly the case that broke the old design.
+
+**Measured live, two clients, the join stagger that used to be the bad case:**
+
+| | before | after |
+|---|---|---|
+| staleness reading | 205–613 ticks, climbing | **0.00–3.44 ticks** |
+| correction, client A | 0.0033 | **0.0029–0.0151** |
+| correction, client B | **0.3333 constant** | **0.0000–0.0147** |
+| snaps | 0 | 0 |
+
+**A finding the fit hands over.** The rate it settles on is **~81 400 ppm — 8.1 %**: the
+snapshot-tick stream a client observes advances that much slower than its own clock. That is
+the "server writes 15 snapshots/s, client counts 14.2" gap, quantified rather than inferred,
+and it is now absorbed instead of accumulating. It is **not explained** — the server's
+`snapshots_frames_written_total` says 15/s per client reached a socket, so the loss is in the
+client's read path. Worth its own investigation; the 10 % clamp is what stands between a worse
+figure and a refused fit.
+
+### Changed
+
+- **Prediction no longer banks elapsed time: every step is exactly one tick.**
+  `StepDeltaTime` returned `min(now - lastMoveTick, MaxBankedTicks) * dt`, mirroring what
+  the server then did, so the inputs per-tick coalescing discards from a burst did not take
+  their simulated time with them. **Both sides have dropped it in the same change**
+  (`rpg-mmo-server` `gameserver-dotnet` CHANGELOG, same date) — a client that banks against
+  a server that does not is the same defect pointing the other way.
+
+  It restored the right distance and destroyed the frames it was supposed to save: measured
+  against a live server, a 1.36-unit step where a normal one is 0.083, read by a player as
+  the avatar jumping. Worse, agreement depended on the two ends' *independent* measurements
+  of elapsed time matching, which across a network is exactly what cannot be relied on — so
+  a correctly predicting client was snapped back on ordinary jitter. That is the reported
+  symptom: move one step, jerk back, continue. One step per tick makes the two sides agree
+  **by construction**: over any interval each takes one step per tick, so each travels
+  `speed x ticks`. Jitter can shift *when* a step happens, never *how many*.
+
+- **The hold window is the shared silence timeout, not the measured snapshot gap.**
+  `ApplyHeld` expired a held direction at `baseTick - heldFrom >= HoldTicks`, where
+  `HoldTicks` came off the wire through `SetHoldTicks`. It is now
+  `> MaxBankedTicks` — `GameConstants.MaxBankedMovementTicks`, 250 ms, the same constant
+  `InputHandler` compiles against. Two consequences: the client can no longer expire a
+  direction on a different tick from the server, and the join-keyframe failure mode
+  (`SnapshotTickGap` pinned at 1, hold off for the whole session) is gone at the source.
+  `>` rather than `>=` is deliberate and matches the server: gaps `1..MaxBankedTicks` step
+  inclusive.
+
+  `HoldTicks` and `SetHoldTicks` remain as **diagnostics** — `WorldViewBinder` still feeds
+  the cadence to the interpolation clock, where it still means what it says — and gate no
+  movement. `SkipNoHoldWindow` is retired at 0; nothing can switch the hold off now.
+
+### Fixed
+
+- **An explicit stop landing on a tick the hold had already stepped was swallowed.**
+  `RecordInput` forced the verdict to `Accepted` on a coalesced input, which *refreshed* the
+  held direction instead of clearing it — so releasing the stick on such a tick coasted for
+  the full 250 ms silence timeout, the one artefact a player attributes directly to their
+  own input. The vector is now put to `MovementSystem` for its verdict and the position
+  thrown away, which is the client's half of the guard `InputHandler.ProcessInput` already
+  had. Unreachable before this release: an input never landed on a tick the hold had
+  stepped, because the hold expired on exactly the tick the next input arrived on.
+
+- **A coalesced input froze the rendered position for the rest of the tick.** It zeroed
+  `_step` and restarted `_sinceInput` while the step the *hold* took on that tick was still
+  mid-interpolation. Measured as a render lag rising from 1.00 to 2.04 steps on the tick
+  after every send and decaying back over the interval — a hitch once per send, invisible to
+  every correction counter because the simulated position was right throughout. Render state
+  is now left alone by an input that produced no displacement; the lag is flat at 1.00 step.
+
+### Fixed (continued)
+
+- **A direction change landed one base tick late, and the live path disagreed with its own
+  replay.** `Advance` steps the hold on *entry* to a base tick, so on a tick whose own input
+  has not arrived yet the hold applied the OLD direction and rule 1 then coalesced the new
+  one away. The server has no such ambiguity — `TickLoop` drains a tick's inputs and calls
+  `ApplyHeldMovement` after — and `Reconcile`'s replay loop has always run in that order.
+
+  Rule 1 is **"one step per tick", not "first step wins"**. An input arriving on a tick the
+  hold already stepped now **re-takes** that tick's single step, from the position the tick
+  began at, in the input's direction: same count, same origin, same arithmetic, newest
+  direction. A stop or a vector the model refuses rolls the tick back instead, which is what
+  the server does by never taking the step at all; the rollback is folded into the render
+  offset and decays rather than jumping.
+
+  Reordering `Advance` to close out the ending tick was the other candidate and was measured:
+  it fixes the same eight tests and puts the hold's step a tick late for the renderer, taking
+  frame-delta burstiness from 1.00 to 3.23. Replacement keeps both properties.
+
+  `PendingInput.LastMoveTickBefore` carries the pre-hold value for a replaced tick, which is
+  how `Reconcile` knows the hold got there first and reproduces the same ordering. Without
+  that, replay coalesced the input away, applied the hold in the previous direction, and the
+  correction *accumulated* instead of converging — measured at 120 steps over 30 snapshots.
+
+- **A replacement reported a zero step to the renderer** — it measured the step against the
+  position after the hold's step rather than against the position the tick began at, so an
+  unchanged direction read as "this tick produced no motion". The rendered position stalled
+  for the rest of every send interval: lag rising from 1.00 to 1.95 steps and decaying back,
+  once per send. Measured from the tick's start it is flat at 1.00 step.
+
+### Added
+
+- **`LocalMovePredictor` clamps how many base ticks one `Advance` may consume**
+  (`MaxCatchUpTicks`, the same 250 ms budget as the hold window), and reports
+  `ClampedFrames` / `DiscardedCatchUpSeconds`. `deltaTime` is whatever the last frame took,
+  and at startup or after a focus loss that is *seconds*: without the clamp one frame
+  burst-advances hundreds of base ticks, each stepping the held direction, and the lead that
+  creates is never given back — the reconcile's lead replay is bounded by the hold window, so
+  anything past it lands as a correction. Time over the budget is discarded rather than
+  carried, which the second test pins: carrying it is the same burst one frame later.
+
+- **`WireConnection.FramesReceived` and `WorldViewBinder.LastServerTick`**, diagnostics only.
+  The first separates "the server did not send it" from "the client did not consume it" —
+  opposite fixes, and no counter in the package could tell them apart. The second, against
+  `LocalMovePredictor.BaseTick`, is the prediction lead in ticks: the one number that says
+  whether the two clocks are keeping step.
+
+### Changed (sample)
+
+- **The DOTS sample auto-joins the map named on the command line.** `-cuvara-map map_01`
+  was already parsed into `MapExplicit` but the bridge still waited for the on-screen map
+  picker whenever more than one map was offered, so a built player sat on the selector
+  forever — unusable for an automated run against a live server, which is the case the
+  sample exists to serve.
+
+- **`[DOTSNet/health]` prints the counters every 5 s** — reconciles, smoothed corrections,
+  snaps, smoothing span against observed step interval, held steps against base ticks, fps,
+  snapshots applied per second, frames received per second, RTT, and the client-vs-server
+  tick lead. "It still feels jerky" and "Snaps=0" cannot both be acted on without this line,
+  and every smoothness defect this package has shipped left the reconcile counters clean
+  because the simulated position was right and only the rendered one was wrong.
+
+### Changed (project)
+
+- **`ProjectSettings.runInBackground` is now 1.** A server-authoritative client that pauses
+  when it loses focus keeps its connection open while its simulation stops, then resumes
+  with a multi-second `deltaTime` — the exact burst the new clamp exists to bound, and a
+  guaranteed desync on top. It also made a built player untestable from a script, since a
+  player launched without focus never progressed past scene setup.
+
+### Changed (tests)
+
+- **`LocalMovePredictorTests.ServerWalk` still implemented the banked rule** and was the last
+  copy of it in the client. Unbanked; the walks it backs now advance *between* inputs rather
+  than after the last one, which was adding a held step the model had no input for.
+
+- **`TheCorrectionMeasuresTheClockError` is now `AWrongClockStillShowsUpAsACorrection`, and
+  the instrument it pinned is gone.** `correction_steps = (clockFactor - 1) * SendEvery` held
+  exactly at every factor; 1.25x, 1.5x and 2.0x now all report **1.00**. Three-argument
+  `Reconcile` replays the ticks between the snapshot's tick and the client's as prediction
+  lead (#53), and the lead it accepts is bounded by the hold window — which went from 66 ms
+  to 250 ms. A clock error smaller than that is now replayed rather than corrected. Read the
+  clock off the harness's `tick rate measured` against `TICK RATE IN USE` instead;
+  `LastCorrection` still answers "do the two sides agree" exactly, and
+  `ACorrectClockProducesNoCorrectionAtAll` still reads 0.00.
+
+- **`RenderSmoothingTests` assumed one input meant one step** — true only while the hold was
+  off for want of a measured snapshot gap. Its three stationary-avatar cases now release the
+  stick explicitly, and `TheStepIsFullyShownAfterOneInputInterval` compares against the step
+  that was taken rather than against a simulated position the hold has since moved on from.
+
 ## [0.19.0] - 2026-08-22
 
 ## [0.18.0] - 2026-08-22

@@ -614,18 +614,18 @@ and the rule behind it is stated in `gameserver-dotnet/docs/API.md`:
 > entity with no held direction is *stopped*, not stalled — so a player who releases the
 > stick, waits, and presses again is owed nothing for the pause.
 
-It reads like a contradiction of rule 3 ("a step covers the time since that entity last
-moved") and it is not: rule 3 exists so that *coalescing* — at most one step per player per
-tick — cannot lose simulated time that discarded inputs carried. A player who was stopped
-carried none.
+It used to read like a contradiction of rule 3, which said "a step covers the time since
+that entity last moved" — the *banked* rule, on both sides of the wire. **That rule is
+gone.** Every step is one tick now, so no step can repay a pause whatever `heldFrom` says,
+and this guard is what decides whether the pause is *coasted through* instead: a held
+direction is stepped for up to 250 ms of silence, and a cleared one is not stepped at all.
 
-**If you remove the guard**, the client steps up to `MaxBankedTicks` of travel — 15
-timesteps at 60 Hz, from the 250 ms `MaxBankedMovementMs` bound — on the first input after
-every pause, while the server steps one. The player stops, starts, lurches a quarter-second
-of travel forward in a single frame, and rubber-bands back on the next snapshot. Measured:
-19 snaps per run with a 14.00-step worst correction, against 0 and 0.0000 with the guard.
-**It reproduces on no test that does not deliberately contain an idle**, which is why it
-survived three releases.
+**If you remove the guard**, a player who releases the stick keeps walking for the silence
+timeout — 15 timesteps at 60 Hz, from the 250 ms `MaxBankedMovementMs` bound — while the
+server, which was told about the release, stops. That is the same defect the banked reading
+produced, arriving as a quarter-second of drift rather than as one lurching frame, and the
+snapshot that follows rubber-bands it back. **It reproduces on no test that does not
+deliberately contain an idle**, which is why it survived three releases.
 
 Paired with it: an input the movement model resolves to `MoveResult.None` clears the hold
 **and** stamps `_lastMoveTick`, live path and replay path alike — that is what
@@ -675,10 +675,159 @@ the same "zero means not sent" rule the speed and tick-rate fields follow. `Rese
 the flag so a new session re-seeds. Read `LocalMovePredictor.BaseTick` to confirm the seed
 took — a binder that never seeds is otherwise indistinguishable from one that did.
 
-### The hold window is measured, and a narrow gap must be seen twice
+### A correction is a comparison at one tick, not an extrapolation
 
-`TickRateEstimator.SnapshotTickGap` is the sole source of the predictor's hold window
-(`WorldViewBinder` feeds it to `SetHoldTicks`). It is a **running minimum** of the base-tick
+`LocalMovePredictor` keeps a 256-tick ring of its own position. On a snapshot it looks up
+where it believed it was **at that snapshot's tick**, and the difference against the server's
+answer is the whole error; applying the same offset to the current position keeps everything
+the client did since, by construction.
+
+**What this replaced, and why.** The reconcile used to compare the snapshot against the
+client's position *now* — two different moments — and bridge the gap by replaying held motion
+forward from the server's answer. That is right only when the tick lead is travel the server
+has not seen. It usually is not: ticks advanced before the first input, or ticks an input had
+already stepped, carry a tick of clock and no motion. Measured live at an 8-tick lead it
+**added six steps the client had never taken, on every snapshot** — a forward shove fifteen
+times a second, with the clock in step and every counter clean.
+
+Two details are load-bearing:
+
+- **`_tickStart` moves with the correction.** `RecordInput`'s replacement path re-takes the
+  tick's step from that marker; captured before the correction, it rolls the correction
+  straight back out on the next input. This was worth 6 of the 6.9 steps — without it the
+  comparison is right and the answer is discarded.
+- **`ShiftHistory` moves the ring with it too.** Otherwise the same error is measured again
+  on the next snapshot and corrected again, forever.
+
+`HistoryHits` / `HistoryMisses` say which path answered. The replay remains as the fallback
+for a snapshot older than the ring.
+
+### The two clocks are steered together, and the target lead is zero
+
+`SeedBaseTick` aligns the clocks at join and never speaks again. `SteerToServerTick`, called
+per snapshot, keeps them together: a bounded nudge to the tick accumulator (10 % of the
+error, at most half a tick per call), so the clock runs a few percent fast or slow rather
+than jumping. A jump would move `BaseTick` out from under the pending inputs, the held-from
+tick and the last-moved tick, all of which are compared against it. Past two seconds of error
+it is set outright and the pending buffer goes with it — those inputs name ticks that no
+longer exist.
+
+**Without it**, measured live: the client's tick sat **456 ticks — 7.6 seconds —** past the
+newest snapshot and climbing, with `Snaps=0` and `LastCorrection=0.0000` throughout, because
+the reconcile replayed the whole span as prediction lead. A runaway clock raised nothing. The
+local player looked perfect while the server, and every other player, had it seconds behind
+its own screen.
+
+**The target lead is the snapshot's staleness** — one snapshot interval plus the measured
+half round trip — because the tick the clock is steered onto is already old when it is read.
+Steering to it with no allowance drags the client's clock behind the server's real one by
+exactly that staleness, and a tick number then stops naming the same moment on both sides:
+the client's tick N carries inputs the server will not apply until its own tick N +
+staleness. Measured live that was a correction of exactly one input interval, 0.3333 units,
+every snapshot.
+
+An earlier attempt at this allowance oscillated between 2.7 and 7.3 steps and was backed out;
+that was the tick-start marker not moving with the correction, not the number being wrong.
+
+**Known limitation.** The allowance is quantised to whole ticks while the true staleness is
+fractional and depends on where a client's frame loop picks a snapshot up. An unlucky join
+phase leaves a residual of up to one interval — measured at a constant 0.3333 units on one of
+two clients launched 6 s apart, and absent on both when launched 2 s apart. It is smoothed
+rather than snapped, so it reads as a small steady drag.
+
+### The snapshot's age is measured by fitting the two clocks
+
+`SnapshotStalenessEstimator` supplies the allowance above. A snapshot stamped with base tick
+`T` was produced at server time `T / hz` and observed at local time `t`:
+
+```
+t = offset + skew * (T / hz) + delay,   delay >= 0
+```
+
+`offset` absorbs the arbitrary difference between the two clocks' origins *and* the minimum
+one-way delay — inseparable, and neither needs separating. `skew` is the ratio of the clocks'
+rates. `delay` is queueing, jitter and the wait for a frame, and is what gets reported.
+
+Because the delay is never negative the samples lie **above** a line and touch it at their
+best moments, so the fit is the **lower envelope**, not a regression: least squares fits the
+middle of a distribution whose upper side is unbounded delay, and every bad frame would drag
+it. Two anchors, each the lowest sample of its own epoch, kept far apart — the long baseline
+is what makes a small rate difference measurable at all. Sampled at the moment of **use**, so
+the wait for a client frame is inside the measurement.
+
+`WorldViewBinder` steers on it, falls back to the derived figure for the first seconds of a
+session, and clamps the result to two snapshot intervals plus a round trip. The clamp matters:
+this number steers a clock, and a measurement that can run away takes the simulation with it.
+
+**The rate term is the whole point, and it was learned the hard way.** A first version fitted
+the offset alone:
+
+| Rate it was fed | What happened |
+|---|---|
+| `TickRateEstimator.EstimatedHz` (57.7 for a 60 Hz server) | 4 %/s drift; reading past **613 ticks**, lead following it, **71 snaps** per 5 s window |
+| the server's advertised rate | settled at **205 ticks** where 2–3 was right; same runaway, slower |
+
+A minimum-filtered offset cannot see a rate difference, and one it cannot see appears as an
+offset that grows. With the rate fitted, the same 4 % case reads flat and shows up as
+40 000 ppm — which is the point: that is a wrong tick rate, and it should be legible as one
+rather than arriving as a client that drifts.
+
+**Live, on the join stagger that used to be the bad case:** staleness 0.00–3.44 ticks,
+correction 0.0000–0.0151 on both clients, `Snaps` 0. The fit settles at **~81 400 ppm, 8.1 %**
+— the snapshot-tick stream a client observes advances that much slower than its own clock,
+which is the "server writes 15/s, client counts 14.2" gap quantified. The server's
+`snapshots_frames_written_total` says 15/s per client reached a socket, so the loss is in the
+client's read path and is not yet explained. It is absorbed rather than accumulating; the
+10 % clamp is what stands between a worse figure and a refused fit.
+
+### Rule 1 is "one step per tick", not "first step wins"
+
+The server drains a tick's inputs and then applies holds. The client cannot order those two:
+`Advance` runs on the frame loop, `RecordInput` on the send loop, and either can reach a
+given base tick first. When the hold gets there first, `RecordInput` **re-takes** the tick's
+single step — from the position the tick began at (`_tickStart`), with this input's
+direction. One step, same origin, newest direction: exactly what the server has.
+
+Discarding the input instead — the obvious reading of "at most one step per tick" — applies
+the *previous* direction to a tick the server turned on. A direction change then lands one
+base tick late for a client sending at the base rate, and the live path disagrees with
+`Reconcile`'s replay, which has always run inputs before holds. It cost nothing while the
+hold expired on exactly the tick the next input arrived on; the 250 ms window is what made
+the two paths meet.
+
+Three details are load-bearing:
+
+- **A stop rolls the tick back.** A deadzone input means the server moved that tick not at
+  all, so neither may the client. It is not a visible jump: the rollback is folded into
+  `_renderOffset` and decays over the next few frames.
+- **`PendingInput.LastMoveTickBefore` carries the pre-hold value** for a replaced tick, which
+  is how replay knows the hold got there first. Without it replay coalesces the input away,
+  applies the hold in the old direction, and the correction *accumulates* rather than
+  converging — measured at 120 steps over 30 snapshots.
+- **The renderer is told the step from `_tickStart`, not from the pre-replacement position.**
+  The difference between two directions is near zero, and a zero step reads as "this tick
+  produced no motion" — the rendered position then stalls for the rest of every send
+  interval.
+
+**The rejected alternative** is reordering `Advance` to apply the hold to the tick that is
+*ending*. It is the same fix by simulation and it puts the hold's step a tick late for the
+renderer: frame-delta burstiness measured 1.00 → 3.23.
+
+### The hold window is a shared constant, and the snapshot cadence is only a cadence
+
+The predictor's hold window is `MaxBankedTicks`, from `GameConstants.MaxBankedMovementMs`
+— 250 ms, 15 base ticks at 60 Hz — the same constant `InputHandler` compiles against. It is
+not measured, not advertised, and not inferrable from the wire. Both sides therefore expire
+a held direction on the same tick as long as they are built against the same
+`Shared.GameLogic`; if they are not, the netcode harness prints the disagreement on its
+`HOLD WINDOW IN USE` line.
+
+**It used to be measured**, and the paragraphs below record why that was fragile — they
+still apply to `TickRateEstimator.SnapshotTickGap` itself, which the interpolation clock
+uses. What no longer follows from a wrong reading there is a mis-predicted position:
+`SetHoldTicks` is a diagnostic now and gates nothing.
+
+`TickRateEstimator.SnapshotTickGap` is a **running minimum** of the base-tick
 gap between consecutive snapshots — on the premise that only drops move a gap, and only
 widen it — **and a narrower gap is adopted only after being observed twice.**
 
@@ -688,12 +837,15 @@ handled, not on a world-tick boundary, so the gap from it to the next scheduled 
 whatever the phase happens to be — 1 to 3 base ticks against a true cadence of 4. Two
 snapshots batched into one socket read do the same.
 
-**What you would observe without the rule:** that one off-cadence gap pins the hold window
-for the whole session, and the minimum never recovers. At a keyframe gap of 1 against a real
-cadence of 4, `HoldTicks` sits at 1 — which switches the hold off entirely. The predictor
-then steps only on inputs and reproduces about a quarter of the server's motion at a 15 Hz
-send rate against a 60 Hz base tick, so every snapshot arrives as a correction. It is set
-once, at join, never recovers, and whether a reconnect clears it is a coin flip on phase.
+**What you would have observed without the rule, while the window was measured:** that one
+off-cadence gap pinned the hold window for the whole session, and the minimum never
+recovered. At a keyframe gap of 1 against a real cadence of 4, `HoldTicks` sat at 1 — which
+switched the hold off entirely. The predictor then stepped only on inputs and reproduced
+about a quarter of the server's motion at a 15 Hz send rate against a 60 Hz base tick, so
+every snapshot arrived as a correction. It was set once, at join, never recovered, and
+whether a reconnect cleared it was a coin flip on phase. Reading the window from the shared
+constant is what removed that failure mode at the source; what remains below is the
+interpolation clock's stake in the same measurement.
 
 A true cadence repeats on every snapshot and therefore confirms immediately; a one-off never
 does. Drops still only widen a gap and are still ignored, so "minimum, not mean" is intact.
@@ -725,11 +877,12 @@ Start here instead, in this order:
    the hold window claims.
 3. **The six `Skip*` counters** say *why* that shortfall exists, and they need opposite
    responses, which is why they are counted apart rather than summed:
-   `SkipInputAlreadyStepped` is rule 1 and is **not** a fault; `SkipExpired` means the hold
-   window is too narrow — check it against the measured snapshot cadence; `SkipNothingHeld`
-   means an explicit stop or no input yet; `SkipNoHoldWindow` means `HoldTicks <= 1`, i.e.
-   the hold never measured; `SkipRefusedByMovementModel` and `SkipNoDisplacement` mean the
-   shared movement model declined the vector, usually a bounds clamp.
+   `SkipInputAlreadyStepped` is rule 1 and is **not** a fault; `SkipExpired` means the
+   client has heard nothing for 250 ms — a genuine stall, not a narrow window, now that the
+   window is a constant; `SkipNothingHeld` means an explicit stop or no input yet;
+   `SkipNoHoldWindow` is **retired and always 0** — nothing can switch the hold off any
+   more; `SkipRefusedByMovementModel` and `SkipNoDisplacement` mean the shared movement
+   model declined the vector, usually a bounds clamp.
    They are recorded **only on the live path** — `Reconcile` replays the same guards over
    the unacknowledged timeline, and folding those in would measure how much replay ran
    rather than how the rendered position behaved.
