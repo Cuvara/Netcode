@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-25
+
 ### Added — the snapshot's age is measured, and it steers the prediction clock
 
 - **`SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and* rate

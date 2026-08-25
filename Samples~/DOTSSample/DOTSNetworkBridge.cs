@@ -53,7 +53,7 @@ namespace DOTSSample
         [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
                  "sine-wave walk, which is what this sample did before and is still what " +
                  "you want for an unattended soak run.")]
-        [SerializeField] private bool useKeyboardInput = true;
+        [SerializeField] private bool useKeyboardInput = false;
 
         [Header("Prediction")]
         [Tooltip("Fallback movement speed, used before the first snapshot and against a " +
@@ -64,8 +64,21 @@ namespace DOTSSample
                  "rather than guessing.")]
         [SerializeField] private float playerSpeed = 5f;
 
+        [Tooltip("Keep the camera over the local player. Off leaves it fixed at the world " +
+                 "origin, which is what this sample did before — fine for watching several " +
+                 "players at once, wrong the moment you walk anywhere.")]
+        [SerializeField] private bool followLocalPlayer = true;
+
+        [Tooltip("How hard the camera pulls toward the local player, per second. Higher is " +
+                 "tighter and passes more of the avatar's reconciliation snaps into the view; " +
+                 "lower drifts behind during sustained movement.")]
+        [SerializeField] private float cameraFollowSharpness = 8f;
+
         [Header("Run")]
-        [SerializeField] private float runSeconds = 300f;
+        [Tooltip("Seconds before the client disconnects itself. The end is quiet -- the avatar " +
+                 "simply stops and the HUD reads 'Run complete' -- so a value shorter than the " +
+                 "session you are actually running looks like a movement or netcode fault.")]
+        [SerializeField] private float runSeconds = 3600f;
 
         private NetworkClient _client;
         private WorldViewBinder _binder;
@@ -317,7 +330,17 @@ namespace DOTSSample
             // With a single map there is nothing to choose, so connect to it directly —
             // taking the id from the list rather than from 'mapId', or configuring one
             // map would silently connect to whatever 'mapId' happened to hold.
-            if (availableMaps == null || availableMaps.Length == 0)
+            //
+            // A map named ON THE COMMAND LINE skips the selector outright. Without this a
+            // built player offered more than one map sits on the map-picker forever waiting
+            // for a click, which makes it unusable for an automated run against a live
+            // server -- the case this sample exists to serve. -cuvara-map is already parsed
+            // and carries MapExplicit precisely so a caller can say "this map, no UI".
+            if (_backend.MapExplicit)
+            {
+                StartConnection(_backend.MapId);
+            }
+            else if (availableMaps == null || availableMaps.Length == 0)
             {
                 StartConnection(mapId);
             }
@@ -511,12 +534,29 @@ namespace DOTSSample
         /// with differ from the one a player would say they pressed.
         /// </para>
         /// </remarks>
+        /// <summary>Angular rate of the scripted walk, radians per second.</summary>
+        private const float WalkRadiansPerSecond = 0.6f;
+
+        private float _walkAngle;
+
         private void SampleMovementInput()
         {
             if (!useKeyboardInput)
             {
-                _moveX = Mathf.Sin(Time.time * 1.5f);
-                _moveY = Mathf.Cos(Time.time * 0.8f);
+                // A CIRCLE, not a constant heading. The diagnostic that stood here sent a
+                // constant +x so distance over time would be a straight line; it walks the
+                // avatar into the map bound in about a minute and every step after that is
+                // clamped to no displacement. The run then looks perfectly smooth while
+                // measuring nothing -- held steps read 0/1711 and the prediction path was
+                // simply not being exercised.
+                //
+                // Slow enough that the direction is near-constant between two inputs, so
+                // this still tests the held-direction path rather than a new vector every
+                // tick, and closed so the avatar stays inside the bounds indefinitely.
+                float angle = _walkAngle;
+                _walkAngle += WalkRadiansPerSecond * Time.deltaTime;
+                _moveX = (float)Math.Cos(angle);
+                _moveY = (float)Math.Sin(angle);
                 return;
             }
 
@@ -598,6 +638,71 @@ namespace DOTSSample
         private static float Axis(bool positive, bool negative) =>
             (positive ? 1f : 0f) - (negative ? 1f : 0f);
 #endif
+
+        /// <summary>
+        /// Keeps the camera over the local player.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Without this the camera sits at the world origin for the whole run
+        /// (<c>DOTSSceneSetup</c> places it there and nothing moves it), and with
+        /// <c>orthographicSize = 12</c> on a 4:3 window that is roughly ±16 units across —
+        /// about three seconds of walking at the default speed. Past that your own capsule
+        /// leaves the screen while everyone still standing near the origin stays visible,
+        /// which reads exactly like "my player disappeared when I moved" and sends the reader
+        /// looking for a rendering or netcode fault that is not there.
+        /// </para>
+        /// <para>
+        /// <b>LateUpdate, and damped.</b> LateUpdate so the camera reads positions the frame's
+        /// simulation has already written rather than trailing them by a frame.
+        /// </para>
+        /// <para>
+        /// <b>The damping is not a cosmetic choice, and an exact follow was tried first.</b>
+        /// The local avatar is predicted, and reconciliation hard-snaps it whenever the
+        /// correction exceeds <c>LocalMovePredictor.SmoothingThreshold</c>. A camera locked
+        /// rigidly to a position that snaps moves the ENTIRE view on every snap, so every
+        /// remote player and every enemy on screen jumps with it. Measured against this
+        /// server: walking produced snaps at roughly the input rate, and with a rigid follow
+        /// the result was reported as "other players and enemies are jerky and sometimes
+        /// disappear" — an artefact of the camera, laid over entities that were being
+        /// interpolated correctly. Damping decouples the view from the avatar's corrections.
+        /// </para>
+        /// <para>
+        /// The trade is real and worth stating: damping adds easing of its own, so this is
+        /// the wrong setting for judging how smooth remote motion is. Turn
+        /// <see cref="followLocalPlayer"/> off for that — a still camera adds nothing at all.
+        /// </para>
+        /// <para>
+        /// Judging REMOTE smoothness is still easier with <see cref="followLocalPlayer"/> off
+        /// and the local player left standing still, because then nothing on screen is moving
+        /// for a reason other than the thing under observation.
+        /// </para>
+        /// </remarks>
+        private void LateUpdate()
+        {
+            if (!followLocalPlayer || _view == null || !_view.IsValid) return;
+
+            var cam = GetCamera();
+            if (cam == null) return;
+
+            _view.GetEntityLabels(_labelCache);
+            for (int i = 0; i < _labelCache.Count; i++)
+            {
+                if (!_labelCache[i].IsLocal) continue;
+
+                // Height and rotation are left alone: the camera is top-down orthographic and
+                // only its ground-plane position should track the player.
+                var pos = cam.transform.position;
+                var target = new Vector3(_labelCache[i].WorldPos.x, pos.y, _labelCache[i].WorldPos.z);
+
+                // Exponential smoothing, framerate-independent. A plain Lerp with a constant
+                // factor eases faster on a 300fps machine than a 60fps one, which would make
+                // the sample look different on different hardware for no reason.
+                float k = 1f - Mathf.Exp(-cameraFollowSharpness * Time.unscaledDeltaTime);
+                cam.transform.position = Vector3.Lerp(pos, target, k);
+                return;
+            }
+        }
 
         private void Update()
         {
@@ -704,6 +809,13 @@ namespace DOTSSample
                 }
             }
 
+            _healthFrames++;
+
+            // The binder steers the prediction clock toward the server's tick and needs the
+            // journey time to know how far ahead of the newest snapshot "now" is. Only the
+            // session measures it.
+            _binder.RoundTripMs = _client.Session?.RoundTripMs ?? 0L;
+
             _binder.Tick(_client.World, _client.UserId);
 
             // Per frame, and separately from the snapshot pass above. Snapshot processing
@@ -737,6 +849,85 @@ namespace DOTSSample
                               $"measured {_binder.TickRate.EstimatedHz:F1}Hz off the wire.");
                 }
             }
+
+            LogPredictionHealth();
+        }
+
+        /// <summary>
+        /// Prints the counters that describe how the local player's motion actually behaved,
+        /// once every <see cref="PredictionHealthSeconds"/>.
+        /// </summary>
+        /// <remarks>
+        /// The counters that matter are cheap and already exposed; what was missing was
+        /// anything printing them from a running player. "It still feels jerky" and
+        /// "Snaps=0, corrections=0" cannot both be acted on without this line, and the
+        /// smoothness defects this package has shipped all left every counter clean because
+        /// the SIMULATED position was right and only the rendered one was wrong -- so the
+        /// render figures are printed next to the reconcile ones deliberately.
+        /// </remarks>
+        private const float PredictionHealthSeconds = 5f;
+
+        private float _nextPredictionHealthAt;
+        private int _lastSnaps;
+        private int _lastSmoothed;
+        private int _lastReconciles;
+        private float _healthWindowStart;
+        private int _healthFrames;
+        private int _snapshotsApplied;
+        private int _lastSnapshotsApplied;
+        private long _lastFramesRx;
+
+        private void LogPredictionHealth()
+        {
+            if (_predictor == null || Time.realtimeSinceStartup < _nextPredictionHealthAt)
+            {
+                return;
+            }
+
+            _nextPredictionHealthAt = Time.realtimeSinceStartup + PredictionHealthSeconds;
+
+            float window = Mathf.Max(1e-3f, Time.realtimeSinceStartup - _healthWindowStart);
+            _healthWindowStart = Time.realtimeSinceStartup;
+            float fps = _healthFrames / window;
+            float appliedPerSec = (_snapshotsApplied - _lastSnapshotsApplied) / window;
+            long framesRx = _client.Session?.FramesReceived ?? 0L;
+            float framesPerSec = (framesRx - _lastFramesRx) / window;
+            _lastFramesRx = framesRx;
+            _healthFrames = 0;
+            _lastSnapshotsApplied = _snapshotsApplied;
+
+            int snaps = _predictor.Snaps - _lastSnaps;
+            int smoothed = _predictor.SmoothedCorrections - _lastSmoothed;
+            int reconciles = _predictor.Reconciles - _lastReconciles;
+            _lastSnaps = _predictor.Snaps;
+            _lastSmoothed = _predictor.SmoothedCorrections;
+            _lastReconciles = _predictor.Reconciles;
+
+            float step = _predictor.LastCorrection / Mathf.Max(1e-6f, playerSpeed * PredictedDt());
+
+            Debug.Log(
+                $"[DOTSNet/health] reconciles={reconciles} smoothed={smoothed} snaps={snaps} " +
+                $"lastCorrection={_predictor.LastCorrection:F4} ({step:F2} steps) " +
+                $"span={_predictor.EffectiveSmoothingSpan * 1000f:F1}ms " +
+                $"stepInterval={_predictor.ObservedStepInterval * 1000f:F1}ms " +
+                $"held={_predictor.HeldStepsApplied}/{_predictor.BaseTicksAdvanced} " +
+                $"skipExpired={_predictor.SkipExpired} coalesced={_predictor.CoalescedInputs} " +
+                $"clientTick={_predictor.BaseTick} serverTick={_binder.LastServerTick} " +
+                $"lead={_predictor.BaseTick - _binder.LastServerTick}t " +
+                $"fps={fps:F0} snapshotsApplied={appliedPerSec:F1}/s " +
+                $"clamped={_predictor.ClampedFrames} discarded={_predictor.DiscardedCatchUpSeconds:F2}s " +
+                $"framesRx={framesPerSec:F1}/s rtt={_client.Session?.RoundTripMs ?? 0}ms " +
+                $"tickError={_predictor.TickError}t resyncs={_predictor.HardResyncs} " +
+                $"pending={_predictor.PendingCount} rejected={_predictor.RejectedInputs} " +
+                $"dropped={_predictor.DroppedInputs} nothingHeld={_predictor.SkipNothingHeld} " +
+                $"alreadyStepped={_predictor.SkipInputAlreadyStepped} " +
+                $"enabled={_predictor.IsEnabled} inputTick={_inputTick} " +
+                $"noDisp={_predictor.SkipNoDisplacement} refused={_predictor.SkipRefusedByMovementModel} " +
+                $"histHit={_predictor.HistoryHits} histMiss={_predictor.HistoryMisses} " +
+                $"staleness={_binder.Staleness.StalenessTicks:F2}t " +
+                $"skew={_binder.Staleness.SkewPpm:F0}ppm " +
+                $"baseline={_binder.Staleness.BaselineSeconds:F0}s " +
+                $"fits={_binder.Staleness.Fits}");
         }
 
         private void OnDestroy()
@@ -790,6 +981,7 @@ namespace DOTSSample
                 _client.SnapshotReceived += s =>
                 {
                     _snapshotCount++;
+                    _snapshotsApplied++;
                     _binder.NoteRemovedIds(s.Removed);
                 };
 
