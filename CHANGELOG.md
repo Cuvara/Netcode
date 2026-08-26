@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-26
+
+### Fixed (sample)
+
+- **Only the local player auto-attacks, and only inside the server's range.** Two defects
+  in `DOTSEntityView`, exposed together by the server's new `/status` attack counters
+  during a zero-leaderboard-kills investigation (345 of 364 attacks rejected in 90 s,
+  breadcrumb `target out of range: distance 18.42 exceeds 3.00`):
+  - every player entity — remote ghosts included — received `AutoAttack`, so the bridge
+    forwarded attacks that remote players' ghosts fired to the server **as the local
+    player's input**, aimed from positions up to a map away (18.42 on a client whose own
+    range check was 10 is only possible from another player's position);
+  - the firing range was a hardcoded `10f` while the server's validator accepts 3.0
+    (`GameConstants.AttackRange`), so the client rendered bullets and "attacked" targets
+    the server silently refused — visually working, doing nothing.
+  `AutoAttack` is now added only when `isLocal`, and its range is
+  `Shared.GameLogic.Components.GameConstants.AttackRange` — the shared library exists
+  exactly so client and server cannot disagree on a rule; the sample now uses it for
+  this one too.
+
 ## [0.25.0] - 2026-08-26
 
 ### Changed (sample)
