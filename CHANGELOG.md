@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-26
+
 ### Fixed
 
 - **The read path could not keep up with the snapshot stream below ~34 fps.** Every await in
