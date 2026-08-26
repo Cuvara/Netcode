@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="ClockSyncProbeView.uss" />
+
+    <engine:VisualElement name="clock-probe" class="cuvara-probe" picking-mode="Ignore">
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Clock sync probe" class="cuvara-probe__title" />
+            <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                          text="Two synthetic clocks, no server, no network. The dial sets how fast the client's clock runs against the server's; the estimator fits the ratio from snapshot arrivals alone and the prediction clock steers on it. +110 ×10³ ppm is not a stress case — it is this package's own development machine, the value that silently disabled the fit until 0.23.0." />
+
+            <engine:Label text="Clock difference (the dial) vs measured (the fill)" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__meter">
+                <engine:VisualElement name="measured-bar" class="cuvara-probe__meter-fill" />
+                <engine:VisualElement name="configured-mark" class="cuvara-probe__meter-mark" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="Skew" class="cuvara-probe__control-label" />
+                <engine:Slider name="skew" class="cuvara-probe__slider" />
+                <engine:Label name="skew-value" class="cuvara-probe__control-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="Jitter" class="cuvara-probe__control-label" />
+                <engine:Slider name="jitter" class="cuvara-probe__slider" />
+                <engine:Label name="jitter-value" class="cuvara-probe__control-value" />
+            </engine:VisualElement>
+
+            <engine:Label text="Inject one perturbation" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="stall" text="Stall a frame (250 ms)" class="cuvara-probe__button" />
+                <engine:Button name="step-clock" text="Step server clock +5 s" class="cuvara-probe__button" />
+                <engine:Button name="reset" text="Reset"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Toggle name="pause" text="Pause" class="cuvara-probe__toggle" />
+            </engine:VisualElement>
+
+            <engine:Label text="The fit" class="cuvara-probe__section" />
+            <engine:Label name="fit-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="The steering" class="cuvara-probe__section" />
+            <engine:Label name="steer-line" class="cuvara-probe__readout" />
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

@@ -5,7 +5,8 @@
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner",
         "Shared.GameLogic",
-        "Cuvara.Netcode.Runtime"
+        "Cuvara.Netcode.Runtime",
+        "UniTask"
     ],
     "includePlatforms": [
         "Editor"
