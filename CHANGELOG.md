@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-26
+
+### Fixed
+
+- **The skew clamp was set at the edge of reality, so the staleness fit was refused on every
+  snapshot and nothing said so.** `MinimumSkew`/`MaximumSkew` were 0.90/1.10. The development
+  machine's true ratio is about **1.1107** — the Windows performance counter runs fast against
+  the Linux clock the server ticks on — so every pair was rejected, `IsUsable` stayed false for
+  a whole session, and the steering silently fell back to the derived figure.
+
+  It was invisible by construction: `SkewPpm` reads 0 without a fit, which is exactly what two
+  clocks that agree look like. It surfaced only because a live client reported `fits=0` after
+  215 s while `stSamples=540` proved the estimator was being fed.
+
+  Bounds are now **0.75/1.33**. Between "two ordinary machines" and "a tick rate that is simply
+  wrong" there is an order of magnitude — a client predicting at 60 against a 15 Hz server is
+  off by 300 %, not by 10 — and the bound belongs in the middle of that gap rather than at the
+  edge of the first. `FitsRefused` and `RefusedSkewPpm` now report a refusal and the value that
+  was refused, so a bound that is wrong can be seen to be wrong instead of inferred from an
+  absence.
+
+  Measured after: `fits=16 refusedFits=0 skew=110,703 ppm staleness=0.21–0.28 ticks`, and the
+  reconcile correction improved from 0.027 to **0.0134–0.0154 units** because the steering is
+  using the measured staleness again rather than the derived one.
+
+- **The DOTS sample renews its Nakama session instead of using one token until it stops
+  working.** `SampleNakamaAuth` kept the session token and discarded everything else; on a
+  default Nakama (`session.token_expiry_sec = 60`) every backend call was dead a minute into
+  every session, silently, because the game connection uses a separate gateway token and keeps
+  running (#48).
+
+  It now keeps the `refresh_token` and the device id, reads the expiry from the token's own
+  `exp` claim rather than assuming a server setting, and renews ten seconds early via
+  `/v2/account/session/refresh` — falling back to a full device authentication when the refresh
+  token has expired too (an hour by default). `Refreshes` and `Reauthentications` are counted
+  separately, because "refreshing every minute" and "re-authenticating every minute" look the
+  same from outside and mean different things.
+
+  Renewal happens before each authenticated poll rather than on a 401, because a refresh on 401
+  still costs one user-visible failure per expiry. Verified live: **185 s of running — three
+  times the expiry — with zero `Auth token invalid`**, where the same setup previously failed
+  and never recovered.
+
+### Changed (diagnostics)
+
+- The health line reports `stSamples`, `fits`, `refusedFits` and `refusedSkew`. The first two
+  are what distinguished "the estimator is not being fed" from "the estimator is refusing what
+  it is fed", which was the whole of the investigation above.
+
+
 ## [0.22.0] - 2026-08-26
 
 ### Fixed
