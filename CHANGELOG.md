@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`WireConnectionDispatchTests` — the transport layer's first tests (#50).** Five cases
+  drive `WireConnection` through a scripted `ITransport`: every decoded frame is counted
+  before dispatch decides its fate, a 1000-frame burst drains inside one `Start()` with
+  exactly one read per frame, a ping is answered with a pong echoing its timestamp, the
+  kick/disconnect pair closes once with the kick's cause, and a frame decoded after the
+  eviction never reaches the consumer.
+
+  What makes them runnable without pumping a player loop: a completed UniTask continues
+  synchronously, so a transport serving pre-canned frames is drained entirely inside
+  `Start()`, and when the script is exhausted the read loop parks on a task that never
+  completes — exactly as it parks on a quiet socket. The one asynchronous case (the pong,
+  whose write crosses a `Task.AsUniTask()` continuation posted to Unity's synchronization
+  context even when the task completed synchronously) is a `[UnityTest]` coroutine for that
+  reason, and the reason is written on it.
+
+  The burst case is the regression fence for the half-the-player-loop-rate ceiling fixed in
+  0.22.0: a read path that costs a scheduler hop per frame cannot drain a burst inside one
+  call, and this asserts it in fifty lines instead of the investigation it actually took.
+  `TcpTransport` itself — real-socket framing and scheduling cost — remains uncovered and
+  #50 stays open for that half.
+
+- The test assembly now references `UniTask`, which the fake transport needs.
+
+
 ## [0.23.0] - 2026-08-26
 
 ### Fixed
