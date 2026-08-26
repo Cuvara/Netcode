@@ -173,13 +173,29 @@ namespace DOTSSample
             else
             {
                 _em.AddComponentData(entity, new PlayerCombatTag());
-                _em.AddComponentData(entity, new AutoAttack
+
+                // LOCAL player only. Remote players got AutoAttack too for one release,
+                // and every attack their ghosts fired was forwarded to the server AS THE
+                // LOCAL PLAYER'S INPUT — aimed from a position up to a map away. Live
+                // /status counters made it visible: 345 of 364 attacks rejected, the
+                // breadcrumb reading "distance 18.42 exceeds 3.00" on a client whose own
+                // firing range check was 10.
+                if (isLocal)
                 {
-                    Cooldown = 0.3f,
-                    Timer = 0f,
-                    Range = 10f,
-                    Damage = 1
-                });
+                    _em.AddComponentData(entity, new AutoAttack
+                    {
+                        Cooldown = 0.3f,
+                        Timer = 0f,
+                        // The server's validator, not a number of our own: the sample
+                        // compiles against Shared.GameLogic precisely so client and
+                        // server cannot disagree on a rule. The old hardcoded 10f made
+                        // the client fire (and render bullets) at targets the server
+                        // rejects at anything past 3.0 — visually "attacking", silently
+                        // doing nothing.
+                        Range = Shared.GameLogic.Components.GameConstants.AttackRange,
+                        Damage = 1
+                    });
+                }
             }
 
             _entities[id] = entity;
