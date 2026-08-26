@@ -891,6 +891,9 @@ namespace DOTSSample
         private readonly System.Diagnostics.Stopwatch _healthStopwatch =
             System.Diagnostics.Stopwatch.StartNew();
         private double _healthStopwatchMark;
+
+        /// <summary>Stopwatch reading at the first health line, so totals can be divided by it.</summary>
+        private double _firstHealthAt = -1;
         private int _healthFrames;
         private int _snapshotsApplied;
         private int _lastSnapshotsApplied;
@@ -909,6 +912,7 @@ namespace DOTSSample
             _healthWindowStart = Time.realtimeSinceStartup;
 
             double swNow = _healthStopwatch.Elapsed.TotalSeconds;
+            if (_firstHealthAt < 0) _firstHealthAt = swNow;
             double swWindow = swNow - _healthStopwatchMark;
             _healthStopwatchMark = swNow;
             float fps = _healthFrames / window;
@@ -951,6 +955,13 @@ namespace DOTSSample
                 $"skew={_binder.Staleness.SkewPpm:F0}ppm " +
                 $"baseline={_binder.Staleness.BaselineSeconds:F0}s " +
                 $"unityWin={window:F3}s swWin={swWindow:F3}s " +
+                // Absolute totals as well as per-window rates. A per-window rate is a
+                // difference of two counters over a measured interval, and every one of
+                // those three can be wrong on its own; a total divided by the time since the
+                // first health line cannot be. When the two disagree the bookkeeping is the
+                // suspect, not the network.
+                $"rxTotal={_client.Session?.FramesReceived ?? 0L} " +
+                $"sinceFirst={_healthStopwatch.Elapsed.TotalSeconds - _firstHealthAt:F1}s " +
                 $"clockRatio={(swWindow > 0 ? window / swWindow : 0):F4} " +
                 $"fits={_binder.Staleness.Fits}");
         }
