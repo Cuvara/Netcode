@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-26
+
+### Changed (sample)
+
+- **The combat path stops logging every shot.** `AutoAttackSystem` logged each fire and the
+  bridge logged each attack send — together ~**1,200 log lines per minute** on a running
+  client, the largest remaining source after the poll and counter spam was gated in 0.21.0.
+  The bridge's send log moves behind `verboseLogging`; the per-fire log in the DOTS system is
+  removed outright, because a `SystemBase` has no clean reach into that MonoBehaviour toggle
+  and a log that cannot be turned off does not belong at several lines per second. The
+  `verboseLogging` attack-counter diagnostics still cover the path when it is under
+  investigation. Measured after: **~30 lines per minute**, all of them health lines.
+
+
 ## [0.24.0] - 2026-08-26
 
 ### Fixed
