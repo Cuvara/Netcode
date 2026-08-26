@@ -108,7 +108,12 @@ namespace DOTSSample
                 var attackEvent = attackEcb.CreateEntity();
                 attackEcb.AddComponent(attackEvent, new AttackRequest { TargetId = bestId });
 
-                Debug.Log($"[AutoAttack] Fired at {bestId} dist={bestDist:F1}");
+                // No per-fire log. Auto-attack fires several times a second by design, so
+                // this line alone was ~700 log lines per minute on a running client -- the
+                // largest remaining source after the poll and counter spam was gated. The
+                // bridge's verboseLogging diagnostics already cover the attack path, and a
+                // DOTS system has no clean reach into that MonoBehaviour toggle; a log that
+                // cannot be turned off does not belong at this rate.
             }
 
             enemies.Dispose();

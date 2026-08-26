@@ -1061,7 +1061,7 @@ namespace DOTSSample
                     var moveY = _moveY;
                     var attackTarget = _pendingAttackTarget;
                     _pendingAttackTarget = "";
-                    if (!string.IsNullOrEmpty(attackTarget))
+                    if (verboseLogging && !string.IsNullOrEmpty(attackTarget))
                         Debug.Log($"[Attack] Sending attack on {attackTarget} (tick {_inputTick})");
 
                     _client.Session?.SendInput(_inputTick, moveX, moveY, attackTarget);
