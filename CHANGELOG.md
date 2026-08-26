@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-26
+
+### Fixed
+
+- **The render path allocates zero bytes per frame.** `WorldViewBinder.Tick` enumerated
+  `WorldState.Entities` through its `IReadOnlyDictionary` interface, which boxes the
+  dictionary's struct enumerator — **88 bytes per foreach, measured**, once per rendered
+  frame, ~44 KB/s at 500 fps into Unity's stop-the-world GC. It was the only per-frame
+  allocation left in the audited surface (`LocalMovePredictor`, the estimators and the
+  interpolation path all measure 0 B on their per-frame paths). The binder now enumerates
+  `WorldState.EntityMap` — the same map as its concrete type, added in `Shared.GameLogic`
+  `sgl-v0.3.0` — which measures 0 B and is ~20 % faster at 100 entities (4,865 → 3,864 ns),
+  the interface dispatch going with the box. `EntityMapIsTheSameMapAsEntities_NotACopy`
+  pins the identity contract. Requires `com.rpgmmo.shared-gamelogic` at `sgl-v0.3.0`
+  (manifest **and** lock).
+
+### Added
+
+- **`Clock Sync Probe` sample scene.** Two synthetic clocks, no server, no network: a dial
+  sets how fast the client's clock runs against the server's, `SnapshotStalenessEstimator`
+  fits the ratio from snapshot arrivals alone, and the prediction clock steers on it. The
+  default dial position is **+110 ×10³ ppm — this package's own development machine**, the
+  measured value that sat just past the original clamp and silently disabled the fit until
+  0.23.0. Convergence, refusal past the clamp (now a colour, once a silence), a stalled
+  frame eating into `ClampedFrames` instead of burst-advancing, and a stepped server clock
+  moving `HardResyncs` instead of `Snaps` — each visible rather than read about. UI Toolkit
+  (UXML/USS), per the sample-scene contract; readouts are the same counters
+  `[DOTSNet/health]` prints, so numbers here compare directly with a live client.
+
+
 ### Added
 
 - **`WireConnectionDispatchTests` — the transport layer's first tests (#50).** Five cases
