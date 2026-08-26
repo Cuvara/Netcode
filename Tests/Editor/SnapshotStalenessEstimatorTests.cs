@@ -306,6 +306,57 @@ namespace Cuvara.Netcode.Tests.Editor
                 "a rate half of the server's was accepted as a fit. Steering a simulation on " +
                 "that puts it somewhere arbitrary, and the caller has no way to tell a fitted " +
                 "line from a fitted absurdity.");
+
+            Assert.That(e.FitsRefused, Is.GreaterThan(0),
+                "the refusal was silent. SkewPpm reads 0 without a fit, which is exactly what " +
+                "two clocks that agree look like, so a bound set too tightly disables the " +
+                "measurement for a whole session and reports nothing.");
+
+            Assert.That(e.RefusedSkewPpm, Is.LessThan(-100_000),
+                $"the refused rate read {e.RefusedSkewPpm:F0} ppm. The number that was rejected " +
+                "has to be visible, or a bound that is wrong cannot be seen to be wrong.");
+        }
+
+        /// <summary>
+        /// A real machine's clock difference is fitted, not refused.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The bounds were originally 0.90 and 1.10. The machine this was developed on sits at
+        /// about <b>1.103</b> — the Windows performance counter runs fast against the Linux
+        /// clock the server ticks on — so every fit was refused, <c>IsUsable</c> stayed false
+        /// for a whole session, and the steering fell back to the derived figure with nothing
+        /// reporting it.
+        /// </para>
+        /// <para>
+        /// This is the case that was failing in the field while every test passed, which is
+        /// why it is pinned at a value taken from a real machine rather than at a round number.
+        /// </para>
+        /// </remarks>
+        [TestCase(1.103)]
+        [TestCase(0.90)]
+        [TestCase(1.25)]
+        public void AnOrdinaryMachinesClockDifferenceIsFittedRatherThanRefused(double rate)
+        {
+            var e = new SnapshotStalenessEstimator();
+
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz;
+
+            for (var i = 0; i < 15 * 30; i++)
+            {
+                e.Sample(tick, now, BaseHz);
+                tick += SnapshotEvery;
+                now += Interval * rate;
+            }
+
+            Assert.That(e.IsUsable, Is.True,
+                $"a clock ratio of {rate:F3} was refused ({e.FitsRefused} refusals, last " +
+                $"reading {e.RefusedSkewPpm:F0} ppm). Between two ordinary machines and a tick " +
+                "rate that is simply wrong there is an order of magnitude; a bound at the edge " +
+                "of the first rejects reality and reports nothing.");
+
+            Assert.That(e.FitsRefused, Is.Zero);
         }
 
         [Test]

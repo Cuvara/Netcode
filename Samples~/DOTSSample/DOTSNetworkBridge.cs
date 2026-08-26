@@ -191,6 +191,14 @@ namespace DOTSSample
         // --- Auth ---
         private string _nakamaSessionToken;
 
+        /// <summary>
+        /// Kept past the handshake so the session can be renewed. It used to be discarded the
+        /// moment the gateway token was in hand, which is why the session token was read once
+        /// and then used until it stopped working -- 60 seconds later on a default Nakama, and
+        /// silently, because the game connection uses a separate token and keeps running.
+        /// </summary>
+        private SampleNakamaAuth _nakamaAuth;
+
         // --- Backend address resolved at startup ---
         // Command line first, then environment, then the field initializers above.
         // See BackendCommandLine; nothing here is read after Start.
@@ -963,7 +971,13 @@ namespace DOTSSample
                 $"rxTotal={_client.Session?.FramesReceived ?? 0L} " +
                 $"sinceFirst={_healthStopwatch.Elapsed.TotalSeconds - _firstHealthAt:F1}s " +
                 $"clockRatio={(swWindow > 0 ? window / swWindow : 0):F4} " +
-                $"fits={_binder.Staleness.Fits}");
+                $"fits={_binder.Staleness.Fits} " +
+                $"stSamples={_binder.Staleness.Samples} " +
+                // A refused fit is otherwise invisible: SkewPpm reads 0 without one, which is
+                // exactly what two clocks that agree look like. That is how a bound set at
+                // 0.90/1.10 disabled the measurement for a whole session and said nothing.
+                $"refusedFits={_binder.Staleness.FitsRefused} " +
+                $"refusedSkew={_binder.Staleness.RefusedSkewPpm:F0}ppm");
         }
 
         private void OnDestroy()
@@ -992,6 +1006,7 @@ namespace DOTSSample
                     _backend.NakamaServerKey);
                 var jwt = await auth.GetGatewayTokenAsync(device, ct);
                 _userId = auth.UserId;
+                _nakamaAuth = auth;
                 _nakamaSessionToken = auth.SessionToken;
                 _cachedUserText = "User: " + (_userId.Length > 12 ? _userId.Substring(0, 12) : _userId) + "..." +
                                   (string.IsNullOrEmpty(_backend.InstanceLabel)
@@ -1257,6 +1272,11 @@ namespace DOTSSample
 
             while (!ct.IsCancellationRequested)
             {
+                // Renewed before the request rather than after a failure: a refresh on 401
+                // still costs one user-visible request per expiry, and on a default Nakama an
+                // expiry happens every minute.
+                await RenewNakamaSessionAsync(ct);
+
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
                 {
                     await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
@@ -1310,6 +1330,11 @@ namespace DOTSSample
 
             while (!ct.IsCancellationRequested)
             {
+                // Renewed before the request rather than after a failure: a refresh on 401
+                // still costs one user-visible request per expiry, and on a default Nakama an
+                // expiry happens every minute.
+                await RenewNakamaSessionAsync(ct);
+
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
                 {
                     if (verboseLogging)
@@ -1363,6 +1388,47 @@ namespace DOTSSample
 
                 await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds), DelayType.Realtime,
                     PlayerLoopTiming.Update, ct);
+            }
+        }
+
+        /// <summary>
+        /// Keep the Nakama session usable, and report the two ways it can be kept.
+        /// </summary>
+        /// <remarks>
+        /// Cheap when there is nothing to do -- the auth object compares two timestamps. It is
+        /// called before each authenticated poll rather than in a timer of its own, so a poll
+        /// that is backed off does not keep renewing a session nothing is using.
+        /// </remarks>
+        private async UniTask RenewNakamaSessionAsync(CancellationToken ct)
+        {
+            if (_nakamaAuth == null) return;
+
+            int refreshes = _nakamaAuth.Refreshes;
+            int reauths = _nakamaAuth.Reauthentications;
+
+            try
+            {
+                await _nakamaAuth.EnsureSessionAsync(ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[NakamaAuth] Could not renew the session: " + ex.Message);
+                return;
+            }
+
+            if (_nakamaAuth.Refreshes != refreshes || _nakamaAuth.Reauthentications != reauths)
+            {
+                _nakamaSessionToken = _nakamaAuth.SessionToken;
+
+                // Logged on the change, not on every renewal check: a session being renewed on
+                // schedule is not news, and a client re-authenticating instead of refreshing
+                // is -- it means the refresh token expired too, which is an hour by default.
+                if (_nakamaAuth.Reauthentications != reauths)
+                    Debug.Log("[NakamaAuth] Re-authenticated from the device id " +
+                              $"(refresh unavailable or rejected); total {_nakamaAuth.Reauthentications}");
+                else if (verboseLogging)
+                    Debug.Log($"[NakamaAuth] Session refreshed; total {_nakamaAuth.Refreshes}");
             }
         }
 

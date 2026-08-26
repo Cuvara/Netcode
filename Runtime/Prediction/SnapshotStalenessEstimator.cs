@@ -113,16 +113,30 @@ namespace Cuvara.Netcode.Prediction
         /// Bounds on the fitted rate, as a ratio of client clock to server tick time.
         /// </summary>
         /// <remarks>
-        /// Two clocks that disagree by more than a few percent are not two clocks with skew,
-        /// they are a wrong tick rate or a stepped clock, and a slope fitted through such a
-        /// pair would steer the simulation somewhere arbitrary. Clamping keeps a bad fit
-        /// merely unhelpful instead of harmful; <see cref="SkewPpm"/> still reports what was
-        /// measured, so the disagreement stays visible.
+        /// A pair that implies an impossible rate is a bad pair, not a discovery: a slope
+        /// fitted through one would steer the simulation somewhere arbitrary. What counts as
+        /// impossible has to be chosen against what is merely unusual, and the first attempt
+        /// got that wrong.
+        ///
+        /// <para><b>These were 0.90 and 1.10, and that was too tight to be useful.</b> On the
+        /// machine this was developed on the true ratio is about <b>1.103</b> — the Windows
+        /// performance counter runs fast against the Linux clock the server ticks on, and the
+        /// snapshot stream the client observes advances at 54.4 base ticks per client second
+        /// against a nominal 60. So every fit was refused, <c>IsUsable</c> stayed false for a
+        /// whole session, and the steering silently fell back to the derived figure. Nothing
+        /// reported it: <c>SkewPpm</c> reads 0 when there is no fit, which is indistinguishable
+        /// from two clocks that agree.</para>
+        ///
+        /// <para>A third either way still rejects what this is for. A client predicting at the
+        /// wrong tick rate — 60 against a 15 Hz server, the failure the clamp exists to catch —
+        /// is off by 300%, not by 10. Between "two ordinary machines" and "a rate that is
+        /// simply wrong" there is an order of magnitude, and the bound belongs in the middle of
+        /// it rather than at the edge of the first.</para>
         /// </remarks>
-        public const double MinimumSkew = 0.90;
+        public const double MinimumSkew = 0.75;
 
         /// <inheritdoc cref="MinimumSkew"/>
-        public const double MaximumSkew = 1.10;
+        public const double MaximumSkew = 1.33;
 
         private double _offset;
         private double _skew = 1.0;
@@ -166,6 +180,26 @@ namespace Cuvara.Netcode.Prediction
 
         /// <summary>Times a new line has been fitted.</summary>
         public int Fits { get; private set; }
+
+        /// <summary>
+        /// Times a fit was refused because the pair implied a rate outside
+        /// <see cref="MinimumSkew"/>..<see cref="MaximumSkew"/>.
+        /// </summary>
+        /// <remarks>
+        /// Reported because a refusal is otherwise invisible: <see cref="SkewPpm"/> reads 0
+        /// without a fit, which looks exactly like two clocks that agree. A bound set too
+        /// tightly therefore disables the measurement for a whole session and says nothing —
+        /// which is what happened at the original 0.90/1.10, against a machine whose true
+        /// ratio is 1.103.
+        /// </remarks>
+        public int FitsRefused { get; private set; }
+
+        /// <summary>The rate the last refused pair implied, in ppm, or 0 if none was refused.</summary>
+        /// <remarks>
+        /// The number that was rejected, so a bound that is wrong can be seen to be wrong
+        /// rather than inferred from an absence.
+        /// </remarks>
+        public double RefusedSkewPpm { get; private set; }
 
         /// <summary>
         /// Record a snapshot and return how old it was when it was acted on, in base ticks.
@@ -266,6 +300,11 @@ namespace Cuvara.Netcode.Prediction
                     BaselineSeconds = span;
                     Fits++;
                 }
+                else
+                {
+                    FitsRefused++;
+                    RefusedSkewPpm = (skew - 1.0) * 1e6;
+                }
 
                 // The older anchor is kept so the baseline keeps growing and the rate estimate
                 // keeps tightening -- until it is old enough that half the evidence is stale,
@@ -306,6 +345,8 @@ namespace Cuvara.Netcode.Prediction
             StalenessTicks = 0f;
             BaselineSeconds = 0;
             Fits = 0;
+            FitsRefused = 0;
+            RefusedSkewPpm = 0;
         }
     }
 }
