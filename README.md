@@ -7,7 +7,8 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 
 - **Wire transport** — TCP (KCP planned), 4-byte BE length-prefix framing
 - **Codec** — JSON and Protobuf wire codecs, distinguished inbound by a one-byte sniff
-- **Two-hop handshake** — Gateway auth → JoinToken → Game server connect
+- **Two-hop handshake** — Gateway auth → JoinToken → Game server connect. Retryable assignment refusals ("server is starting…") consume a join attempt with a jittered pause; the gateway's terminal precondition answers abort with the real error
+- **Automatic reconnect** — a `server_shutdown` close re-runs the connect flow through the registered `IAuthProvider` (jittered, linearly-backed-off rounds spanning the server's 30 s entity hold); off per user-initiated disconnects, observable via `ReconnectAttemptStarted`/`Reconnected`/`ReconnectFailed`
 - **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types

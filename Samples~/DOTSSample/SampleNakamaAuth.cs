@@ -182,19 +182,54 @@ namespace DOTSSample
             }
         }
 
+        /// <summary>The gateway JWT from the last successful call, reused while valid.</summary>
+        public string GatewayToken { get; private set; }
+
+        /// <summary>Expiry of <see cref="GatewayToken"/> (its <c>exp</c> claim), UTC.</summary>
+        public DateTime GatewayTokenExpiresUtc { get; private set; } = DateTime.MinValue;
+
+        /// <summary>How many calls were answered from the cached gateway token.</summary>
+        public int GatewayTokenReuses { get; private set; }
+
         public async UniTask<string> GetGatewayTokenAsync(string deviceId, CancellationToken ct)
         {
             if (string.IsNullOrEmpty(deviceId))
                 throw new ArgumentException("device id is required", nameof(deviceId));
 
+            // The cached token first. The gateway JWT lives an hour; before this
+            // check every reconnect was a COLD login — device auth (Postgres) +
+            // profile hook + the rate-limited gateway_token RPC (burst 5) — so a
+            // server restart with N clients produced ~2N Nakama HTTP calls for
+            // credentials almost all of them already held, and more than five
+            // network flaps in an hour turned into a login failure (#54).
+            if (deviceId == _deviceId &&
+                !string.IsNullOrEmpty(GatewayToken) &&
+                GatewayTokenExpiresUtc != DateTime.MinValue &&
+                DateTime.UtcNow + TimeSpan.FromSeconds(30) < GatewayTokenExpiresUtc)
+            {
+                GatewayTokenReuses++;
+                return GatewayToken;
+            }
+
             _deviceId = deviceId;
 
-            var authBody = "{\"id\":\"" + Escape(deviceId) + "\"}";
-            var authJson = await PostAsync(
-                "/v2/account/authenticate/device?create=true", _basicAuth, authBody, ct);
-
-            ApplySession(authJson);
-            var sessionToken = SessionToken;
+            // Reuse the Nakama session too when it is still fresh: EnsureSessionAsync
+            // refreshes or re-auths only when needed, so the common reconnect costs
+            // one RPC, not a device auth plus an RPC.
+            string sessionToken;
+            if (!string.IsNullOrEmpty(SessionToken))
+            {
+                await EnsureSessionAsync(ct);
+                sessionToken = SessionToken;
+            }
+            else
+            {
+                var authBody = "{\"id\":\"" + Escape(deviceId) + "\"}";
+                var authJson = await PostAsync(
+                    "/v2/account/authenticate/device?create=true", _basicAuth, authBody, ct);
+                ApplySession(authJson);
+                sessionToken = SessionToken;
+            }
 
             var rpcJson = await PostAsync(
                 "/v2/rpc/gateway_token", "Bearer " + sessionToken, "\"{}\"", ct);
@@ -212,6 +247,8 @@ namespace DOTSSample
                 throw new InvalidOperationException(
                     "gateway_token RPC returned no 'token' field. Payload: " + payload);
 
+            GatewayToken = gatewayToken;
+            GatewayTokenExpiresUtc = ReadExpiry(gatewayToken);
             return gatewayToken;
         }
 

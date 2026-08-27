@@ -107,7 +107,11 @@ namespace Cuvara.Netcode.Client
 
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                timeout.CancelAfter(_settings.ConnectTimeout);
+                // EnterWorldTimeout, not ConnectTimeout: against a cold map the
+                // gateway may allocate a server and wait for it to register before
+                // answering (its own budget is 18 s). The old 10 s here cancelled a
+                // join the gateway was about to complete — see NetworkSettings.
+                timeout.CancelAfter(_settings.EnterWorldTimeout);
 
                 await connection.SendFrameAsync(
                     MsgType.EnterWorld, new EnterWorldRequest { MapId = mapId }, timeout.Token);
