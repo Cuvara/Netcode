@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-27
+
+### Added
+
+- **Automatic reconnect on `server_shutdown`** (#54). The server holds a
+  disconnected player's entity for 30 s precisely so the client can come back
+  into its own body, and nothing in the package consumed that window — a
+  shutdown notice just ended the session. When the session closes with the
+  server's `server_shutdown` reason, an `IAuthProvider` is registered, and
+  `NetworkSettings.ReconnectOnServerShutdown` is on (the default),
+  `NetworkClient` now re-runs the whole connect flow by itself: up to
+  `ReconnectAttempts` (5) rounds, pausing `ReconnectDelay × round` plus jitter
+  so the default schedule spans the hold window and a restart's reconnect wave
+  arrives spread out instead of as one synchronized storm. New events —
+  `ReconnectAttemptStarted`, `Reconnected`, `ReconnectFailed` — let a caller
+  narrate it; a user-initiated `Disconnect()`/`Dispose()` never triggers it.
+- **`DelegateAuthProvider`** — adapts a delegate to `IAuthProvider`, for token
+  sources that are a method on an existing object (the DOTS sample's Nakama
+  helper, a test fixture).
+- **`NetworkSettings.EnterWorldTimeout`** (20 s) and **`RetryJitter`** (500 ms).
+
+### Fixed
+
+- The retry/reconnect EditMode tests wait on wall-clock deadlines instead of
+  frame counts, and the pauses themselves go through a new
+  `NetworkSettings.DelayScheduler` seam (default: the realtime player-loop
+  delay used until now). The headless EditMode runner can spin a
+  [UnityTest]'s `yield return null` steps without ever pumping the editor
+  tick that completes a real `UniTask.Delay`, so a policy test crossing one
+  stalled forever in CI while passing in an interactive Editor; the tests
+  now schedule those pauses synchronously.
+- **A retryable `enter_world` refusal now consumes a join attempt instead of
+  aborting the connect** (#54). `EnterWorldAsync` sat inside the retry loop but
+  outside its `try`: the gateway deliberately types "server is starting, retry
+  shortly" as retryable and its single-flight allocation assumes the client
+  retries — yet any assignment failure escaped with zero of the
+  `JoinAttempts` burned. Refusals are now classified: the gateway's terminal
+  precondition answers (`session expired`, `rate limited`) abort immediately
+  with the real error instead of drowning it under "could not join"; everything
+  else retries with a jittered pause.
+- **`enter_world` runs under its own 20 s budget instead of `ConnectTimeout`'s
+  10 s** (#54, server side rpg-mmo-server#235). Against a cold map the gateway
+  may allocate a server and wait for it to register (its own handler budget is
+  18 s); the old 10 s cancelled client-side a join the gateway was about to
+  complete, and the cancellation aborted the whole connect.
+
+### Changed (sample)
+
+- **A reconnect is no longer a cold login.** `SampleNakamaAuth` caches the
+  gateway JWT with its `exp` and answers from it while >30 s of validity
+  remain, falling back to Nakama session refresh before device re-auth. Before
+  this, every reconnect re-ran device auth (a Postgres round trip and the
+  rate-limited `gateway_token` RPC, burst 5) for a credential the client
+  already held — a 200-client server restart was ~400 avoidable Nakama calls,
+  and more than five network flaps in an hour became a login failure. The
+  bridge registers a `DelegateAuthProvider` over the cached path, which is
+  what arms the package's automatic reconnect, and surfaces the new reconnect
+  events in its status line.
+
 ## [0.26.0] - 2026-08-26
 
 ### Fixed (sample)

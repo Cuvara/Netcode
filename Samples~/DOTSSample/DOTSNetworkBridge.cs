@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
@@ -1019,9 +1020,15 @@ namespace DOTSSample
                 PollEconomyAsync(ct).Forget();
                 PollLeaderboardAsync(ct).Forget();
 
+                // The auth provider is what arms the package's automatic reconnect:
+                // on a server_shutdown close, NetworkClient re-runs the connect flow
+                // through it, and SampleNakamaAuth answers from its cached gateway
+                // JWT while the token is still valid — a reconnect after a server
+                // restart costs zero Nakama traffic in the common case.
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
-                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog(),
+                    new DelegateAuthProvider(token => auth.GetGatewayTokenAsync(device, token)));
 
                 _client.StateChanged += state =>
                 {
@@ -1040,6 +1047,26 @@ namespace DOTSSample
                 {
                     _status = $"Disconnected: {info}";
                     Debug.Log($"[DOTSNet] Session closed: {info}");
+                };
+
+                // One line per state change, not per attempt tick — verbose detail
+                // stays behind the toggle like every other diagnostic here.
+                _client.ReconnectAttemptStarted += attempt =>
+                {
+                    _status = $"Reconnecting (attempt {attempt})...";
+                    if (verboseLogging)
+                        Debug.Log($"[DOTSNet] Reconnect attempt {attempt}");
+                };
+                _client.Reconnected += () =>
+                {
+                    _status = "In World (reconnected)";
+                    Debug.Log("[DOTSNet] Reconnected after server shutdown");
+                    StartPrediction();
+                };
+                _client.ReconnectFailed += ex =>
+                {
+                    _status = "Reconnect failed";
+                    Debug.LogWarning($"[DOTSNet] Reconnect gave up: {ex?.Message}");
                 };
 
                 await _client.ConnectAsync(jwt, mapId, ct);
