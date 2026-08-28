@@ -939,6 +939,26 @@ namespace DOTSSample
                 return;
             }
 
+            // No line while the session is down. Mid-outage the predictor has been
+            // reset (counters and base tick back to zero) while the baselines still
+            // hold the old session's totals, so a window landing there prints
+            // negative garbage about a connection that does not exist. Re-baseline
+            // instead, so the first in-world window after a reconnect is measured
+            // from reconnect, not from the outage (#59).
+            if (_client == null || _client.State != NetworkClientState.InWorld)
+            {
+                _nextPredictionHealthAt = Time.realtimeSinceStartup + PredictionHealthSeconds;
+                _healthWindowStart = Time.realtimeSinceStartup;
+                _healthStopwatchMark = _healthStopwatch.Elapsed.TotalSeconds;
+                _healthFrames = 0;
+                _lastSnaps = _predictor.Snaps;
+                _lastSmoothed = _predictor.SmoothedCorrections;
+                _lastReconciles = _predictor.Reconciles;
+                _lastSnapshotsApplied = _snapshotsApplied;
+                _lastFramesRx = _client?.Session?.FramesReceived ?? 0L;
+                return;
+            }
+
             _nextPredictionHealthAt = Time.realtimeSinceStartup + PredictionHealthSeconds;
 
             float window = Mathf.Max(1e-3f, Time.realtimeSinceStartup - _healthWindowStart);
