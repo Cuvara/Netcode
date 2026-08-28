@@ -31,10 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The retry/reconnect EditMode tests wait on wall-clock deadlines instead of
-  frame counts. In headless CI the test runner pumps frames far faster than the
-  editor loop that completes `UniTask.Delay`, so a 600-frame wait elapsed in
-  ~0.27 s of real time — less than the pause it was waiting across — and the
-  delay-crossing tests failed there while passing in an interactive Editor.
+  frame counts, and the pauses themselves go through a new
+  `NetworkSettings.DelayScheduler` seam (default: the realtime player-loop
+  delay used until now). The headless EditMode runner can spin a
+  [UnityTest]'s `yield return null` steps without ever pumping the editor
+  tick that completes a real `UniTask.Delay`, so a policy test crossing one
+  stalled forever in CI while passing in an interactive Editor; the tests
+  now schedule those pauses synchronously.
 - **A retryable `enter_world` refusal now consumes a join attempt instead of
   aborting the connect** (#54). `EnterWorldAsync` sat inside the retry loop but
   outside its `try`: the gateway deliberately types "server is starting, retry

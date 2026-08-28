@@ -239,8 +239,7 @@ namespace Cuvara.Netcode.Client
 
                 if (attempt < attempts)
                 {
-                    await UniTask.Delay(WithJitter(_settings.JoinRetryDelay), DelayType.Realtime,
-                        PlayerLoopTiming.Update, cancellationToken);
+                    await _settings.DelayScheduler(WithJitter(_settings.JoinRetryDelay), cancellationToken);
                 }
             }
 
@@ -397,8 +396,7 @@ namespace Cuvara.Netcode.Client
                     // an immediate retry is a synchronized storm at a gateway that
                     // is likely still allocating the replacement server.
                     var pause = TimeSpan.FromTicks(_settings.ReconnectDelay.Ticks * attempt);
-                    await UniTask.Delay(WithJitter(pause), DelayType.Realtime,
-                        PlayerLoopTiming.Update, ct);
+                    await _settings.DelayScheduler(WithJitter(pause), ct);
 
                     ReconnectAttemptStarted?.Invoke(attempt);
                     _log.Info($"reconnect attempt {attempt}/{attempts} to '{mapId}'");

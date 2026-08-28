@@ -190,6 +190,16 @@ namespace Cuvara.Netcode.Tests.Editor
             RetryJitter = TimeSpan.Zero,
             ReconnectDelay = TimeSpan.FromMilliseconds(1),
             ReconnectAttempts = 3,
+            // Synchronous, so the policy never depends on the editor tick that
+            // completes a real delay — headless CI spins the coroutine steps of a
+            // [UnityTest] without pumping it (see NetworkSettings.DelayScheduler).
+            // Cancellation must still be observed: the reconnect loop's exit on a
+            // user disconnect is an OperationCanceledException from this seam.
+            DelayScheduler = (delay, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                return UniTask.CompletedTask;
+            },
         };
 
         private sealed class SilentLog : INetLog

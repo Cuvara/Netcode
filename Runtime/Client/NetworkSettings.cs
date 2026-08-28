@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using Cysharp.Threading.Tasks;
 
 namespace Cuvara.Netcode.Client
 {
@@ -99,6 +101,18 @@ namespace Cuvara.Netcode.Client
         /// learns it was displaced by another login.
         /// </remarks>
         public bool KeepGatewayConnection { get; set; } = true;
+
+        /// <summary>
+        /// How the client pauses between join retries and reconnect rounds. The
+        /// default is a realtime delay on the player loop, which is right for a
+        /// running game. Tests replace it with a synchronous no-op: the EditMode
+        /// runner in headless CI can spin coroutine steps without ever pumping the
+        /// editor tick that completes a real <c>UniTask.Delay</c>, so a policy test
+        /// that crosses one stalls there forever while passing in an interactive
+        /// Editor.
+        /// </summary>
+        public Func<TimeSpan, CancellationToken, UniTask> DelayScheduler { get; set; } =
+            (delay, ct) => UniTask.Delay(delay, DelayType.Realtime, PlayerLoopTiming.Update, ct);
 
         /// <summary>
         /// Outbound send queue depth per connection, matching the game server's
