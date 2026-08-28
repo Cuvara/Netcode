@@ -210,6 +210,18 @@ namespace Cuvara.Netcode.Tests.Editor
 
         // ── the tests ────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Deadline for a wait loop, bounded by wall-clock time, never by frame
+        /// count: in headless CI the test runner pumps frames far faster than the
+        /// editor loop that completes <c>UniTask.Delay</c> ticks, so "600 frames"
+        /// can elapse in a quarter of a second of real time — less than the retry
+        /// pause the loop is waiting across. Inline loops rather than a nested
+        /// coroutine, because the EditMode runner only reliably pumps
+        /// <c>yield return null</c>.
+        /// </summary>
+        private static DateTime Deadline(double seconds = 15) =>
+            DateTime.UtcNow.AddSeconds(seconds);
+
         [UnityTest]
         public IEnumerator RetryableAssignmentRefusal_ConsumesAnAttempt_AndSucceedsOnTheNext()
         {
@@ -228,7 +240,7 @@ namespace Cuvara.Netcode.Tests.Editor
             Exception failure = null;
             Connect(client, "map_01").ContinueWith(ex => { done = true; failure = ex; }).Forget();
 
-            for (var i = 0; i < 600 && !done; i++) yield return null;
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
 
             Assert.That(done, Is.True, "connect never finished");
             Assert.That(failure, Is.Null, failure?.ToString());
@@ -252,7 +264,7 @@ namespace Cuvara.Netcode.Tests.Editor
             Exception failure = null;
             Connect(client, "map_01").ContinueWith(ex => { done = true; failure = ex; }).Forget();
 
-            for (var i = 0; i < 600 && !done; i++) yield return null;
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
 
             Assert.That(done, Is.True, "connect never finished");
             Assert.That(failure, Is.InstanceOf<NetworkException>());
@@ -286,7 +298,7 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var inWorld = false;
             Connect(client, "map_01").ContinueWith(ex => inWorld = ex == null).Forget();
-            for (var i = 0; i < 600 && !inWorld; i++) yield return null;
+            for (var t = Deadline(); !inWorld && DateTime.UtcNow < t;) yield return null;
             Assert.That(inWorld, Is.True, "initial connect never landed");
             Assert.That(auth.Calls, Is.EqualTo(1));
 
@@ -295,7 +307,7 @@ namespace Cuvara.Netcode.Tests.Editor
             gameTransport = factory.Created[1];
             gameTransport.Deliver(ServerShutdown());
 
-            for (var i = 0; i < 1200 && !reconnected; i++) yield return null;
+            for (var t = Deadline(); !reconnected && DateTime.UtcNow < t;) yield return null;
 
             Assert.That(reconnected, Is.True, "the reconnect never landed");
             Assert.That(reconnectAttempts, Is.EqualTo(1), "one healthy round should suffice");
@@ -318,7 +330,7 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var inWorld = false;
             Connect(client, "map_01").ContinueWith(ex => inWorld = ex == null).Forget();
-            for (var i = 0; i < 600 && !inWorld; i++) yield return null;
+            for (var t = Deadline(); !inWorld && DateTime.UtcNow < t;) yield return null;
             Assert.That(inWorld, Is.True);
 
             var attempts = 0;
@@ -329,7 +341,9 @@ namespace Cuvara.Netcode.Tests.Editor
             factory.Created[1].Deliver(ServerShutdown());
 
             // Generous window in which a wrongly-armed reconnect would have fired.
-            for (var i = 0; i < 120; i++) yield return null;
+            // Wall-clock, not frames: the reconnect pause is 1 ms of real time, so a
+            // frame-counted window can close before a wrongly-armed reconnect ticks.
+            for (var t = Deadline(1.0); DateTime.UtcNow < t;) yield return null;
 
             Assert.That(attempts, Is.Zero, "a user-initiated close must never auto-reconnect");
             Assert.That(auth.Calls, Is.EqualTo(1));
