@@ -293,8 +293,10 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var reconnected = false;
             var reconnectAttempts = 0;
+            Exception reconnectFailure = null;
             client.ReconnectAttemptStarted += _ => reconnectAttempts++;
             client.Reconnected += () => reconnected = true;
+            client.ReconnectFailed += ex => reconnectFailure = ex;
 
             var inWorld = false;
             Connect(client, "map_01").ContinueWith(ex => inWorld = ex == null).Forget();
@@ -307,9 +309,14 @@ namespace Cuvara.Netcode.Tests.Editor
             gameTransport = factory.Created[1];
             gameTransport.Deliver(ServerShutdown());
 
-            for (var t = Deadline(); !reconnected && DateTime.UtcNow < t;) yield return null;
+            for (var t = Deadline(); !reconnected && reconnectFailure == null && DateTime.UtcNow < t;)
+                yield return null;
 
-            Assert.That(reconnected, Is.True, "the reconnect never landed");
+            Assert.That(reconnected, Is.True,
+                "the reconnect never landed" +
+                $" (attempts={reconnectAttempts}, auth={auth.Calls}," +
+                $" dials={factory.Created.Count}, state={client.State}," +
+                $" failed={reconnectFailure})");
             Assert.That(reconnectAttempts, Is.EqualTo(1), "one healthy round should suffice");
             Assert.That(auth.Calls, Is.EqualTo(2), "the reconnect must go through the provider");
             Assert.That(client.State, Is.EqualTo(NetworkClientState.InWorld));
