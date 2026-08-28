@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-08-28
+
+### Fixed
+
+- **No health line while the session is down** (#59, follow-up). A health window
+  landing mid-outage printed negative garbage: the predictor is reset during the
+  outage (counters and base tick back to zero) while the baselines still held the
+  old session's totals. The sample now re-baselines and stays silent unless the
+  client is in world, so the first line after a reconnect measures from the
+  reconnect.
+
 ## [0.28.0] - 2026-08-28
 
 ### Fixed
