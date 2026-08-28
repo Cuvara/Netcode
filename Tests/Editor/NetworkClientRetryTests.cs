@@ -9,6 +9,7 @@ using UnityEngine.TestTools;
 using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
+using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Protocol;
 using Cuvara.Netcode.Transport;
@@ -198,6 +199,19 @@ namespace Cuvara.Netcode.Tests.Editor
             public void Error(string message, Exception exception = null) { }
         }
 
+        /// <summary>Records everything, so a CI-only failure can name its fault.</summary>
+        private sealed class RecordingLog : INetLog
+        {
+            public readonly List<string> Lines = new List<string>();
+            public void Info(string message) { lock (Lines) Lines.Add("I " + message); }
+            public void Warn(string message) { lock (Lines) Lines.Add("W " + message); }
+            public void Error(string message, Exception exception = null)
+            {
+                lock (Lines) Lines.Add("E " + message + (exception == null ? "" : " :: " + exception));
+            }
+            public override string ToString() { lock (Lines) return string.Join("\n", Lines); }
+        }
+
         private sealed class CountingAuth : IAuthProvider
         {
             public int Calls;
@@ -289,14 +303,17 @@ namespace Cuvara.Netcode.Tests.Editor
                 .Then(GameServerJoinOk());         // game server #2 (reconnect)
 
             var auth = new CountingAuth();
-            var client = new NetworkClient(FastSettings(), factory, new JsonWireCodec(), new SilentLog(), auth);
+            var log = new RecordingLog();
+            var client = new NetworkClient(FastSettings(), factory, new JsonWireCodec(), log, auth);
 
             var reconnected = false;
             var reconnectAttempts = 0;
             Exception reconnectFailure = null;
+            DisconnectInfo? closeInfo = null;
             client.ReconnectAttemptStarted += _ => reconnectAttempts++;
             client.Reconnected += () => reconnected = true;
             client.ReconnectFailed += ex => reconnectFailure = ex;
+            client.SessionClosed += info => closeInfo = info;
 
             var inWorld = false;
             Connect(client, "map_01").ContinueWith(ex => inWorld = ex == null).Forget();
@@ -316,7 +333,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 "the reconnect never landed" +
                 $" (attempts={reconnectAttempts}, auth={auth.Calls}," +
                 $" dials={factory.Created.Count}, state={client.State}," +
-                $" failed={reconnectFailure})");
+                $" close={closeInfo}, failed={reconnectFailure})\nlog:\n{log}");
             Assert.That(reconnectAttempts, Is.EqualTo(1), "one healthy round should suffice");
             Assert.That(auth.Calls, Is.EqualTo(2), "the reconnect must go through the provider");
             Assert.That(client.State, Is.EqualTo(NetworkClientState.InWorld));

@@ -375,6 +375,7 @@ namespace Cuvara.Netcode.Client
 
         private void StartReconnect()
         {
+            _log.Info($"session ended with server_shutdown; automatic reconnect armed for '{_lastMapId}'");
             _reconnectCts?.Cancel();
             _reconnectCts?.Dispose();
             _reconnectCts = new CancellationTokenSource();
