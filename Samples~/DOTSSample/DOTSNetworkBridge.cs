@@ -141,8 +141,8 @@ namespace DOTSSample
         // Keyed by id, but the locality the text was built with is stored alongside it: the
         // '★ YOU' prefix is derived from IsLocal, so caching on the id alone renders a stale
         // star for any entity whose locality changes under it.
-        private readonly Dictionary<string, (bool IsLocal, string Text)> _entityLabelTextCache =
-            new Dictionary<string, (bool, string)>();
+        private readonly Dictionary<string, (bool IsLocal, string Text, Vector2 Size)> _entityLabelTextCache =
+            new Dictionary<string, (bool, string, Vector2)>();
 
         // --- Combat stats cache ---
         private string _cachedCombatText;
@@ -499,6 +499,13 @@ namespace DOTSSample
         /// </remarks>
         private void StartPrediction()
         {
+            // Despawn everything the old binder held BEFORE replacing it. On a
+            // reconnect this method builds a fresh binder whose _live set starts
+            // empty, so its despawn pass could never consider entities the old one
+            // spawned — anything that left AOI or died during the outage stayed
+            // rendered forever, frozen at its last position (#59).
+            _binder?.Reset();
+
             uint advertised = _client?.TickRate ?? 0u;
 
             var settings = PredictionSettings.FromServer(
@@ -696,12 +703,18 @@ namespace DOTSSample
         /// </remarks>
         private void LateUpdate()
         {
-            if (!followLocalPlayer || _view == null || !_view.IsValid) return;
+            if (_view == null || !_view.IsValid) return;
+
+            // The one label sweep per frame. OnGUI (raised at least twice per frame by
+            // IMGUI) and the camera follow both read this cache instead of walking every
+            // entity through the EntityManager again (#60).
+            _view.GetEntityLabels(_labelCache);
+
+            if (!followLocalPlayer) return;
 
             var cam = GetCamera();
             if (cam == null) return;
 
-            _view.GetEntityLabels(_labelCache);
             for (int i = 0; i < _labelCache.Count; i++)
             {
                 if (!_labelCache[i].IsLocal) continue;
@@ -766,7 +779,10 @@ namespace DOTSSample
                 if (_combatStatsQuery == default)
                     _combatStatsQuery = dotsWorld.EntityManager.CreateEntityQuery(typeof(CombatStats));
 
-                if (_combatStatsQuery.CalculateEntityCount() > 0)
+                // IsEmptyIgnoreFilter, not CalculateEntityCount: the count completes the
+                // query's dependency chain — a per-frame sync against the simulation
+                // group to learn a number this guard never uses (#60).
+                if (!_combatStatsQuery.IsEmptyIgnoreFilter)
                 {
                     var stats = _combatStatsQuery.GetSingleton<CombatStats>();
                     if (_prevKills != stats.Kills)
@@ -800,7 +816,9 @@ namespace DOTSSample
                 if (_attackRequestQuery == default)
                     _attackRequestQuery = dotsWorld.EntityManager.CreateEntityQuery(typeof(AttackRequest));
 
-                int attackCount = _attackRequestQuery.CalculateEntityCount();
+                // Same reasoning as the combat-stats guard above: almost every frame
+                // there are zero requests, and the empty check does not sync (#60).
+                bool hasAttacks = !_attackRequestQuery.IsEmptyIgnoreFilter;
 
                 if (verboseLogging)
                 {
@@ -808,11 +826,11 @@ namespace DOTSSample
                     if (_attackDebugTimer <= 0f)
                     {
                         _attackDebugTimer = 1f;
-                        Debug.Log($"[Debug] AttackRequest count: {attackCount}, pending: '{_pendingAttackTarget}'");
+                        Debug.Log($"[Debug] AttackRequest present: {hasAttacks}, pending: '{_pendingAttackTarget}'");
                     }
                 }
 
-                if (attackCount > 0)
+                if (hasAttacks)
                 {
                     var entities = _attackRequestQuery.ToEntityArray(Allocator.Temp);
                     for (int i = 0; i < entities.Length; i++)
@@ -843,7 +861,13 @@ namespace DOTSSample
             // client that renders only from it shows the avatar still between snapshots
             // and jumping on the frame one lands, however fast it is drawing. This is what
             // makes the smoothing observable rather than merely computed.
-            _binder.AdvanceFrame(Time.deltaTime);
+            //
+            // Unscaled: the binder's interpolation clock is a stopwatch and the camera
+            // follow above uses unscaledDeltaTime, while Time.deltaTime is scaled by
+            // timeScale AND clamped at maximumDeltaTime. Feeding the predictor the one
+            // clock the other two do not share made every timeScale change or long hitch
+            // a lead the steering then corrected — a visible snap blamed on netcode (#60).
+            _binder.AdvanceFrame(Time.unscaledDeltaTime);
             _entityCount = _view.Count;
 
             // Verify the advertised rate against one measured off the wire. The protocol
@@ -1061,6 +1085,18 @@ namespace DOTSSample
                 {
                     _status = "In World (reconnected)";
                     Debug.Log("[DOTSNet] Reconnected after server shutdown");
+
+                    // The new session's counters restart at zero while these baselines
+                    // keep the old session's totals, so the first health window printed
+                    // negative garbage (observed live: reconciles=-179,
+                    // framesRx=-36.6/s) until they are zeroed with it (#59).
+                    _lastSnaps = 0;
+                    _lastSmoothed = 0;
+                    _lastReconciles = 0;
+                    _snapshotsApplied = 0;
+                    _lastSnapshotsApplied = 0;
+                    _lastFramesRx = 0;
+
                     StartPrediction();
                 };
                 _client.ReconnectFailed += ex =>
@@ -1749,10 +1785,13 @@ namespace DOTSSample
             // --- Floating entity labels ---
             if (_view == null || !_view.IsValid) return;
 
+            // Explicit-Rect GUI calls need no Layout pass, and IMGUI raises OnGUI at
+            // least twice per frame — drawing only on Repaint halves the label cost.
+            // The cache itself is refreshed once per frame in LateUpdate (#60).
+            if (Event.current.type != EventType.Repaint) return;
+
             var cam = GetCamera();
             if (cam == null) return;
-
-            _view.GetEntityLabels(_labelCache);
 
             for (int i = 0; i < _labelCache.Count; i++)
             {
@@ -1766,20 +1805,23 @@ namespace DOTSSample
                 float screenY = Screen.height - screenPos.y;
 
                 // Cache label text per entity — rebuilt on first sight, and again when locality changes
+                var style = label.IsLocal ? _localLabelStyle : _labelStyle;
+
                 if (!_entityLabelTextCache.TryGetValue(label.Id, out var cached)
                     || cached.IsLocal != label.IsLocal)
                 {
                     var shortId = label.Id.Length > 8 ? label.Id.Substring(0, 8) : label.Id;
-                    cached = (label.IsLocal,
-                        label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId);
+                    var text = label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId;
+                    // Measured once with the text: CalcSize is a full glyph measurement
+                    // — one of the costliest IMGUI calls — and the size only changes
+                    // when the text (or the local/remote style) does (#60).
+                    _sharedContent.text = text;
+                    cached = (label.IsLocal, text, style.CalcSize(_sharedContent));
                     _entityLabelTextCache[label.Id] = cached;
                 }
 
                 var displayText = cached.Text;
-
-                var style = label.IsLocal ? _localLabelStyle : _labelStyle;
-                _sharedContent.text = displayText;
-                var textSize = style.CalcSize(_sharedContent);
+                var textSize = cached.Size;
                 float labelW = Mathf.Max(textSize.x + 12f, 80f);
                 float labelH = textSize.y + 4f;
 

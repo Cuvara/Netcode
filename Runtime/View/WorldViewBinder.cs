@@ -583,8 +583,16 @@ namespace Cuvara.Netcode.View
                     _localMaxHp = e.MaxHp;
                     _localSeen = true;
 
-                    var predicted = _predictor.Position;
-                    _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+                    // Once AdvanceFrame owns the local entity's rendering (the same
+                    // condition under which it owns the clock), this write is a strictly
+                    // older position that AdvanceFrame overwrites within the same frame
+                    // — pure wasted view traffic. Before the first AdvanceFrame it is
+                    // still the only thing rendering the avatar, so it stays.
+                    if (!_frameDriven)
+                    {
+                        var predicted = _predictor.Position;
+                        _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+                    }
 
                     // HP is deliberately still the server's. Only movement is predicted;
                     // see LocalMovePredictor for why combat is not.

@@ -22,6 +22,14 @@ namespace DOTSSample
     /// as red spheres with <see cref="EnemyTag"/> and <see cref="Health"/>; all other
     /// entities are players and receive <see cref="PlayerCombatTag"/> +
     /// <see cref="AutoAttack"/> so the combat systems target them automatically.
+    /// <para>
+    /// All entities share ONE <see cref="RenderMeshArray"/> built in the constructor —
+    /// nine materials (the palette plus the enemy colour) by two meshes, indexed per
+    /// entity with <see cref="MaterialMeshInfo"/>. The previous shape built a fresh
+    /// <c>Material</c> and a fresh array per spawn: the materials were never destroyed
+    /// (AOI churn made that a steady leak for the whole session) and every entity was
+    /// its own render batch — one draw call per capsule (#60).
+    /// </para>
     /// </remarks>
     public sealed class DOTSEntityView : IEntityView
     {
@@ -60,6 +68,12 @@ namespace DOTSSample
 
         private static readonly Color EnemyColor = new Color(0.9f, 0.15f, 0.1f);
 
+        /// <summary>Material slot of the enemy colour in the shared array.</summary>
+        private const int EnemyMaterialIndex = 8;
+
+        private const int CapsuleMeshIndex = 0;
+        private const int SphereMeshIndex = 1;
+
         /// <summary>
         /// The server's entity kind for a hostile NPC, as it arrives on
         /// <see cref="IEntityView.Spawn"/>. This used to be an <c>"enemy-"</c> id-prefix
@@ -67,13 +81,27 @@ namespace DOTSSample
         /// </summary>
         private const string MobType = "mob";
 
-        private readonly Dictionary<string, Entity> _entities = new Dictionary<string, Entity>();
+        /// <summary>
+        /// Everything this view knows about one live entity, resolved once at spawn so
+        /// the per-frame path does dictionary work and EntityManager round trips only
+        /// when something actually changed (#60).
+        /// </summary>
+        private sealed class EntityRec
+        {
+            public Entity Entity;
+            public bool IsEnemy;
+            public int ColorIndex;
+            public int Hp;
+            public int MaxHp;
+            public float LastX;
+            public float LastY;
+            public bool HasPos;
+        }
+
+        private readonly Dictionary<string, EntityRec> _entities = new Dictionary<string, EntityRec>();
         private readonly Dictionary<string, int> _playerColorIndex = new Dictionary<string, int>();
-        private readonly Dictionary<string, (int hp, int maxHp)> _hpCache = new Dictionary<string, (int, int)>();
-        private readonly HashSet<string> _enemyIds = new HashSet<string>();
         private readonly EntityManager _em;
-        private readonly Mesh _capsuleMesh;
-        private readonly Mesh _sphereMesh;
+        private readonly RenderMeshArray _renderMeshArray;
         private int _nextColorIndex = 1; // 0 reserved for local
 
         public bool IsValid { get; }
@@ -89,8 +117,27 @@ namespace DOTSSample
             }
 
             _em = world.EntityManager;
-            _capsuleMesh = GetPrimitiveMesh(PrimitiveType.Capsule);
-            _sphereMesh = GetPrimitiveMesh(PrimitiveType.Sphere);
+
+            var capsule = GetPrimitiveMesh(PrimitiveType.Capsule);
+            var sphere = GetPrimitiveMesh(PrimitiveType.Sphere);
+
+            // One material per palette slot plus one enemy material, built once. Every
+            // spawned entity indexes into this single shared array, so entities with the
+            // same colour and mesh land in the same render batch.
+            var baseMat = Resources.Load<Material>("DOTSRemoteMaterial");
+            if (baseMat == null)
+            {
+                baseMat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+            }
+
+            var materials = new Material[Palette.Length + 1];
+            for (int i = 0; i < Palette.Length; i++)
+            {
+                materials[i] = CreateTintedMaterial(baseMat, Palette[i]);
+            }
+            materials[EnemyMaterialIndex] = CreateTintedMaterial(baseMat, EnemyColor);
+
+            _renderMeshArray = new RenderMeshArray(materials, new[] { capsule, sphere });
             IsValid = true;
         }
 
@@ -101,30 +148,28 @@ namespace DOTSSample
             if (!IsValid || string.IsNullOrEmpty(id) || _entities.ContainsKey(id))
                 return;
 
-            // The kind comes from the snapshot. '_enemyIds' still caches it, because
+            // The kind comes from the snapshot. The record caches it, because
             // SetState and the label pass need it per frame and only Spawn is told.
             bool isEnemy = type == MobType;
 
-            // Determine visual
-            Color color;
-            Mesh mesh;
             float scale;
             int colorIdx;
+            int meshIdx;
+            int materialIdx;
 
             if (isEnemy)
             {
-                color = EnemyColor;
-                mesh = _sphereMesh;
                 scale = 0.8f;
-                colorIdx = 1; // red slot
-                _enemyIds.Add(id);
+                colorIdx = 1; // red slot, for label tint
+                meshIdx = SphereMeshIndex;
+                materialIdx = EnemyMaterialIndex;
             }
             else if (isLocal)
             {
-                color = Palette[0];
-                mesh = _capsuleMesh;
                 scale = 1.2f;
                 colorIdx = 0;
+                meshIdx = CapsuleMeshIndex;
+                materialIdx = 0;
             }
             else
             {
@@ -134,21 +179,22 @@ namespace DOTSSample
                     _nextColorIndex = (_nextColorIndex % (Palette.Length - 1)) + 1;
                     _playerColorIndex[id] = colorIdx;
                 }
-                color = Palette[colorIdx % Palette.Length];
-                mesh = _capsuleMesh;
                 scale = 1f;
+                meshIdx = CapsuleMeshIndex;
+                materialIdx = colorIdx % Palette.Length;
             }
 
-            var material = CreatePlayerMaterial(color);
-
             var entity = _em.CreateEntity();
+#if UNITY_EDITOR
+            // Editor-only: names are debug niceties, and building them allocates two
+            // strings per spawn.
             var shortId = id.Substring(0, System.Math.Min(8, id.Length));
             _em.SetName(entity, (isEnemy ? "enemy:" : isLocal ? "local:" : "remote:") + shortId);
+#endif
 
             var renderMeshDescription = new RenderMeshDescription(ShadowCastingMode.On);
-            var renderMeshArray = new RenderMeshArray(new[] { material }, new[] { mesh });
-            RenderMeshUtility.AddComponents(entity, _em, renderMeshDescription, renderMeshArray,
-                MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
+            RenderMeshUtility.AddComponents(entity, _em, renderMeshDescription, _renderMeshArray,
+                MaterialMeshInfo.FromRenderMeshArrayIndices(materialIdx, meshIdx));
 
             _em.AddComponentData(entity, new LocalTransform
             {
@@ -198,46 +244,71 @@ namespace DOTSSample
                 }
             }
 
-            _entities[id] = entity;
-            _hpCache[id] = (0, 0);
+            _entities[id] = new EntityRec
+            {
+                Entity = entity,
+                IsEnemy = isEnemy,
+                ColorIndex = colorIdx,
+            };
         }
 
         public void Despawn(string id)
         {
-            if (!IsValid || id == null || !_entities.TryGetValue(id, out var entity))
+            if (!IsValid || id == null || !_entities.TryGetValue(id, out var rec))
                 return;
 
             _entities.Remove(id);
-            _hpCache.Remove(id);
-            _enemyIds.Remove(id);
-            if (_em.Exists(entity))
-                _em.DestroyEntity(entity);
+            if (_em.Exists(rec.Entity))
+                _em.DestroyEntity(rec.Entity);
         }
 
         public void SetState(string id, float x, float y, int hp, int maxHp)
         {
-            if (!IsValid || !_entities.TryGetValue(id, out var entity) || !_em.Exists(entity))
+            if (!IsValid || !_entities.TryGetValue(id, out var rec))
                 return;
 
-            _em.SetComponentData(entity, new LocalTransform
-            {
-                Position = new float3(x, 0.5f, y),
-                Rotation = quaternion.identity,
-                Scale = _em.GetComponentData<LocalTransform>(entity).Scale
-            });
+            // Change-gated: WorldViewBinder calls this for every entity every frame,
+            // not only when a snapshot landed, and each EntityManager access is a
+            // main-thread random chunk access that can also sync outstanding jobs on
+            // that component type. Position writes preserve Rotation — the old
+            // unconditional write reset it to identity every frame, silently erasing
+            // any rotation another system applied (#60).
+            bool hpChanged = hp != rec.Hp || maxHp != rec.MaxHp;
+            bool posChanged = !rec.HasPos || x != rec.LastX || y != rec.LastY;
+            if (!hpChanged && !posChanged)
+                return;
 
-            _hpCache[id] = (hp, maxHp);
+            if (!_em.Exists(rec.Entity))
+                return;
 
-            // Sync server HP to ECS Health component for enemies
-            if (_enemyIds.Contains(id) && _em.HasComponent<Health>(entity))
+            if (posChanged)
             {
-                _em.SetComponentData(entity, new Health { Current = hp, Max = maxHp });
+                var lt = _em.GetComponentData<LocalTransform>(rec.Entity);
+                lt.Position = new float3(x, 0.5f, y);
+                _em.SetComponentData(rec.Entity, lt);
+                rec.LastX = x;
+                rec.LastY = y;
+                rec.HasPos = true;
+            }
+
+            if (hpChanged)
+            {
+                rec.Hp = hp;
+                rec.MaxHp = maxHp;
+
+                // Sync server HP to ECS Health component for enemies
+                if (rec.IsEnemy && _em.HasComponent<Health>(rec.Entity))
+                {
+                    _em.SetComponentData(rec.Entity, new Health { Current = hp, Max = maxHp });
+                }
             }
         }
 
         /// <summary>
         /// Enumerates all live entities with their current positions and display info.
-        /// Used by the OnGUI overlay to draw floating labels.
+        /// Used by the OnGUI overlay to draw floating labels. Call once per frame and
+        /// cache — IMGUI raises OnGUI at least twice per frame, and this walks every
+        /// entity with several EntityManager accesses each (#60).
         /// </summary>
         public void GetEntityLabels(List<EntityLabel> result)
         {
@@ -247,19 +318,19 @@ namespace DOTSSample
             foreach (var kv in _entities)
             {
                 var id = kv.Key;
-                var entity = kv.Value;
+                var rec = kv.Value;
+                var entity = rec.Entity;
                 if (!_em.Exists(entity) || !_em.HasComponent<LocalTransform>(entity))
                     continue;
 
                 var tag = _em.GetComponentData<NetworkEntityTag>(entity);
                 var pos = _em.GetComponentData<LocalTransform>(entity).Position;
-                bool isEnemy = _enemyIds.Contains(id);
-                var color = isEnemy ? EnemyColor : Palette[tag.ColorIndex % Palette.Length];
+                var color = rec.IsEnemy ? EnemyColor : Palette[tag.ColorIndex % Palette.Length];
 
                 // Read HP from ECS Health component (includes client-side prediction)
-                // for enemies; fall back to snapshot cache for players
+                // for enemies; fall back to snapshot state for players
                 int hp, maxHp;
-                if (isEnemy && _em.HasComponent<Health>(entity))
+                if (rec.IsEnemy && _em.HasComponent<Health>(entity))
                 {
                     var health = _em.GetComponentData<Health>(entity);
                     hp = health.Current;
@@ -267,9 +338,8 @@ namespace DOTSSample
                 }
                 else
                 {
-                    var cached = _hpCache.TryGetValue(id, out var hpData) ? hpData : (0, 0);
-                    hp = cached.Item1;
-                    maxHp = cached.Item2;
+                    hp = rec.Hp;
+                    maxHp = rec.MaxHp;
                 }
 
                 result.Add(new EntityLabel(id, tag.IsLocal, pos, color, hp, maxHp));
@@ -284,14 +354,8 @@ namespace DOTSSample
             return mesh;
         }
 
-        private static Material CreatePlayerMaterial(Color color)
+        private static Material CreateTintedMaterial(Material baseMat, Color color)
         {
-            var baseMat = Resources.Load<Material>("DOTSRemoteMaterial");
-            if (baseMat == null)
-            {
-                baseMat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-            }
-
             var mat = new Material(baseMat);
             mat.color = color;
 
