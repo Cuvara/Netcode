@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-28
+
+### Fixed
+
+- **Ghost entities after an automatic reconnect** (#59). `StartPrediction`
+  replaced the `WorldViewBinder` without despawning what the old binder held, so
+  the new binder's despawn pass could never consider those entities and anything
+  that left AOI or died during the outage stayed rendered forever, frozen.
+  `StartPrediction` now calls `Reset()` on the outgoing binder first.
+- **Negative health-line figures after a reconnect** (#59). The sample bridge's
+  health baselines (`_lastFramesRx`, predictor counter marks) survived the
+  session swap while the new session's counters restarted at zero — observed live
+  as `reconciles=-179 framesRx=-36.6/s`. The `Reconnected` handler zeroes them.
+- **`DOTSEntityView.SetState` erased entity rotation every frame** (#60). The
+  unconditional `LocalTransform` write reset `Rotation` to identity; position
+  writes now preserve the rest of the transform.
+
+### Changed
+
+- **The DOTS sample's per-frame view cost collapsed** (#60):
+  - One shared `RenderMeshArray` (palette + enemy materials, both meshes) built at
+    construction, indexed per entity via `MaterialMeshInfo` — materials were
+    previously created per spawn, never destroyed (a steady leak under AOI churn),
+    and put every entity in its own render batch.
+  - `SetState` is change-gated on cached position/HP: static entities cost a
+    dictionary lookup instead of 3–5 EntityManager accesses per entity per frame.
+  - The entity-label sweep runs once per frame in `LateUpdate`; `OnGUI` reads the
+    cache, draws only on `Repaint`, and reuses a cached `CalcSize` measurement.
+  - Combat/attack polls guard with `IsEmptyIgnoreFilter` instead of
+    `CalculateEntityCount()`, which completed the query's dependency chain — a
+    per-frame sync against the simulation group to learn a number the guard never
+    used.
+  - `AutoAttackSystem` — the one O(players × enemies) system — is Burst-compiled
+    like its siblings; nothing blocked the attribute.
+  - `WorldViewBinder.Tick` skips its local-entity view write once `AdvanceFrame`
+    owns the rendering (same condition under which it owns the clock); the write
+    was superseded within the same frame, costing a wasted round trip.
+  - `_binder.AdvanceFrame` runs on `Time.unscaledDeltaTime` — `deltaTime` is
+    scaled by `timeScale` and clamped by `maximumDeltaTime`, while the binder's
+    own clock and the camera follow are wall-time; the disagreement surfaced as a
+    reconciliation snap after pauses and hitches.
+  - `GameObjectEntityView` writes the health-squash `localScale` only when HP
+    changed, instead of dirtying the transform hierarchy every frame.
+
 ## [0.27.0] - 2026-08-27
 
 ### Added

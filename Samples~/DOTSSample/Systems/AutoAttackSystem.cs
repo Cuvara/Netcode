@@ -13,6 +13,7 @@ namespace DOTSSample
     /// <see cref="AttackRequest"/> entity so <see cref="DOTSNetworkBridge"/> can
     /// forward the attack to the server.
     /// </summary>
+    [BurstCompile]
     public partial struct AutoAttackSystem : ISystem
     {
         private struct EnemyTarget
@@ -21,6 +22,7 @@ namespace DOTSSample
             public FixedString64Bytes NetworkId;
         }
 
+        [BurstCompile]
         public void OnUpdate(ref SystemState state)
         {
             if (!SystemAPI.HasSingleton<CombatPrefabs>())

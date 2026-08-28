@@ -29,6 +29,16 @@ namespace Cuvara.Netcode.View
     public sealed class GameObjectEntityView : IEntityView
     {
         private readonly Dictionary<string, GameObject> _objects = new Dictionary<string, GameObject>();
+
+        /// <summary>
+        /// Last hp/maxHp applied per id, so the health squash below only writes
+        /// <c>localScale</c> when health actually changed. A scale write dirties the
+        /// transform hierarchy and rebuilds matrices even when the value is identical,
+        /// and HP is snapped, not interpolated — unchanged on the vast majority of
+        /// frames (#60).
+        /// </summary>
+        private readonly Dictionary<string, (int Hp, int MaxHp)> _appliedHp =
+            new Dictionary<string, (int, int)>();
         private readonly Transform _root;
         private readonly Material _localMaterial;
         private readonly Material _remoteMaterial;
@@ -97,6 +107,7 @@ namespace Cuvara.Netcode.View
             }
 
             _objects.Remove(id);
+            _appliedHp.Remove(id);
             if (go != null)
             {
                 Object.Destroy(go);
@@ -115,9 +126,13 @@ namespace Cuvara.Netcode.View
             go.transform.position = new Vector3(x, 1f, y);
 
             // HP as vertical squash: full health is upright, near-death is flattened.
-            // One line, no UI, readable in a screenshot.
-            if (maxHp > 0)
+            // One line, no UI, readable in a screenshot. Written only on change — see
+            // _appliedHp.
+            if (maxHp > 0 &&
+                (!_appliedHp.TryGetValue(id, out var applied) ||
+                 applied.Hp != hp || applied.MaxHp != maxHp))
             {
+                _appliedHp[id] = (hp, maxHp);
                 var health = Mathf.Clamp01((float)hp / maxHp);
                 var s = go.transform.localScale;
                 go.transform.localScale = new Vector3(s.x, Mathf.Lerp(0.3f, s.x, health), s.z);
@@ -136,6 +151,7 @@ namespace Cuvara.Netcode.View
             }
 
             _objects.Clear();
+            _appliedHp.Clear();
         }
 
         private static Material MakeMaterial(Color colour)
