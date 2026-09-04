@@ -14,8 +14,17 @@ namespace Cuvara.Netcode.Tests.Editor
     /// <b>The rule.</b> `InputHandler.ProcessInput` steps once on the input's own base
     /// tick and records the direction as held; `InputHandler.ApplyHeldMovement`, called
     /// from `TickLoop` on <i>every</i> base tick including ones where no packet arrived,
-    /// steps again while <c>baseTick - heldFrom &lt; holdTicks</c>. <c>holdTicks</c> is
-    /// <c>_rates.WorldEvery</c> — base ticks per world tick, four at 60/15.
+    /// steps again while <c>baseTick - heldFrom &lt;= MaxBankedTicks</c> — a silence
+    /// timeout of 250ms, 15 base ticks at 60Hz, read from the shared constant on both
+    /// sides. Every step is one tick; no step ever covers more.
+    /// </para>
+    /// <para>
+    /// <b>What changed.</b> The window used to be <c>_rates.WorldEvery</c>, inferred
+    /// client-side from the snapshot gap, and a step used to cover
+    /// <c>min(now - lastMoveTick, cap)</c> so a gap was repaid in one multiplied hit. Both
+    /// are gone from both sides. The old shape agreed only when the two ends' independent
+    /// measurements of elapsed time agreed, which is what a network is worst at; the
+    /// current one agrees by construction, because each end takes one step per tick.
     /// </para>
     /// <para>
     /// <b>Why this fixture exists.</b> A client that takes one step per input reproduces
@@ -32,7 +41,25 @@ namespace Cuvara.Netcode.Tests.Editor
     {
         private const int BaseHz = 60;
         private const int SendHz = 15;
-        private const int HoldTicks = BaseHz / SendHz;
+
+        /// <summary>Base ticks between two sends at <see cref="SendHz"/> — the cadence.</summary>
+        private const int SendEvery = BaseHz / SendHz;
+
+        /// <summary>
+        /// Base ticks a held direction survives after the input that set it — the silence
+        /// timeout, 250ms, 15 ticks at 60Hz.
+        /// </summary>
+        /// <remarks>
+        /// This used to be the same number as <see cref="SendEvery"/>, and the two being one
+        /// constant hid a defect rather than saving a line. The window was the client's
+        /// measured snapshot gap, i.e. a guess at its own send rate expressed as a deadline,
+        /// which left no slack at all: a 15Hz client's packets were measured arriving 4.19
+        /// base ticks apart against a 4-tick window. The window is now a property of how long
+        /// silence may be tolerated and the cadence is a property of the client, so they are
+        /// separate constants that happen to be measured in the same unit.
+        /// </remarks>
+        private static readonly int HoldWindow = GameConstants.MaxBankedMovementTicks(BaseHz);
+
         private const float Speed = 5f;
 
         private static float Dt => MovementSystem.DeltaTimeForTickRate(BaseHz);
@@ -41,7 +68,7 @@ namespace Cuvara.Netcode.Tests.Editor
         private static LocalMovePredictor Predictor()
         {
             var p = new LocalMovePredictor(new PredictionSettings(BaseHz, Speed, Bounds));
-            p.SetHoldTicks(HoldTicks);
+            p.SetHoldTicks(SendEvery);
             p.Reconcile(Vec2.Zero, 0);
             return p;
         }
@@ -55,24 +82,30 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var position = Vec2.Zero;
             long heldFrom = 0;
-            long tick = 0;
+            long lastMove = 0;
+            long tick = 1;                 // the base tick the first input lands on
 
             for (var i = 0; i < inputs; i++)
             {
-                for (var k = 0; k < HoldTicks; k++)
+                // Rule 1 on the input's own tick: a tick the hold already stepped coalesces
+                // into it rather than stepping twice. Unreachable under the old window,
+                // where the hold expired on exactly the tick the next input arrived on --
+                // which is why this model could count the input tick as one of the
+                // interval's four and still agree.
+                if (lastMove != tick && StepOnce(ref position, moveX, moveY))
+                {
+                    heldFrom = tick;
+                    lastMove = tick;
+                }
+
+                for (var k = 0; k < SendEvery; k++)
                 {
                     tick++;
-                    bool isInputTick = k == 0;
 
-                    if (isInputTick)
+                    if (heldFrom != 0 && tick != heldFrom && tick - heldFrom <= HoldWindow
+                        && StepOnce(ref position, moveX, moveY))
                     {
-                        if (StepOnce(ref position, moveX, moveY)) heldFrom = tick;
-                        continue;
-                    }
-
-                    if (heldFrom != 0 && tick - heldFrom < HoldTicks)
-                    {
-                        StepOnce(ref position, moveX, moveY);
+                        lastMove = tick;
                     }
                 }
             }
@@ -99,7 +132,7 @@ namespace Cuvara.Netcode.Tests.Editor
         private static void SendAndAdvance(LocalMovePredictor p, long tick, float x, float y)
         {
             p.RecordInput(tick, x, y);
-            for (var k = 0; k < HoldTicks; k++)
+            for (var k = 0; k < SendEvery; k++)
             {
                 p.Advance(1f / BaseHz);
             }
@@ -135,7 +168,14 @@ namespace Cuvara.Netcode.Tests.Editor
                 SendAndAdvance(p, i, 1f, 0f);
             }
 
-            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(0.01f),
+            // One step of slack, and only one: the driver steps on the tick the first
+            // input lands on and then advances a full second of ticks on top, so it spans
+            // BaseHz + 1 ticks of movement. What the case is measuring is that a second of
+            // held input is a second of travel and not a quarter of one -- a defect of
+            // ratio, never of a single step.
+            float oneStep = Speed / BaseHz;
+
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(oneStep + 0.01f),
                 $"one second of held input moved {p.SimulatedPosition.X:F4} units at a " +
                 $"configured speed of {Speed}. The client and server can agree perfectly " +
                 "on a wrong number, so speed is asserted directly and not inferred from " +
@@ -175,12 +215,24 @@ namespace Cuvara.Netcode.Tests.Editor
             // A zero vector is the deadzone: the server clears the hold on it rather
             // than letting the window run out.
             p.RecordInput(2, 0f, 0f);
-            for (var k = 0; k < HoldTicks * 3; k++)
+
+            // Sampled AFTER the stop, not before it. The stop lands on a tick the hold has
+            // already stepped, and rule 1 gives that tick exactly one step -- the newest
+            // input's, which is a stop, so the tick's step is rolled back. The server does
+            // the same thing by never taking it: it drains the input, finds a deadzone,
+            // moves nothing and skips the hold. Comparing against `afterMove` would be
+            // comparing against a position the server was never in.
+            float afterStop = p.SimulatedPosition.X;
+
+            Assert.That(afterStop, Is.LessThanOrEqualTo(afterMove + 1e-5f),
+                "an explicit stop added travel");
+
+            for (var k = 0; k < HoldWindow + 2; k++)
             {
                 p.Advance(1f / BaseHz);
             }
 
-            Assert.That(p.SimulatedPosition.X, Is.EqualTo(afterMove).Within(1e-5f),
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(afterStop).Within(1e-5f),
                 "the avatar kept coasting after an explicit stop. Releasing the stick " +
                 "must halt it at once — a player attributes that latency directly to " +
                 "their own input, unlike a correction they cannot see.");
@@ -206,10 +258,21 @@ namespace Cuvara.Netcode.Tests.Editor
                 SendAndAdvance(p, i, 1f, 0f);
             }
 
-            Assert.That(p.Position.X, Is.EqualTo(p.SimulatedPosition.X).Within(1e-4f),
-                $"rendered {p.Position.X:F4} against simulated {p.SimulatedPosition.X:F4}. " +
-                "The smoothing span is longer than the interval between steps, so the " +
-                "avatar is permanently behind its own prediction.");
+            // At most one step behind, and that one step is the interpolation of the step
+            // that just landed -- the rendered position is always travelling toward the
+            // newest simulated one. Equality used to hold exactly, and only by accident:
+            // the last tick of every send interval was past the old hold window, so it
+            // produced no step and the renderer had a free tick to catch up in. With a step
+            // on every tick there is no such tick, and demanding equality would be
+            // demanding that the renderer teleport.
+            float lag = p.SimulatedPosition.X - p.Position.X;
+            float oneStep = Speed / BaseHz;
+
+            Assert.That(lag, Is.InRange(-1e-4f, oneStep + 1e-4f),
+                $"rendered {p.Position.X:F4} against simulated {p.SimulatedPosition.X:F4}, " +
+                $"a lag of {lag / oneStep:F2} steps. More than one step means the smoothing " +
+                "span is longer than the interval steps arrive at, so the avatar is " +
+                "permanently behind its own prediction rather than one step behind it.");
         }
 
         [Test]
@@ -241,80 +304,102 @@ namespace Cuvara.Netcode.Tests.Editor
                 "stutter, and they are invisible to every correction counter.");
         }
 
-        // ── Rule 3: a step covers the time since the entity last moved ──
+        // ── Rule 3: every step is exactly one tick ──
 
         /// <summary>
-        /// A gap longer than the hold window must be paid for by the next step, not lost.
+        /// A gap the hold covers is paid for by <b>stepping through it</b>, one tick at a
+        /// time — not by the next step growing.
         /// </summary>
         /// <remarks>
         /// <para>
-        /// The third rule of the server's movement model: <c>dt</c> is
-        /// <c>min(now - last_move_tick, cap) / tick_rate</c>. A client sending every tick
-        /// never sees it, because <c>last_move_tick == now - 1</c> always. A client
-        /// sending at 15 Hz into a 60 Hz base tick sees it whenever arrival jitter opens
-        /// a gap past the hold window — and the harness measured send burstiness of 12 to
-        /// 49, so those gaps are the normal case, not the exception.
+        /// This assertion is the inverse of the one it replaces, and the inversion is the
+        /// whole change. Rule 3 used to read <c>dt = min(now - last_move_tick, cap) /
+        /// tick_rate</c>: a client that had gone quiet paid for the gap in one multiplied
+        /// step. It produced the right distance and the wrong frames — measured against a
+        /// live server, a 1.36-unit step where a normal one is 0.083 — and it only agreed
+        /// with the server when the two sides' independent measurements of elapsed time
+        /// agreed, which across a network is exactly what cannot be relied on. The result
+        /// was the reported symptom: move one step, jerk back, continue.
         /// </para>
         /// <para>
-        /// This is the defect that survived three releases of hold work at an unchanged
-        /// magnitude. The hold fixed how many steps are taken; this fixes how much time
-        /// each one covers, and the two are independent. A structural difference produces
-        /// a constant correction, which is exactly what a constant 0.1667 was.
+        /// One step per tick makes the two sides agree structurally instead. The distance a
+        /// gap is worth is still recovered — this case measures that it is — but it arrives
+        /// as the same steps the server took, on the same ticks.
         /// </para>
         /// </remarks>
         [Test]
-        public void AGapLongerThanTheHoldIsPaidForByTheNextStep()
+        public void AGapInsideTheHoldIsPaidForOneTickAtATime()
         {
             var p = Predictor();
 
-            // One input, its hold runs out, then a long silence, then one more input.
             p.RecordInput(1, 1f, 0f);
-            for (var k = 0; k < HoldTicks; k++) p.Advance(1f / BaseHz);
+            float afterInput = p.SimulatedPosition.X;
 
-            float afterFirst = p.SimulatedPosition.X;
-
-            const int silentTicks = 5;
+            // Silence well inside the window, so the hold is still live throughout.
+            const int silentTicks = 6;
             for (var k = 0; k < silentTicks; k++) p.Advance(1f / BaseHz);
 
-            Assert.That(p.SimulatedPosition.X, Is.EqualTo(afterFirst).Within(1e-5f),
-                "the hold must have expired during the silence");
-
-            p.RecordInput(2, 1f, 0f);
-
-            // The step that lands after the silence covers every tick since the entity
-            // last moved -- the hold's final tick -- not one tick.
-            float banked = p.SimulatedPosition.X - afterFirst;
+            float travelled = p.SimulatedPosition.X - afterInput;
             float oneStep = Speed / BaseHz;
 
-            Assert.That(banked, Is.GreaterThan(oneStep * 1.5f),
-                $"the step after a {silentTicks}-tick silence moved {banked:F4}, about one " +
-                $"step of {oneStep:F4}. The simulated time the gap represents was dropped, " +
-                "so the client falls behind a server that banks it -- by a constant, on " +
-                "every gap, which no rate fix can reach.");
+            Assert.That(travelled, Is.EqualTo(oneStep * silentTicks).Within(1e-4f),
+                $"{silentTicks} silent ticks moved {travelled:F4}, not the " +
+                $"{oneStep * silentTicks:F4} those ticks are worth. The hold is what recovers " +
+                "the time a gap represents now that no step banks it, so a hold that stops " +
+                "early is a client that falls behind the server by a constant.");
         }
 
+        /// <summary>
+        /// No step is ever larger than one tick, however long the client was silent.
+        /// </summary>
+        /// <remarks>
+        /// The property that makes prediction work at all: over any interval client and
+        /// server each take one step per tick, so the two positions agree by construction
+        /// rather than by two elapsed-time measurements matching. A client that banks
+        /// reconciles against a server that does not — and the reverse is just as bad, which
+        /// is why this moved on both sides in one change.
+        /// </remarks>
         [Test]
-        public void BankedTimeIsCappedSoASilentClientCannotTeleport()
+        public void ASilentClientResumesWithOnePlainStepAndNeverTeleports()
         {
             var p = Predictor();
             p.RecordInput(1, 1f, 0f);
-            for (var k = 0; k < HoldTicks; k++) p.Advance(1f / BaseHz);
 
-            float afterFirst = p.SimulatedPosition.X;
-
-            // Ten seconds of silence -- far past the cap.
+            // Ten seconds of silence -- far past the hold window, which expires long before.
             for (var k = 0; k < BaseHz * 10; k++) p.Advance(1f / BaseHz);
 
+            float beforeResume = p.SimulatedPosition.X;
             p.RecordInput(2, 1f, 0f);
 
-            float banked = p.SimulatedPosition.X - afterFirst;
-            float capped = (Speed / BaseHz) * p.MaxBankedTicks;
+            float resumed = p.SimulatedPosition.X - beforeResume;
+            float oneStep = Speed / BaseHz;
 
-            Assert.That(banked, Is.EqualTo(capped).Within(1e-4f),
-                $"a step after ten seconds of silence moved {banked:F4}; the cap allows " +
-                $"{capped:F4}. The bound is part of the movement model, not a server-side " +
-                "valve -- a client banking unbounded time reconciles against a server " +
-                "that does not, on exactly the frames where the network was worst.");
+            Assert.That(resumed, Is.EqualTo(oneStep).Within(1e-4f),
+                $"the step after ten seconds of silence moved {resumed:F4}; one step is " +
+                $"{oneStep:F4}. Repaying the silence restores the distance and destroys the " +
+                "agreement: the server takes one step there, so everything above one step " +
+                "is a correction the client hands itself.");
+        }
+
+        /// <summary>
+        /// And the hold really did stop: the ten seconds themselves are not travelled.
+        /// </summary>
+        [Test]
+        public void TheHoldExpiresAfterTheSilenceTimeoutRatherThanDriftingForever()
+        {
+            var p = Predictor();
+            p.RecordInput(1, 1f, 0f);
+            float afterInput = p.SimulatedPosition.X;
+
+            for (var k = 0; k < BaseHz * 10; k++) p.Advance(1f / BaseHz);
+
+            float coasted = p.SimulatedPosition.X - afterInput;
+            float oneStep = Speed / BaseHz;
+
+            Assert.That(coasted, Is.EqualTo(oneStep * HoldWindow).Within(1e-4f),
+                $"ten seconds of silence coasted {coasted:F4}, against the " +
+                $"{oneStep * HoldWindow:F4} the {HoldWindow}-tick window allows. An expiry " +
+                "that never fires is an avatar walking away from a player who let go.");
         }
 
         [Test]
@@ -324,19 +409,22 @@ namespace Cuvara.Netcode.Tests.Editor
 
             Assert.That(p.MaxBankedTicks,
                 Is.EqualTo(GameConstants.MaxBankedMovementTicks(BaseHz)),
-                "the cap must come from Shared.GameLogic and not from a second copy on " +
-                "the client. A client-side copy of a server constant is the defect this " +
+                "the hold window must come from Shared.GameLogic and not from a second copy " +
+                "on the client, and not from anything measured off the wire. Both sides " +
+                "expire a held direction on the same tick only because both compile against " +
+                "this constant; a client-side copy of a server constant is the defect this " +
                 "package has now shipped four times.");
         }
 
         [Test]
-        public void EvenSendsAtTheBaseRateAreUnaffectedByRuleThree()
+        public void SendingEveryBaseTickTravelsExactlyTheConfiguredSpeed()
         {
             var p = Predictor();
 
-            // A client sending every base tick always has lastMoveTick == now - 1, so
-            // every step is exactly one timestep and rule 3 is invisible to it. This is
-            // why the server could add it without regenerating the golden vectors.
+            // The case rule 3 is measured against: one input per tick, one step per tick,
+            // so a second of input is a second of travel. It read the same under the banked
+            // rule -- lastMoveTick == now - 1 always -- which is why the golden vectors did
+            // not have to be regenerated when banking arrived, or when it left.
             for (var i = 1; i <= BaseHz; i++)
             {
                 p.RecordInput(i, 1f, 0f);
@@ -345,14 +433,187 @@ namespace Cuvara.Netcode.Tests.Editor
 
             // One step of slack, and only one: the loop opens by stepping on the tick it
             // starts on and then advances BaseHz times, so it spans BaseHz + 1 ticks of
-            // movement for BaseHz sends. The point of the case is that rule 3 adds no
-            // banked distance -- which would be a multiple, not a single step.
+            // movement for BaseHz sends. The point of the case is that nothing adds
+            // distance on top -- which would be a multiple, not a single step.
             float oneStep = Speed / BaseHz;
 
             Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed).Within(oneStep + 0.001f),
                 $"a client sending every tick travelled {p.SimulatedPosition.X:F4} against " +
-                $"a configured {Speed}. It always has lastMoveTick == now - 1, so every " +
-                "step must be one plain timestep and rule 3 must add nothing.");
+                $"a configured {Speed}. Every step is one timestep, so a second of input " +
+                "must be exactly a second of travel.");
+        }
+
+        // ── One frame may not manufacture a simulation ──
+
+        /// <summary>
+        /// A frame that took seconds advances the clock by the silence timeout and no more.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>deltaTime</c> is whatever the last frame took, and at startup that is seconds:
+        /// scene load, subscene streaming, shader warmup, the first DOTS world coming up.
+        /// Carrying all of it into the fixed-step accumulator makes one frame burst-advance
+        /// hundreds of base ticks, each one stepping the held direction.
+        /// </para>
+        /// <para>
+        /// <b>Measured against a live server</b>, a player a minute into a session sat
+        /// <b>355 base ticks — 5.9 seconds —</b> ahead of the server's own tick, at a
+        /// constant offset, both clocks otherwise at a matched 60Hz. Not drift: a startup
+        /// burst that is never given back. The reconcile's lead replay is bounded by the
+        /// hold window, so a lead that far outside it cannot be replayed and every snapshot
+        /// lands as a large correction instead — snaps ran at 1 to 2 per second, which is
+        /// what a player reports as the avatar jerking while it moves.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AFrameThatTookSecondsDoesNotManufactureSecondsOfSimulation()
+        {
+            var p = Predictor();
+            p.RecordInput(1, 1f, 0f);
+
+            int before = p.BaseTicksAdvanced;
+
+            // Five seconds in one frame: a scene load, or a breakpoint.
+            p.Advance(5f);
+
+            int advanced = p.BaseTicksAdvanced - before;
+
+            Assert.That(advanced, Is.LessThanOrEqualTo(p.MaxCatchUpTicks),
+                $"one frame advanced {advanced} base ticks. Every tick over the budget is a " +
+                "tick of prediction lead the server never sees and the reconcile cannot " +
+                "replay, so it is paid back as a correction on the next snapshot.");
+
+            Assert.That(p.ClampedFrames, Is.EqualTo(1), "the clamp must be observable");
+            Assert.That(p.DiscardedCatchUpSeconds, Is.GreaterThan(4f),
+                "the discarded time is what the counter is for");
+        }
+
+        /// <summary>
+        /// And the time is DISCARDED, not carried: the next frames run at their own rate
+        /// rather than replaying the stall one tick at a time.
+        /// </summary>
+        [Test]
+        public void TimeOverTheCatchUpBudgetIsDiscardedRatherThanCarried()
+        {
+            var p = Predictor();
+            p.RecordInput(1, 1f, 0f);
+            p.Advance(5f);
+
+            int afterStall = p.BaseTicksAdvanced;
+
+            // Ten ordinary frames.
+            for (var i = 0; i < 10; i++) p.Advance(1f / BaseHz);
+
+            Assert.That(p.BaseTicksAdvanced - afterStall, Is.EqualTo(10),
+                "the frames after a stall advanced more than one tick each, so the stall " +
+                "was carried rather than discarded — the same burst, one frame later.");
+        }
+
+        // ── The two clocks are kept together, not merely started together ──
+
+        /// <summary>
+        /// A client whose clock has run ahead is steered back, a fraction of the error at a
+        /// time, until it sits the intended lead ahead of the server's tick.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>SeedBaseTick</c> aligns the two clocks once, at join, and never speaks again.
+        /// Measured against a live server on a build where every other counter was clean,
+        /// the client's tick sat <b>456 ticks — 7.6 seconds —</b> past the newest snapshot
+        /// it held and was still climbing, with <c>Snaps=0</c> and
+        /// <c>LastCorrection=0.0000</c> throughout: the three-argument <c>Reconcile</c>
+        /// replays that whole span as prediction lead, so a runaway clock raises nothing.
+        /// The local player looks perfect while the server, and every other player, has it
+        /// seconds behind its own screen.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AClockThatHasRunAheadIsSteeredBackTowardTheServer()
+        {
+            var p = Predictor();
+            p.SeedBaseTick(1000);
+
+            // Run the clock forward on its own for a while, as a client whose snapshots
+            // arrive slower than the server emits them does.
+            for (var i = 0; i < 120; i++) p.Advance(1f / BaseHz);
+
+            long before = p.BaseTick;
+
+            // The server is 60 ticks behind where the client thinks it is.
+            const int target = 4;
+            long serverTick = before - 60 - target;
+
+            // One steering call per snapshot, a second's worth.
+            for (var i = 0; i < SendHz; i++)
+            {
+                p.SteerToServerTick(serverTick, target);
+                for (var k = 0; k < SendEvery; k++) p.Advance(1f / BaseHz);
+                serverTick += SendEvery;
+            }
+
+            long error = p.BaseTick - (serverTick + target);
+
+            Assert.That(System.Math.Abs(error), Is.LessThan(60),
+                $"after a second of steering the clock is still {error} ticks out. Nothing " +
+                "else bounds this: the reconcile replays the whole gap as lead and reports " +
+                "no correction while it grows.");
+
+            Assert.That(p.HardResyncs, Is.Zero,
+                "an error this size must be steered out, not jumped: a jump moves BaseTick " +
+                "out from under the pending inputs, the held-from tick and the last-moved " +
+                "tick, all of which are compared against it.");
+        }
+
+        /// <summary>
+        /// Steering does not stall the simulation: the clock still advances while it is
+        /// being pulled back, a few percent slow rather than stopped.
+        /// </summary>
+        [Test]
+        public void SteeringSlowsTheClockRatherThanStoppingIt()
+        {
+            var p = Predictor();
+            p.SeedBaseTick(1000);
+            for (var i = 0; i < 120; i++) p.Advance(1f / BaseHz);
+
+            long serverTick = p.BaseTick - 60;
+            int before = p.BaseTicksAdvanced;
+
+            for (var i = 0; i < SendHz; i++)
+            {
+                p.SteerToServerTick(serverTick, 0);
+                for (var k = 0; k < SendEvery; k++) p.Advance(1f / BaseHz);
+                serverTick += SendEvery;
+            }
+
+            int advanced = p.BaseTicksAdvanced - before;
+
+            Assert.That(advanced, Is.InRange(BaseHz / 2, BaseHz),
+                $"a second of real time advanced {advanced} base ticks while steering. " +
+                "Stopping the clock to burn off the error is a visible freeze; the point of " +
+                "steering is that the correction is spread thin enough not to read as one.");
+        }
+
+        /// <summary>
+        /// An error too large to steer out is set outright, and the pending inputs go with
+        /// it — they refer to ticks that no longer exist.
+        /// </summary>
+        [Test]
+        public void AnErrorTooLargeToSteerIsResynchronisedOutright()
+        {
+            var p = Predictor();
+            p.SeedBaseTick(1000);
+            p.RecordInput(1, 1f, 0f);
+            for (var i = 0; i < 600; i++) p.Advance(1f / BaseHz);   // ten seconds adrift
+
+            p.SteerToServerTick(1000, 0);
+
+            Assert.That(p.BaseTick, Is.EqualTo(1000),
+                "an error past the hard-resync threshold must be set, not walked back over " +
+                "a minute of visibly wrong speed");
+            Assert.That(p.HardResyncs, Is.EqualTo(1));
+            Assert.That(p.PendingCount, Is.Zero,
+                "the pending inputs refer to base ticks that no longer exist; replaying " +
+                "them against the new clock is replaying them at the wrong time");
         }
 
         // ── Evenness of the rendered motion ──
@@ -495,11 +756,14 @@ namespace Cuvara.Netcode.Tests.Editor
         /// steps, for a predictor whose clock runs at <paramref name="clockFactor"/> times
         /// real time.
         /// </summary>
-        private static float SteadyStateCorrectionInSteps(float clockFactor)
+        private static float SteadyStateCorrectionInSteps(float clockFactor) =>
+            SteadyStateCorrectionInSteps(clockFactor, withSnapshotTick: true);
+
+        private static float SteadyStateCorrectionInSteps(float clockFactor, bool withSnapshotTick)
         {
             MapBounds bounds = Bounds;
             var p = new LocalMovePredictor(new PredictionSettings(BaseHz, Speed, bounds));
-            p.SetHoldTicks(HoldTicks);
+            p.SetHoldTicks(SendEvery);
             p.Reconcile(Vec2.Zero, 0);
 
             var serverPos = Vec2.Zero;
@@ -520,7 +784,7 @@ namespace Cuvara.Netcode.Tests.Editor
                     return;
                 }
 
-                if (heldFrom != 0 && tick != heldFrom && tick - heldFrom < HoldTicks)
+                if (heldFrom != 0 && tick != heldFrom && tick - heldFrom <= HoldWindow)
                 {
                     var probe = new EntityState { Position = serverPos, Speed = Speed, Dead = false };
                     if (MovementSystem.TryMove(in probe, heldX, heldY, Dt, in bounds, out Vec2 moved)
@@ -538,7 +802,7 @@ namespace Cuvara.Netcode.Tests.Editor
             {
                 p.RecordInput(interval, 1f, 0f);
 
-                for (var k = 0; k < HoldTicks; k++)
+                for (var k = 0; k < SendEvery; k++)
                 {
                     serverTick++;
                     ServerStep(serverTick, k == 0, 1f, 0f, interval);
@@ -551,7 +815,20 @@ namespace Cuvara.Netcode.Tests.Editor
                     real += frame;
                 }
 
-                p.Reconcile(serverPos, lastAck);
+                // Three-argument form: the snapshot's own base tick. Without it Reconcile
+                // cannot tell a prediction LEAD from a disagreement, and there is a real one
+                // now -- the client's clock has entered the tick after the snapshot's and the
+                // hold has stepped it, which the next input will re-take. Discarding that is
+                // issue #53, and with the two-argument form this measured a flat 1.00 step
+                // at a clock that was exactly right.
+                if (withSnapshotTick)
+                {
+                    p.Reconcile(serverPos, lastAck, serverTick);
+                }
+                else
+                {
+                    p.Reconcile(serverPos, lastAck);
+                }
                 last = p.LastCorrection / (Speed / BaseHz);
             }
 
@@ -589,44 +866,117 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// The correction reads out the predictor's clock error, linearly.
+        /// A clock that is wrong shows up in <c>TickError</c>, not in <c>LastCorrection</c>,
+        /// and that is the whole point of measuring it there.
         /// </summary>
         /// <remarks>
-        /// <c>correction_steps = (clockFactor - 1) * holdTicks</c>, exactly, at every
-        /// factor measured. That makes the correction an instrument rather than only a
-        /// symptom: a live run reporting 2.00 steps against a 4-tick hold is reporting a
-        /// clock running at 1.5x, and one reporting 0.00 is reporting a clock that is
-        /// right. Pinned so the reading stays trustworthy.
+        /// <para>
+        /// This case has been through three meanings, each true of the design at the time.
+        /// It began pinning <c>correction_steps = (clockFactor - 1) * SendEvery</c> exactly,
+        /// which made <c>LastCorrection</c> a clock instrument. Then the hold window widened
+        /// and the reconcile started replaying the whole lead, so every factor read 1.00.
+        /// Now the reconcile compares the snapshot against the client's own position at that
+        /// snapshot's tick — and at the SAME tick number a fast clock and a slow one have
+        /// taken the same steps, so a clock error produces no position error at all. It
+        /// produces a TICK error, which is a different quantity and now has its own reading.
+        /// </para>
+        /// <para>
+        /// <b>The instrument moved; the property did not.</b> A desynced client must still be
+        /// visible on a counter, which is what this asserts — of <c>TickError</c>, the signal
+        /// the steering acts on.
+        /// </para>
         /// </remarks>
-        [TestCase(1.25f, 1f)]
-        [TestCase(1.5f, 2f)]
-        [TestCase(2.0f, 4f)]
-        public void TheCorrectionMeasuresTheClockError(float clockFactor, float expectedSteps)
+        [TestCase(1.25f)]
+        [TestCase(1.5f)]
+        [TestCase(2.0f)]
+        public void AWrongClockShowsUpAsATickError(float clockFactor)
         {
-            float steps = SteadyStateCorrectionInSteps(clockFactor);
+            var p = Predictor();
+            p.SeedBaseTick(1000);
 
-            Assert.That(steps, Is.EqualTo(expectedSteps).Within(0.05f),
-                $"a {clockFactor:F2}x clock produced {steps:F2} steps of correction, not " +
-                $"{expectedSteps:F2}. The relation (factor - 1) * holdTicks is what lets a " +
-                "measured correction be read back as a clock error, so if it no longer " +
-                "holds, that reading is no longer valid.");
+            long serverTick = 1000;
+
+            // A second of real time, with the client's clock running at clockFactor.
+            for (var i = 0; i < SendHz; i++)
+            {
+                for (var k = 0; k < SendEvery; k++)
+                {
+                    p.Advance(clockFactor / BaseHz);
+                    serverTick++;
+                }
+            }
+
+            // One steering call reads the error before acting on it.
+            p.SteerToServerTick(serverTick, 0);
+
+            // A second at clockFactor is (clockFactor - 1) * BaseHz ticks of error -- 15, 30
+            // and 60 at the three factors. Half of that is the floor, which separates a
+            // clock fault from ordinary rounding by an order of magnitude without pinning
+            // the arithmetic.
+            float expected = (clockFactor - 1f) * BaseHz;
+
+            Assert.That(p.TickError, Is.GreaterThan(expected * 0.5f),
+                $"a {clockFactor:F2}x clock over a second left a tick error of {p.TickError}, " +
+                $"against about {expected:F0} owed. A clock that runs at the wrong rate has " +
+                "to be visible somewhere, or a desynced client looks healthy on every " +
+                "counter the package exposes.");
         }
 
+        /// <summary>
+        /// And a clock that is right produces neither a tick error nor a correction.
+        /// </summary>
         [Test]
-        public void NoHoldMeasuredMeansTheOldOneStepBehaviour()
+        public void ACorrectClockProducesNoTickError()
+        {
+            var p = Predictor();
+            p.SeedBaseTick(1000);
+
+            long serverTick = 1000;
+            for (var i = 0; i < SendHz; i++)
+            {
+                for (var k = 0; k < SendEvery; k++)
+                {
+                    p.Advance(1f / BaseHz);
+                    serverTick++;
+                }
+
+                p.SteerToServerTick(serverTick, 0);
+            }
+
+            Assert.That(System.Math.Abs(p.TickError), Is.LessThanOrEqualTo(2),
+                $"a correct clock drifted to a tick error of {p.TickError}");
+        }
+
+        /// <summary>
+        /// The hold does not wait to be measured. A predictor that has never been told a
+        /// snapshot gap holds exactly as one that has.
+        /// </summary>
+        /// <remarks>
+        /// The inverse of what this case asserted before, for the reason the window changed:
+        /// it was inferred from the snapshot gap, so until a gap had been observed the safe
+        /// thing was to hold not at all. That safety had a cost paid on every session — the
+        /// first snapshot after joining is a keyframe emitted off the tick boundary, so the
+        /// measured gap could pin at 1 and switch the hold off for the whole session
+        /// (<c>TickRateEstimator.SnapshotTickGap</c>). Reading the window from the shared
+        /// constant removes the measurement, and with it the window in which the client
+        /// deliberately disagreed with the server.
+        /// </remarks>
+        [Test]
+        public void TheHoldRunsWithoutAnyMeasuredSnapshotGap()
         {
             var p = new LocalMovePredictor(new PredictionSettings(BaseHz, Speed, Bounds));
             p.Reconcile(Vec2.Zero, 0);
 
-            Assert.That(p.HoldTicks, Is.EqualTo(1),
-                "an unmeasured hold window must behave as no hold at all. Guessing a " +
-                "window is how a client ends up wrong in a new way instead of the old one.");
-
             p.RecordInput(1, 1f, 0f);
-            for (var k = 0; k < HoldTicks; k++) p.Advance(1f / BaseHz);
+            for (var k = 0; k < SendEvery; k++) p.Advance(1f / BaseHz);
 
-            Assert.That(p.SimulatedPosition.X, Is.EqualTo(Speed / BaseHz).Within(1e-5f),
-                "with no hold measured, one input must still produce exactly one step");
+            // The input's own step plus one per advanced tick: the window is 15, so none of
+            // them expires.
+            Assert.That(p.SimulatedPosition.X,
+                Is.EqualTo((Speed / BaseHz) * (1 + SendEvery)).Within(1e-5f),
+                "a predictor that was never told a snapshot gap stepped differently from one " +
+                "that was. The hold window is a shared constant now; nothing about it is " +
+                "measured, so nothing about it can be unmeasured.");
         }
     }
 }

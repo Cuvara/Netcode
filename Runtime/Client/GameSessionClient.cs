@@ -77,6 +77,9 @@ namespace Cuvara.Netcode.Client
         /// <summary>Heartbeat round trip in milliseconds, or zero before the first pong.</summary>
         public long RoundTripMs => _connection?.RoundTripMs ?? 0L;
 
+        /// <summary>Frames decoded off the wire, of every type. Diagnostics only.</summary>
+        public long FramesReceived => _connection?.FramesReceived ?? 0L;
+
         public bool IsConnected => _connection != null && _connection.IsRunning;
 
         /// <summary>

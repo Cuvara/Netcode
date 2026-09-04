@@ -7,7 +7,8 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 
 - **Wire transport** — TCP (KCP planned), 4-byte BE length-prefix framing
 - **Codec** — JSON and Protobuf wire codecs, distinguished inbound by a one-byte sniff
-- **Two-hop handshake** — Gateway auth → JoinToken → Game server connect
+- **Two-hop handshake** — Gateway auth → JoinToken → Game server connect. Retryable assignment refusals ("server is starting…") consume a join attempt with a jittered pause; the gateway's terminal precondition answers abort with the real error
+- **Automatic reconnect** — a `server_shutdown` close re-runs the connect flow through the registered `IAuthProvider` (jittered, linearly-backed-off rounds spanning the server's 30 s entity hold); off per user-initiated disconnects, observable via `ReconnectAttemptStarted`/`Reconnected`/`ReconnectFailed`
 - **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
@@ -110,6 +111,20 @@ branch matters for where the work lives, not for whether the release fires.
 `release-reminder.yml` watches `develop` and says so when the version there has no tag yet.
 It never tags and never publishes: pushing a `v*` tag is the last gate before `npm publish`,
 which cannot be undone — a bad version can only be superseded, never withdrawn.
+
+### `main` syncs itself
+
+`sync-main.yml` runs on the tag push and opens a pull request moving `main` to the tagged
+commit, set to auto-merge. Nothing to remember and nothing to do by hand.
+
+It opens a PR rather than pushing because `main` requires one plus four passing checks, and
+a workflow that bypassed that would be quietly removing the gate from the branch other
+people read. When the tag is already reachable from `main` it does nothing and says so; when
+the move would not be a fast-forward it opens the PR anyway and warns, rather than choosing
+for you.
+
+`workflow_dispatch` takes a tag, for when a tag was pushed while the workflow was broken or
+a sync PR was closed.
 
 ### Why this is written down
 

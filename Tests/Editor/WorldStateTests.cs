@@ -106,5 +106,31 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.AreEqual(0, world.Keyframes);
             Assert.AreEqual(0, world.Deltas);
         }
+        /// <summary>
+        /// <c>EntityMap</c> is the same map as <c>Entities</c>, not a copy.
+        /// </summary>
+        /// <remarks>
+        /// The property exists so a per-frame caller can enumerate without boxing the
+        /// struct enumerator — 88 bytes per foreach through the interface, measured, paid
+        /// once per rendered frame by the view binder. A copy would trade that allocation
+        /// for a bigger one and desynchronise the two views of the world; identity is the
+        /// whole contract.
+        /// </remarks>
+        [Test]
+        public void EntityMapIsTheSameMapAsEntities_NotACopy()
+        {
+            var world = new WorldState();
+            world.Apply(Keyframe(1L, Entity("a", 1f, 2f), Entity("b", 3f, 4f)));
+
+            Assert.That(world.EntityMap, Is.SameAs(world.Entities),
+                "a copy would allocate per access and could drift from the interface view");
+            Assert.That(world.EntityMap.Count, Is.EqualTo(2));
+
+            world.Apply(Keyframe(2L, Entity("a", 9f, 9f)));
+
+            Assert.That(world.EntityMap.Count, Is.EqualTo(1),
+                "the concrete view must follow the merger, because it IS the merger's map");
+        }
+
     }
 }

@@ -356,8 +356,23 @@ namespace Cuvara.Netcode.Connection
             }
         }
 
+        /// <summary>
+        /// Frames decoded off the wire since the connection opened, of every type.
+        /// </summary>
+        /// <remarks>
+        /// Compared against how many snapshots reach <c>WorldState.Apply</c>, this is what
+        /// separates "the server did not send it" from "the client did not consume it" —
+        /// the two have opposite fixes and no counter in this package could tell them
+        /// apart. A client whose applied rate sits below its received rate is dropping
+        /// frames in decode or resolve; one whose received rate sits below the server's
+        /// send rate is not reading the socket fast enough.
+        /// </remarks>
+        public long FramesReceived { get; private set; }
+
         private void HandleFrame(WireFrame frame)
         {
+            FramesReceived++;
+
             switch (frame.Type)
             {
                 case MsgType.Ping:

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
@@ -53,7 +54,7 @@ namespace DOTSSample
         [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
                  "sine-wave walk, which is what this sample did before and is still what " +
                  "you want for an unattended soak run.")]
-        [SerializeField] private bool useKeyboardInput = true;
+        [SerializeField] private bool useKeyboardInput = false;
 
         [Header("Prediction")]
         [Tooltip("Fallback movement speed, used before the first snapshot and against a " +
@@ -64,8 +65,21 @@ namespace DOTSSample
                  "rather than guessing.")]
         [SerializeField] private float playerSpeed = 5f;
 
+        [Tooltip("Keep the camera over the local player. Off leaves it fixed at the world " +
+                 "origin, which is what this sample did before — fine for watching several " +
+                 "players at once, wrong the moment you walk anywhere.")]
+        [SerializeField] private bool followLocalPlayer = true;
+
+        [Tooltip("How hard the camera pulls toward the local player, per second. Higher is " +
+                 "tighter and passes more of the avatar's reconciliation snaps into the view; " +
+                 "lower drifts behind during sustained movement.")]
+        [SerializeField] private float cameraFollowSharpness = 8f;
+
         [Header("Run")]
-        [SerializeField] private float runSeconds = 300f;
+        [Tooltip("Seconds before the client disconnects itself. The end is quiet -- the avatar " +
+                 "simply stops and the HUD reads 'Run complete' -- so a value shorter than the " +
+                 "session you are actually running looks like a movement or netcode fault.")]
+        [SerializeField] private float runSeconds = 3600f;
 
         private NetworkClient _client;
         private WorldViewBinder _binder;
@@ -127,8 +141,8 @@ namespace DOTSSample
         // Keyed by id, but the locality the text was built with is stored alongside it: the
         // '★ YOU' prefix is derived from IsLocal, so caching on the id alone renders a stale
         // star for any entity whose locality changes under it.
-        private readonly Dictionary<string, (bool IsLocal, string Text)> _entityLabelTextCache =
-            new Dictionary<string, (bool, string)>();
+        private readonly Dictionary<string, (bool IsLocal, string Text, Vector2 Size)> _entityLabelTextCache =
+            new Dictionary<string, (bool, string, Vector2)>();
 
         // --- Combat stats cache ---
         private string _cachedCombatText;
@@ -165,11 +179,26 @@ namespace DOTSSample
                  "two or more draw the map selector and wait for a click.")]
         [SerializeField] private string[] availableMaps = { "map_01", "map_02" };
 
+        [Header("Diagnostics")]
+        [Tooltip("Per-frame attack bridge counters and per-poll HTTP responses. Off by " +
+                 "default: the attack counter alone fired once a second for the whole " +
+                 "session, and it only says anything while the attack path or a Nakama " +
+                 "endpoint is actually under investigation.")]
+        [SerializeField] private bool verboseLogging = false;
+
         private GUIStyle _serverPanelStyle;
         private GUIStyle _mapButtonStyle;
 
         // --- Auth ---
         private string _nakamaSessionToken;
+
+        /// <summary>
+        /// Kept past the handshake so the session can be renewed. It used to be discarded the
+        /// moment the gateway token was in hand, which is why the session token was read once
+        /// and then used until it stopped working -- 60 seconds later on a default Nakama, and
+        /// silently, because the game connection uses a separate token and keeps running.
+        /// </summary>
+        private SampleNakamaAuth _nakamaAuth;
 
         // --- Backend address resolved at startup ---
         // Command line first, then environment, then the field initializers above.
@@ -317,7 +346,17 @@ namespace DOTSSample
             // With a single map there is nothing to choose, so connect to it directly —
             // taking the id from the list rather than from 'mapId', or configuring one
             // map would silently connect to whatever 'mapId' happened to hold.
-            if (availableMaps == null || availableMaps.Length == 0)
+            //
+            // A map named ON THE COMMAND LINE skips the selector outright. Without this a
+            // built player offered more than one map sits on the map-picker forever waiting
+            // for a click, which makes it unusable for an automated run against a live
+            // server -- the case this sample exists to serve. -cuvara-map is already parsed
+            // and carries MapExplicit precisely so a caller can say "this map, no UI".
+            if (_backend.MapExplicit)
+            {
+                StartConnection(_backend.MapId);
+            }
+            else if (availableMaps == null || availableMaps.Length == 0)
             {
                 StartConnection(mapId);
             }
@@ -460,6 +499,13 @@ namespace DOTSSample
         /// </remarks>
         private void StartPrediction()
         {
+            // Despawn everything the old binder held BEFORE replacing it. On a
+            // reconnect this method builds a fresh binder whose _live set starts
+            // empty, so its despawn pass could never consider entities the old one
+            // spawned — anything that left AOI or died during the outage stayed
+            // rendered forever, frozen at its last position (#59).
+            _binder?.Reset();
+
             uint advertised = _client?.TickRate ?? 0u;
 
             var settings = PredictionSettings.FromServer(
@@ -511,12 +557,29 @@ namespace DOTSSample
         /// with differ from the one a player would say they pressed.
         /// </para>
         /// </remarks>
+        /// <summary>Angular rate of the scripted walk, radians per second.</summary>
+        private const float WalkRadiansPerSecond = 0.6f;
+
+        private float _walkAngle;
+
         private void SampleMovementInput()
         {
             if (!useKeyboardInput)
             {
-                _moveX = Mathf.Sin(Time.time * 1.5f);
-                _moveY = Mathf.Cos(Time.time * 0.8f);
+                // A CIRCLE, not a constant heading. The diagnostic that stood here sent a
+                // constant +x so distance over time would be a straight line; it walks the
+                // avatar into the map bound in about a minute and every step after that is
+                // clamped to no displacement. The run then looks perfectly smooth while
+                // measuring nothing -- held steps read 0/1711 and the prediction path was
+                // simply not being exercised.
+                //
+                // Slow enough that the direction is near-constant between two inputs, so
+                // this still tests the held-direction path rather than a new vector every
+                // tick, and closed so the avatar stays inside the bounds indefinitely.
+                float angle = _walkAngle;
+                _walkAngle += WalkRadiansPerSecond * Time.deltaTime;
+                _moveX = (float)Math.Cos(angle);
+                _moveY = (float)Math.Sin(angle);
                 return;
             }
 
@@ -599,6 +662,77 @@ namespace DOTSSample
             (positive ? 1f : 0f) - (negative ? 1f : 0f);
 #endif
 
+        /// <summary>
+        /// Keeps the camera over the local player.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Without this the camera sits at the world origin for the whole run
+        /// (<c>DOTSSceneSetup</c> places it there and nothing moves it), and with
+        /// <c>orthographicSize = 12</c> on a 4:3 window that is roughly ±16 units across —
+        /// about three seconds of walking at the default speed. Past that your own capsule
+        /// leaves the screen while everyone still standing near the origin stays visible,
+        /// which reads exactly like "my player disappeared when I moved" and sends the reader
+        /// looking for a rendering or netcode fault that is not there.
+        /// </para>
+        /// <para>
+        /// <b>LateUpdate, and damped.</b> LateUpdate so the camera reads positions the frame's
+        /// simulation has already written rather than trailing them by a frame.
+        /// </para>
+        /// <para>
+        /// <b>The damping is not a cosmetic choice, and an exact follow was tried first.</b>
+        /// The local avatar is predicted, and reconciliation hard-snaps it whenever the
+        /// correction exceeds <c>LocalMovePredictor.SmoothingThreshold</c>. A camera locked
+        /// rigidly to a position that snaps moves the ENTIRE view on every snap, so every
+        /// remote player and every enemy on screen jumps with it. Measured against this
+        /// server: walking produced snaps at roughly the input rate, and with a rigid follow
+        /// the result was reported as "other players and enemies are jerky and sometimes
+        /// disappear" — an artefact of the camera, laid over entities that were being
+        /// interpolated correctly. Damping decouples the view from the avatar's corrections.
+        /// </para>
+        /// <para>
+        /// The trade is real and worth stating: damping adds easing of its own, so this is
+        /// the wrong setting for judging how smooth remote motion is. Turn
+        /// <see cref="followLocalPlayer"/> off for that — a still camera adds nothing at all.
+        /// </para>
+        /// <para>
+        /// Judging REMOTE smoothness is still easier with <see cref="followLocalPlayer"/> off
+        /// and the local player left standing still, because then nothing on screen is moving
+        /// for a reason other than the thing under observation.
+        /// </para>
+        /// </remarks>
+        private void LateUpdate()
+        {
+            if (_view == null || !_view.IsValid) return;
+
+            // The one label sweep per frame. OnGUI (raised at least twice per frame by
+            // IMGUI) and the camera follow both read this cache instead of walking every
+            // entity through the EntityManager again (#60).
+            _view.GetEntityLabels(_labelCache);
+
+            if (!followLocalPlayer) return;
+
+            var cam = GetCamera();
+            if (cam == null) return;
+
+            for (int i = 0; i < _labelCache.Count; i++)
+            {
+                if (!_labelCache[i].IsLocal) continue;
+
+                // Height and rotation are left alone: the camera is top-down orthographic and
+                // only its ground-plane position should track the player.
+                var pos = cam.transform.position;
+                var target = new Vector3(_labelCache[i].WorldPos.x, pos.y, _labelCache[i].WorldPos.z);
+
+                // Exponential smoothing, framerate-independent. A plain Lerp with a constant
+                // factor eases faster on a 300fps machine than a 60fps one, which would make
+                // the sample look different on different hardware for no reason.
+                float k = 1f - Mathf.Exp(-cameraFollowSharpness * Time.unscaledDeltaTime);
+                cam.transform.position = Vector3.Lerp(pos, target, k);
+                return;
+            }
+        }
+
         private void Update()
         {
             SampleMovementInput();
@@ -645,7 +779,10 @@ namespace DOTSSample
                 if (_combatStatsQuery == default)
                     _combatStatsQuery = dotsWorld.EntityManager.CreateEntityQuery(typeof(CombatStats));
 
-                if (_combatStatsQuery.CalculateEntityCount() > 0)
+                // IsEmptyIgnoreFilter, not CalculateEntityCount: the count completes the
+                // query's dependency chain — a per-frame sync against the simulation
+                // group to learn a number this guard never uses (#60).
+                if (!_combatStatsQuery.IsEmptyIgnoreFilter)
                 {
                     var stats = _combatStatsQuery.GetSingleton<CombatStats>();
                     if (_prevKills != stats.Kills)
@@ -679,23 +816,29 @@ namespace DOTSSample
                 if (_attackRequestQuery == default)
                     _attackRequestQuery = dotsWorld.EntityManager.CreateEntityQuery(typeof(AttackRequest));
 
-                int attackCount = _attackRequestQuery.CalculateEntityCount();
+                // Same reasoning as the combat-stats guard above: almost every frame
+                // there are zero requests, and the empty check does not sync (#60).
+                bool hasAttacks = !_attackRequestQuery.IsEmptyIgnoreFilter;
 
-                _attackDebugTimer -= Time.deltaTime;
-                if (_attackDebugTimer <= 0f)
+                if (verboseLogging)
                 {
-                    _attackDebugTimer = 1f;
-                    Debug.Log($"[Debug] AttackRequest count: {attackCount}, pending: '{_pendingAttackTarget}'");
+                    _attackDebugTimer -= Time.deltaTime;
+                    if (_attackDebugTimer <= 0f)
+                    {
+                        _attackDebugTimer = 1f;
+                        Debug.Log($"[Debug] AttackRequest present: {hasAttacks}, pending: '{_pendingAttackTarget}'");
+                    }
                 }
 
-                if (attackCount > 0)
+                if (hasAttacks)
                 {
                     var entities = _attackRequestQuery.ToEntityArray(Allocator.Temp);
                     for (int i = 0; i < entities.Length; i++)
                     {
                         var req = dotsWorld.EntityManager.GetComponentData<AttackRequest>(entities[i]);
                         var targetId = req.TargetId.ToString();
-                        Debug.Log($"[Debug] AttackRequest consumed: '{targetId}'");
+                        if (verboseLogging)
+                            Debug.Log($"[Debug] AttackRequest consumed: '{targetId}'");
                         if (!string.IsNullOrEmpty(targetId))
                             _pendingAttackTarget = targetId;
                         dotsWorld.EntityManager.DestroyEntity(entities[i]);
@@ -704,6 +847,13 @@ namespace DOTSSample
                 }
             }
 
+            _healthFrames++;
+
+            // The binder steers the prediction clock toward the server's tick and needs the
+            // journey time to know how far ahead of the newest snapshot "now" is. Only the
+            // session measures it.
+            _binder.RoundTripMs = _client.Session?.RoundTripMs ?? 0L;
+
             _binder.Tick(_client.World, _client.UserId);
 
             // Per frame, and separately from the snapshot pass above. Snapshot processing
@@ -711,7 +861,13 @@ namespace DOTSSample
             // client that renders only from it shows the avatar still between snapshots
             // and jumping on the frame one lands, however fast it is drawing. This is what
             // makes the smoothing observable rather than merely computed.
-            _binder.AdvanceFrame(Time.deltaTime);
+            //
+            // Unscaled: the binder's interpolation clock is a stopwatch and the camera
+            // follow above uses unscaledDeltaTime, while Time.deltaTime is scaled by
+            // timeScale AND clamped at maximumDeltaTime. Feeding the predictor the one
+            // clock the other two do not share made every timeScale change or long hitch
+            // a lead the steering then corrected — a visible snap blamed on netcode (#60).
+            _binder.AdvanceFrame(Time.unscaledDeltaTime);
             _entityCount = _view.Count;
 
             // Verify the advertised rate against one measured off the wire. The protocol
@@ -737,6 +893,136 @@ namespace DOTSSample
                               $"measured {_binder.TickRate.EstimatedHz:F1}Hz off the wire.");
                 }
             }
+
+            LogPredictionHealth();
+        }
+
+        /// <summary>
+        /// Prints the counters that describe how the local player's motion actually behaved,
+        /// once every <see cref="PredictionHealthSeconds"/>.
+        /// </summary>
+        /// <remarks>
+        /// The counters that matter are cheap and already exposed; what was missing was
+        /// anything printing them from a running player. "It still feels jerky" and
+        /// "Snaps=0, corrections=0" cannot both be acted on without this line, and the
+        /// smoothness defects this package has shipped all left every counter clean because
+        /// the SIMULATED position was right and only the rendered one was wrong -- so the
+        /// render figures are printed next to the reconcile ones deliberately.
+        /// </remarks>
+        private const float PredictionHealthSeconds = 5f;
+
+        private float _nextPredictionHealthAt;
+        private int _lastSnaps;
+        private int _lastSmoothed;
+        private int _lastReconciles;
+        private float _healthWindowStart;
+
+        // Two clocks over the same window. The netcode reads Stopwatch (StopwatchViewClock);
+        // this health line reads Time.realtimeSinceStartup. A snapshot rate that looks low
+        // is either frames that did not arrive or a second that is not a second, and only
+        // measuring both separates them.
+        private readonly System.Diagnostics.Stopwatch _healthStopwatch =
+            System.Diagnostics.Stopwatch.StartNew();
+        private double _healthStopwatchMark;
+
+        /// <summary>Stopwatch reading at the first health line, so totals can be divided by it.</summary>
+        private double _firstHealthAt = -1;
+        private int _healthFrames;
+        private int _snapshotsApplied;
+        private int _lastSnapshotsApplied;
+        private long _lastFramesRx;
+
+        private void LogPredictionHealth()
+        {
+            if (_predictor == null || Time.realtimeSinceStartup < _nextPredictionHealthAt)
+            {
+                return;
+            }
+
+            // No line while the session is down. Mid-outage the predictor has been
+            // reset (counters and base tick back to zero) while the baselines still
+            // hold the old session's totals, so a window landing there prints
+            // negative garbage about a connection that does not exist. Re-baseline
+            // instead, so the first in-world window after a reconnect is measured
+            // from reconnect, not from the outage (#59).
+            if (_client == null || _client.State != NetworkClientState.InWorld)
+            {
+                _nextPredictionHealthAt = Time.realtimeSinceStartup + PredictionHealthSeconds;
+                _healthWindowStart = Time.realtimeSinceStartup;
+                _healthStopwatchMark = _healthStopwatch.Elapsed.TotalSeconds;
+                _healthFrames = 0;
+                _lastSnaps = _predictor.Snaps;
+                _lastSmoothed = _predictor.SmoothedCorrections;
+                _lastReconciles = _predictor.Reconciles;
+                _lastSnapshotsApplied = _snapshotsApplied;
+                _lastFramesRx = _client?.Session?.FramesReceived ?? 0L;
+                return;
+            }
+
+            _nextPredictionHealthAt = Time.realtimeSinceStartup + PredictionHealthSeconds;
+
+            float window = Mathf.Max(1e-3f, Time.realtimeSinceStartup - _healthWindowStart);
+            _healthWindowStart = Time.realtimeSinceStartup;
+
+            double swNow = _healthStopwatch.Elapsed.TotalSeconds;
+            if (_firstHealthAt < 0) _firstHealthAt = swNow;
+            double swWindow = swNow - _healthStopwatchMark;
+            _healthStopwatchMark = swNow;
+            float fps = _healthFrames / window;
+            float appliedPerSec = (_snapshotsApplied - _lastSnapshotsApplied) / window;
+            long framesRx = _client.Session?.FramesReceived ?? 0L;
+            float framesPerSec = (framesRx - _lastFramesRx) / window;
+            _lastFramesRx = framesRx;
+            _healthFrames = 0;
+            _lastSnapshotsApplied = _snapshotsApplied;
+
+            int snaps = _predictor.Snaps - _lastSnaps;
+            int smoothed = _predictor.SmoothedCorrections - _lastSmoothed;
+            int reconciles = _predictor.Reconciles - _lastReconciles;
+            _lastSnaps = _predictor.Snaps;
+            _lastSmoothed = _predictor.SmoothedCorrections;
+            _lastReconciles = _predictor.Reconciles;
+
+            float step = _predictor.LastCorrection / Mathf.Max(1e-6f, playerSpeed * PredictedDt());
+
+            Debug.Log(
+                $"[DOTSNet/health] reconciles={reconciles} smoothed={smoothed} snaps={snaps} " +
+                $"lastCorrection={_predictor.LastCorrection:F4} ({step:F2} steps) " +
+                $"span={_predictor.EffectiveSmoothingSpan * 1000f:F1}ms " +
+                $"stepInterval={_predictor.ObservedStepInterval * 1000f:F1}ms " +
+                $"held={_predictor.HeldStepsApplied}/{_predictor.BaseTicksAdvanced} " +
+                $"skipExpired={_predictor.SkipExpired} coalesced={_predictor.CoalescedInputs} " +
+                $"clientTick={_predictor.BaseTick} serverTick={_binder.LastServerTick} " +
+                $"lead={_predictor.BaseTick - _binder.LastServerTick}t " +
+                $"fps={fps:F0} snapshotsApplied={appliedPerSec:F1}/s " +
+                $"clamped={_predictor.ClampedFrames} discarded={_predictor.DiscardedCatchUpSeconds:F2}s " +
+                $"framesRx={framesPerSec:F1}/s rtt={_client.Session?.RoundTripMs ?? 0}ms " +
+                $"tickError={_predictor.TickError}t resyncs={_predictor.HardResyncs} " +
+                $"pending={_predictor.PendingCount} rejected={_predictor.RejectedInputs} " +
+                $"dropped={_predictor.DroppedInputs} nothingHeld={_predictor.SkipNothingHeld} " +
+                $"alreadyStepped={_predictor.SkipInputAlreadyStepped} " +
+                $"enabled={_predictor.IsEnabled} inputTick={_inputTick} " +
+                $"noDisp={_predictor.SkipNoDisplacement} refused={_predictor.SkipRefusedByMovementModel} " +
+                $"histHit={_predictor.HistoryHits} histMiss={_predictor.HistoryMisses} " +
+                $"staleness={_binder.Staleness.StalenessTicks:F2}t " +
+                $"skew={_binder.Staleness.SkewPpm:F0}ppm " +
+                $"baseline={_binder.Staleness.BaselineSeconds:F0}s " +
+                $"unityWin={window:F3}s swWin={swWindow:F3}s " +
+                // Absolute totals as well as per-window rates. A per-window rate is a
+                // difference of two counters over a measured interval, and every one of
+                // those three can be wrong on its own; a total divided by the time since the
+                // first health line cannot be. When the two disagree the bookkeeping is the
+                // suspect, not the network.
+                $"rxTotal={_client.Session?.FramesReceived ?? 0L} " +
+                $"sinceFirst={_healthStopwatch.Elapsed.TotalSeconds - _firstHealthAt:F1}s " +
+                $"clockRatio={(swWindow > 0 ? window / swWindow : 0):F4} " +
+                $"fits={_binder.Staleness.Fits} " +
+                $"stSamples={_binder.Staleness.Samples} " +
+                // A refused fit is otherwise invisible: SkewPpm reads 0 without one, which is
+                // exactly what two clocks that agree look like. That is how a bound set at
+                // 0.90/1.10 disabled the measurement for a whole session and said nothing.
+                $"refusedFits={_binder.Staleness.FitsRefused} " +
+                $"refusedSkew={_binder.Staleness.RefusedSkewPpm:F0}ppm");
         }
 
         private void OnDestroy()
@@ -765,6 +1051,7 @@ namespace DOTSSample
                     _backend.NakamaServerKey);
                 var jwt = await auth.GetGatewayTokenAsync(device, ct);
                 _userId = auth.UserId;
+                _nakamaAuth = auth;
                 _nakamaSessionToken = auth.SessionToken;
                 _cachedUserText = "User: " + (_userId.Length > 12 ? _userId.Substring(0, 12) : _userId) + "..." +
                                   (string.IsNullOrEmpty(_backend.InstanceLabel)
@@ -777,9 +1064,15 @@ namespace DOTSSample
                 PollEconomyAsync(ct).Forget();
                 PollLeaderboardAsync(ct).Forget();
 
+                // The auth provider is what arms the package's automatic reconnect:
+                // on a server_shutdown close, NetworkClient re-runs the connect flow
+                // through it, and SampleNakamaAuth answers from its cached gateway
+                // JWT while the token is still valid — a reconnect after a server
+                // restart costs zero Nakama traffic in the common case.
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
-                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog(),
+                    new DelegateAuthProvider(token => auth.GetGatewayTokenAsync(device, token)));
 
                 _client.StateChanged += state =>
                 {
@@ -790,6 +1083,7 @@ namespace DOTSSample
                 _client.SnapshotReceived += s =>
                 {
                     _snapshotCount++;
+                    _snapshotsApplied++;
                     _binder.NoteRemovedIds(s.Removed);
                 };
 
@@ -797,6 +1091,38 @@ namespace DOTSSample
                 {
                     _status = $"Disconnected: {info}";
                     Debug.Log($"[DOTSNet] Session closed: {info}");
+                };
+
+                // One line per state change, not per attempt tick — verbose detail
+                // stays behind the toggle like every other diagnostic here.
+                _client.ReconnectAttemptStarted += attempt =>
+                {
+                    _status = $"Reconnecting (attempt {attempt})...";
+                    if (verboseLogging)
+                        Debug.Log($"[DOTSNet] Reconnect attempt {attempt}");
+                };
+                _client.Reconnected += () =>
+                {
+                    _status = "In World (reconnected)";
+                    Debug.Log("[DOTSNet] Reconnected after server shutdown");
+
+                    // The new session's counters restart at zero while these baselines
+                    // keep the old session's totals, so the first health window printed
+                    // negative garbage (observed live: reconciles=-179,
+                    // framesRx=-36.6/s) until they are zeroed with it (#59).
+                    _lastSnaps = 0;
+                    _lastSmoothed = 0;
+                    _lastReconciles = 0;
+                    _snapshotsApplied = 0;
+                    _lastSnapshotsApplied = 0;
+                    _lastFramesRx = 0;
+
+                    StartPrediction();
+                };
+                _client.ReconnectFailed += ex =>
+                {
+                    _status = "Reconnect failed";
+                    Debug.LogWarning($"[DOTSNet] Reconnect gave up: {ex?.Message}");
                 };
 
                 await _client.ConnectAsync(jwt, mapId, ct);
@@ -818,7 +1144,7 @@ namespace DOTSSample
                     var moveY = _moveY;
                     var attackTarget = _pendingAttackTarget;
                     _pendingAttackTarget = "";
-                    if (!string.IsNullOrEmpty(attackTarget))
+                    if (verboseLogging && !string.IsNullOrEmpty(attackTarget))
                         Debug.Log($"[Attack] Sending attack on {attackTarget} (tick {_inputTick})");
 
                     _client.Session?.SendInput(_inputTick, moveX, moveY, attackTarget);
@@ -854,6 +1180,8 @@ namespace DOTSSample
             // Wait for initial connection before polling
             await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
                 PlayerLoopTiming.Update, ct);
+
+            var backoff = new PollBackoff("ServerStatus", statusPollInterval);
 
             while (!ct.IsCancellationRequested)
             {
@@ -901,7 +1229,16 @@ namespace DOTSSample
                     _gameServerOk = false;
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(statusPollInterval),
+                // Both URLs answer from the same local backend stack, so they are one
+                // health signal here: with neither of them up the panel has nothing new
+                // to draw, and asking every statusPollInterval only fills the log of
+                // whichever layer times out first.
+                if (_nakamaOk || _gameServerOk)
+                    backoff.OnSuccess();
+                else
+                    backoff.OnFailure("Nakama and game server both unreachable");
+
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds),
                     DelayType.Realtime, PlayerLoopTiming.Update, ct);
             }
         }
@@ -965,10 +1302,64 @@ namespace DOTSSample
                     : "  (no data)");
         }
 
+        // Cadence and log volume for one background poll loop. Motivated by a backend
+        // whose leaderboard had never been created: every poll answered 404, so the
+        // loop produced one warning every 10s and kept asking at full rate for the
+        // entire session. Failures widen the interval instead, and only the edges
+        // (first failure, recovery) reach the log.
+        private sealed class PollBackoff
+        {
+            private const float MaxIntervalSeconds = 60f;
+
+            private readonly string _tag;
+            private readonly float _baseInterval;
+            private float _interval;
+            private int _consecutiveFailures;
+
+            public PollBackoff(string tag, float baseInterval)
+            {
+                _tag = tag;
+                _baseInterval = baseInterval;
+                _interval = baseInterval;
+            }
+
+            public float IntervalSeconds => _interval;
+
+            public void OnSuccess()
+            {
+                if (_consecutiveFailures > 0)
+                {
+                    Debug.Log($"[{_tag}] Recovered after {_consecutiveFailures} failed poll(s)");
+                    _consecutiveFailures = 0;
+                }
+
+                _interval = _baseInterval;
+            }
+
+            public void OnFailure(string reason)
+            {
+                _consecutiveFailures++;
+                if (_consecutiveFailures == 1)
+                {
+                    Debug.LogWarning(
+                        $"[{_tag}] Poll failing: {reason} — backing off, silent until it recovers");
+                }
+
+                _interval = Mathf.Min(_interval * 2f, MaxIntervalSeconds);
+            }
+        }
+
         private async UniTaskVoid PollEconomyAsync(CancellationToken ct)
         {
+            var backoff = new PollBackoff("Economy", 5f);
+
             while (!ct.IsCancellationRequested)
             {
+                // Renewed before the request rather than after a failure: a refresh on 401
+                // still costs one user-visible request per expiry, and on a default Nakama an
+                // expiry happens every minute.
+                await RenewNakamaSessionAsync(ct);
+
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
                 {
                     await UniTask.Delay(TimeSpan.FromSeconds(2), DelayType.Realtime,
@@ -992,20 +1383,22 @@ namespace DOTSSample
                                 var wallet = JsonUtility.FromJson<WalletData>(account.wallet);
                                 _goldServer = wallet.gold;
                             }
+
+                            backoff.OnSuccess();
                         }
                         else
                         {
-                            Debug.LogWarning($"[Economy] Poll failed: {req.responseCode} {req.error}");
+                            backoff.OnFailure($"{req.responseCode} {req.error}");
                         }
                     }
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[Economy] Poll exception: {ex.Message}");
+                    backoff.OnFailure(ex.Message);
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(5), DelayType.Realtime,
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds), DelayType.Realtime,
                     PlayerLoopTiming.Update, ct);
             }
         }
@@ -1016,11 +1409,19 @@ namespace DOTSSample
             await UniTask.Delay(TimeSpan.FromSeconds(1), DelayType.Realtime,
                 PlayerLoopTiming.Update, ct);
 
+            var backoff = new PollBackoff("Leaderboard", 10f);
+
             while (!ct.IsCancellationRequested)
             {
+                // Renewed before the request rather than after a failure: a refresh on 401
+                // still costs one user-visible request per expiry, and on a default Nakama an
+                // expiry happens every minute.
+                await RenewNakamaSessionAsync(ct);
+
                 if (string.IsNullOrEmpty(_nakamaSessionToken))
                 {
-                    Debug.LogWarning("[Leaderboard] No session token yet, skipping poll");
+                    if (verboseLogging)
+                        Debug.LogWarning("[Leaderboard] No session token yet, skipping poll");
                     await UniTask.Delay(TimeSpan.FromSeconds(3), DelayType.Realtime,
                         PlayerLoopTiming.Update, ct);
                     continue;
@@ -1035,12 +1436,14 @@ namespace DOTSSample
                         req.SetRequestHeader("Authorization", "Bearer " + _nakamaSessionToken);
                         await req.SendWebRequest().ToUniTask(cancellationToken: ct);
 
-                        Debug.Log($"[Leaderboard] Poll response: {req.responseCode} result={req.result}");
+                        if (verboseLogging)
+                            Debug.Log($"[Leaderboard] Poll response: {req.responseCode} result={req.result}");
 
                         if (req.result == UnityWebRequest.Result.Success)
                         {
                             var raw = req.downloadHandler.text;
-                            Debug.Log($"[Leaderboard] Body: {(raw.Length > 200 ? raw.Substring(0, 200) : raw)}");
+                            if (verboseLogging)
+                                Debug.Log($"[Leaderboard] Body: {(raw.Length > 200 ? raw.Substring(0, 200) : raw)}");
                             if (raw != _prevLeaderboardRaw)
                             {
                                 _prevLeaderboardRaw = raw;
@@ -1048,10 +1451,12 @@ namespace DOTSSample
                                 _leaderboardRecords = response.records ?? Array.Empty<LeaderboardRecord>();
                                 RebuildLeaderboardPanel();
                             }
+
+                            backoff.OnSuccess();
                         }
                         else
                         {
-                            Debug.LogWarning($"[Leaderboard] Poll failed: {req.responseCode} {req.error}");
+                            backoff.OnFailure($"{req.responseCode} {req.error}");
                             // Show error state but keep panel visible
                             _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Error " + req.responseCode + "</color>";
                         }
@@ -1060,12 +1465,53 @@ namespace DOTSSample
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[Leaderboard] Poll exception: {ex.Message}");
+                    backoff.OnFailure(ex.Message);
                     _cachedLeaderboardPanel = "<b>Leaderboard</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n<color=#ff6644>Connection error</color>";
                 }
 
-                await UniTask.Delay(TimeSpan.FromSeconds(10), DelayType.Realtime,
+                await UniTask.Delay(TimeSpan.FromSeconds(backoff.IntervalSeconds), DelayType.Realtime,
                     PlayerLoopTiming.Update, ct);
+            }
+        }
+
+        /// <summary>
+        /// Keep the Nakama session usable, and report the two ways it can be kept.
+        /// </summary>
+        /// <remarks>
+        /// Cheap when there is nothing to do -- the auth object compares two timestamps. It is
+        /// called before each authenticated poll rather than in a timer of its own, so a poll
+        /// that is backed off does not keep renewing a session nothing is using.
+        /// </remarks>
+        private async UniTask RenewNakamaSessionAsync(CancellationToken ct)
+        {
+            if (_nakamaAuth == null) return;
+
+            int refreshes = _nakamaAuth.Refreshes;
+            int reauths = _nakamaAuth.Reauthentications;
+
+            try
+            {
+                await _nakamaAuth.EnsureSessionAsync(ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[NakamaAuth] Could not renew the session: " + ex.Message);
+                return;
+            }
+
+            if (_nakamaAuth.Refreshes != refreshes || _nakamaAuth.Reauthentications != reauths)
+            {
+                _nakamaSessionToken = _nakamaAuth.SessionToken;
+
+                // Logged on the change, not on every renewal check: a session being renewed on
+                // schedule is not news, and a client re-authenticating instead of refreshing
+                // is -- it means the refresh token expired too, which is an hour by default.
+                if (_nakamaAuth.Reauthentications != reauths)
+                    Debug.Log("[NakamaAuth] Re-authenticated from the device id " +
+                              $"(refresh unavailable or rejected); total {_nakamaAuth.Reauthentications}");
+                else if (verboseLogging)
+                    Debug.Log($"[NakamaAuth] Session refreshed; total {_nakamaAuth.Refreshes}");
             }
         }
 
@@ -1359,10 +1805,13 @@ namespace DOTSSample
             // --- Floating entity labels ---
             if (_view == null || !_view.IsValid) return;
 
+            // Explicit-Rect GUI calls need no Layout pass, and IMGUI raises OnGUI at
+            // least twice per frame — drawing only on Repaint halves the label cost.
+            // The cache itself is refreshed once per frame in LateUpdate (#60).
+            if (Event.current.type != EventType.Repaint) return;
+
             var cam = GetCamera();
             if (cam == null) return;
-
-            _view.GetEntityLabels(_labelCache);
 
             for (int i = 0; i < _labelCache.Count; i++)
             {
@@ -1376,20 +1825,23 @@ namespace DOTSSample
                 float screenY = Screen.height - screenPos.y;
 
                 // Cache label text per entity — rebuilt on first sight, and again when locality changes
+                var style = label.IsLocal ? _localLabelStyle : _labelStyle;
+
                 if (!_entityLabelTextCache.TryGetValue(label.Id, out var cached)
                     || cached.IsLocal != label.IsLocal)
                 {
                     var shortId = label.Id.Length > 8 ? label.Id.Substring(0, 8) : label.Id;
-                    cached = (label.IsLocal,
-                        label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId);
+                    var text = label.IsLocal ? ("\u2605 YOU (" + shortId + ")") : shortId;
+                    // Measured once with the text: CalcSize is a full glyph measurement
+                    // — one of the costliest IMGUI calls — and the size only changes
+                    // when the text (or the local/remote style) does (#60).
+                    _sharedContent.text = text;
+                    cached = (label.IsLocal, text, style.CalcSize(_sharedContent));
                     _entityLabelTextCache[label.Id] = cached;
                 }
 
                 var displayText = cached.Text;
-
-                var style = label.IsLocal ? _localLabelStyle : _labelStyle;
-                _sharedContent.text = displayText;
-                var textSize = style.CalcSize(_sharedContent);
+                var textSize = cached.Size;
                 float labelW = Mathf.Max(textSize.x + 12f, 80f);
                 float labelH = textSize.y + 4f;
 

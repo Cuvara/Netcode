@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.17.0",
+  "version": "0.28.1",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -26,7 +26,7 @@
     "jp.hadashikick.vcontainer": "1.16.8 — enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
   },
   "x-manualDependencies": {
-    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
+    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0"
   },
   "samples": [
     {
@@ -50,9 +50,19 @@
       "path": "Samples~/DOTSSample"
     },
     {
+      "displayName": "Interpolation Probe",
+      "description": "Drives a synthetic 15 Hz snapshot stream into the remote-interpolation core — no server, no network — and renders it beside the reset-on-arrival algorithm 0.19.0 replaced, so an early arrival, a late arrival and a dropped snapshot can be seen rather than read about. Buttons inject each perturbation, a slider pushes arrival jitter past the 100 ms buffer, and the readout reports frame step, largest step, backward steps and render delay.",
+      "path": "Samples~/InterpolationProbe"
+    },
+    {
       "displayName": "Content Pipeline",
       "description": "Fetches game content from a running game server over /content, caches it by hash, and lists every item with the source it came from. Second run reads CACHE, which is the 304 path working.",
       "path": "Samples~/ContentPipeline"
+    },
+    {
+      "displayName": "Clock Sync Probe",
+      "description": "Two synthetic clocks, no server, no network: a dial sets how fast the client's clock runs against the server's, SnapshotStalenessEstimator fits the ratio from snapshot arrivals alone, and the prediction clock steers on it. The default dial position is the development machine's own measured +110,000 ppm — the value that silently disabled the fit until 0.23.0 — so convergence, refusal past the clamp, a stalled frame and a stepped server clock can each be seen rather than read about.",
+      "path": "Samples~/ClockSyncProbe"
     }
   ],
   "testables": [

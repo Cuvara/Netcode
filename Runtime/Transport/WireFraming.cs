@@ -33,7 +33,18 @@ namespace Cuvara.Netcode.Transport
         /// </summary>
         public static int ReadLength(byte[] source)
         {
-            return (source[0] << 24) | (source[1] << 16) | (source[2] << 8) | source[3];
+            return ReadLength(source, 0);
+        }
+
+        /// <summary>
+        /// As <see cref="ReadLength(byte[])"/>, but reading the prefix at
+        /// <paramref name="offset"/>. A buffering reader parses several frames out of
+        /// one receive buffer and must not copy the header out first just to decode it.
+        /// </summary>
+        public static int ReadLength(byte[] source, int offset)
+        {
+            return (source[offset] << 24) | (source[offset + 1] << 16) |
+                   (source[offset + 2] << 8) | source[offset + 3];
         }
 
         /// <summary>True when a decoded length prefix is usable.</summary>

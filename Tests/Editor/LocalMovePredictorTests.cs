@@ -60,6 +60,7 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             float dt = MovementSystem.DeltaTimeForTickRate(TickRate);
             int cap = GameConstants.MaxBankedMovementTicks(TickRate);
+            _ = cap;   // the hold window; no longer scales a step, see below
             Vec2 pos = from;
 
             // One input per tick, and a step covers the time since this entity last
@@ -95,13 +96,16 @@ namespace Cuvara.Netcode.Tests.Editor
                     lastMove = tick;
                 }
 
+                // ONE TICK, ALWAYS. This block used to read
+                // `stepDt = dt * min(tick - lastMove, cap)` -- rule 3 in its banked form,
+                // transcribed from the server of the time. Both sides dropped banking: a
+                // step that covers more than its own tick restores the right distance and
+                // destroys the agreement, because it only matches when the two ends'
+                // independent measurements of elapsed time do.
+                //
+                // `cap` is still read below to keep this loop honest about the hold window;
+                // it no longer scales any step.
                 float stepDt = dt;
-                if (heldFrom != 0 && lastMove != 0 && tick > lastMove)
-                {
-                    long elapsed = tick - lastMove;
-                    if (elapsed > cap) elapsed = cap;
-                    stepDt = dt * elapsed;
-                }
 
                 var probe = new EntityState { Position = pos, Speed = speed, Dead = false };
                 var result = MovementSystem.TryMove(in probe, x, y, stepDt, Bounds, out var moved);
@@ -155,6 +159,7 @@ namespace Cuvara.Netcode.Tests.Editor
             // An explicit stop, then an idle far longer than the banking cap.
             predictor.RecordInput(2, 0f, 0f);
             int cap = GameConstants.MaxBankedMovementTicks(TickRate);
+            _ = cap;   // the hold window; no longer scales a step, see below
             for (var i = 0; i < cap * 2; i++)
             {
                 predictor.Advance(Dt);
@@ -211,11 +216,12 @@ namespace Cuvara.Netcode.Tests.Editor
 
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) predictor.Advance(Dt);
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                predictor.Advance(Dt);
             }
 
             Vec2 expected = ServerWalk(Vec2.Zero, Walk);
@@ -233,11 +239,12 @@ namespace Cuvara.Netcode.Tests.Editor
             var forward = Seeded(Vec2.Zero);
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) forward.Advance(Dt);
                 forward.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                forward.Advance(Dt);
             }
 
             // Path B: same inputs, but the server acknowledges the first four midway, so
@@ -245,11 +252,12 @@ namespace Cuvara.Netcode.Tests.Editor
             var replayed = Seeded(Vec2.Zero);
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) replayed.Advance(Dt);
                 replayed.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                replayed.Advance(Dt);
             }
 
             var ackedThrough4 = ServerWalk(Vec2.Zero, new[] { Walk[0], Walk[1], Walk[2], Walk[3] });
@@ -271,16 +279,18 @@ namespace Cuvara.Netcode.Tests.Editor
 
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) a.Advance(Dt);
                 a.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                a.Advance(Dt);
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) b.Advance(Dt);
                 b.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                b.Advance(Dt);
             }
 
             var anchor = ServerWalk(new Vec2(3f, -2f), new[] { Walk[0], Walk[1] });
@@ -592,11 +602,12 @@ namespace Cuvara.Netcode.Tests.Editor
 
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one: a trailing tick
+                // gets a held step the server model has no input for, and the walk then
+                // reads one step long. It cost nothing while the hold expired on exactly
+                // the tick the next input arrived on.
+                if (i > 0) predictor.Advance(Dt);
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                // One tick between inputs. Without it every input lands on the same base
-                // tick and rule 1 coalesces them to a single step -- which is correct, and
-                // not what a walk of four separate inputs is meant to model.
-                predictor.Advance(Dt);
             }
 
             // Same reference walk, through the one server model, at the server's speed.
@@ -703,8 +714,10 @@ namespace Cuvara.Netcode.Tests.Editor
 
             for (var i = 0; i < Walk.Length; i++)
             {
+                // Advanced BETWEEN inputs and not after the last one, as in the walks
+                // above: a trailing tick gets a held step the server model has no input for.
+                if (i > 0) predictor.Advance(Dt);
                 predictor.RecordInput(i + 1, Walk[i].x, Walk[i].y);
-                predictor.Advance(Dt);
             }
 
             Vec2 pos = ServerWalk(Vec2.Zero, Walk);

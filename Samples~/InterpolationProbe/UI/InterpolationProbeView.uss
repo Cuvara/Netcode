@@ -1,0 +1,226 @@
+/* Remote interpolation probe.
+ *
+ * Class names carry the cuvara- prefix, matching the convention com.cuvara.uitoolkit
+ * enforces on its own exported classes: USS class names are public API, and a scene that
+ * invents an unprefixed name collides with whatever a host project already calls that.
+ *
+ * The panel is anchored to one corner rather than filling the screen: the point of this
+ * scene is the two moving dots behind it, so the readout must not cover them.
+ */
+
+.cuvara-probe {
+    flex-grow: 1;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+.cuvara-probe__panel {
+    width: 440px;
+    margin: 14px;
+    padding: 14px 16px;
+    background-color: rgba(20, 22, 27, 0.92);
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: rgb(46, 50, 58);
+}
+
+.cuvara-probe__title {
+    font-size: 18px;
+    -unity-font-style: bold;
+    color: rgb(233, 237, 243);
+    margin-bottom: 2px;
+}
+
+.cuvara-probe__subtitle {
+    font-size: 11px;
+    color: rgb(140, 152, 166);
+    margin-bottom: 10px;
+    white-space: normal;
+}
+
+.cuvara-probe__section {
+    font-size: 10px;
+    -unity-font-style: bold;
+    letter-spacing: 1px;
+    color: rgb(118, 130, 145);
+    margin-top: 10px;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__legend {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 5px;
+    margin-right: 5px;
+    margin-left: 2px;
+}
+
+/* The swatch colours mirror the marker colours set on InterpolationProbe. Two places, and
+ * they have to be changed together — the alternative is generating the legend from the
+ * component, which is more machinery than three dots are worth. */
+.cuvara-probe__swatch--current {
+    background-color: rgb(92, 217, 140);
+}
+
+.cuvara-probe__swatch--obsolete {
+    background-color: rgb(242, 153, 64);
+}
+
+.cuvara-probe__swatch--truth {
+    background-color: rgb(115, 128, 148);
+}
+
+.cuvara-probe__legend-text {
+    font-size: 10px;
+    color: rgb(140, 152, 166);
+    margin-right: 10px;
+}
+
+.cuvara-probe__row {
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 5px;
+}
+
+.cuvara-probe__button {
+    min-width: 92px;
+    height: 24px;
+    margin-right: 5px;
+}
+
+.cuvara-probe__button--secondary {
+    min-width: 60px;
+    opacity: 0.75;
+}
+
+.cuvara-probe__dropdown {
+    flex-grow: 1;
+}
+
+.cuvara-probe__slider {
+    flex-grow: 1;
+}
+
+.cuvara-probe__slider-value {
+    width: 62px;
+    font-size: 11px;
+    color: rgb(176, 187, 199);
+    -unity-text-align: middle-right;
+}
+
+.cuvara-probe__toggle {
+    margin-right: 16px;
+}
+
+.cuvara-probe__tracks {
+    flex-direction: row;
+}
+
+/* Two equal columns, side by side, so the same statistic on the two algorithms sits on the
+ * same line. Reading the pop as a difference between two numbers on one row is the whole
+ * reason the obsolete track is rendered at all. */
+.cuvara-probe__track {
+    flex-grow: 1;
+    flex-basis: 0;
+    padding: 8px 9px;
+    border-radius: 3px;
+    border-width: 1px;
+    margin-right: 6px;
+}
+
+.cuvara-probe__track--current {
+    border-color: rgb(38, 92, 62);
+    background-color: rgb(21, 32, 26);
+}
+
+.cuvara-probe__track--obsolete {
+    border-color: rgb(104, 68, 26);
+    background-color: rgb(33, 27, 18);
+    margin-right: 0;
+}
+
+.cuvara-probe__track-title {
+    font-size: 10px;
+    -unity-font-style: bold;
+    color: rgb(200, 209, 219);
+    white-space: normal;
+    margin-bottom: 6px;
+}
+
+.cuvara-probe__stat {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2px;
+}
+
+.cuvara-probe__key {
+    font-size: 10px;
+    color: rgb(130, 142, 156);
+}
+
+.cuvara-probe__value {
+    font-size: 11px;
+    color: rgb(226, 232, 240);
+    -unity-text-align: middle-right;
+    flex-shrink: 1;
+}
+
+.cuvara-probe__value--bad {
+    color: rgb(240, 126, 116);
+    -unity-font-style: bold;
+}
+
+/* The step meter. Full width is four times the median frame step, so an ordinary frame
+ * sits at a quarter and the 4.3x lurch the old algorithm produces pins it. A number
+ * updated ten times a second is readable; a bar is glanceable, and the difference between
+ * the two columns is meant to be caught out of the corner of the eye while watching the
+ * dots. */
+.cuvara-probe__bar {
+    height: 5px;
+    background-color: rgb(38, 42, 50);
+    border-radius: 3px;
+    margin-top: 2px;
+    margin-bottom: 6px;
+    overflow: hidden;
+}
+
+.cuvara-probe__bar-fill {
+    height: 5px;
+    width: 0;
+    background-color: rgb(92, 217, 140);
+}
+
+.cuvara-probe__bar-fill--hot {
+    background-color: rgb(240, 126, 116);
+}
+
+.cuvara-probe__verdict {
+    font-size: 11px;
+    -unity-font-style: bold;
+    white-space: normal;
+    margin-top: 8px;
+    margin-bottom: 4px;
+    color: rgb(176, 187, 199);
+}
+
+.cuvara-probe__verdict--ok {
+    color: rgb(92, 217, 140);
+}
+
+.cuvara-probe__verdict--bad {
+    color: rgb(240, 126, 116);
+}
+
+.cuvara-probe__mono {
+    font-size: 10px;
+    color: rgb(140, 152, 166);
+    white-space: normal;
+}

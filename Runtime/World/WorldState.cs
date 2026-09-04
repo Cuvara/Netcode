@@ -55,6 +55,15 @@ namespace Cuvara.Netcode.World
         /// <summary>Entities currently visible, keyed by entity id.</summary>
         public IReadOnlyDictionary<string, EntitySnapshotData> Entities => _merger.Entities;
 
+        /// <summary>
+        /// <see cref="Entities"/> as its concrete type. Enumerating the interface boxes the
+        /// dictionary's struct enumerator — one 88-byte allocation per foreach, measured —
+        /// and <c>WorldViewBinder.Tick</c> paid it once per rendered frame, which at
+        /// 300–1000 fps was the only per-frame allocation left in that path. Read-only by
+        /// contract: only the merger writes it.
+        /// </summary>
+        public Dictionary<string, EntitySnapshotData> EntityMap => _merger.EntityMap;
+
         /// <summary>Number of entities currently visible.</summary>
         public int Count => _merger.Count;
 

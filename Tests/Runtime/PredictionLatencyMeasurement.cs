@@ -161,7 +161,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <b>The window is not a constant and it is not the hold window.</b> A sample
             /// runs until the predicted move is visible AND the server has acknowledged the
             /// tick, so its length is set by the acknowledgement. The motion it contains is
-            /// set by the hold window — <c>HoldTicks</c> base ticks, ~67 ms at 60/15 — and
+            /// set by the hold window — <c>MaxBankedTicks</c> base ticks, 250 ms at any rate — and
             /// nothing refreshes the hold afterwards, because a sample sends exactly one
             /// input. Every base tick past the fourth therefore hits <c>ApplyHeld</c>'s
             /// expiry guard, which is a still run a base tick long.
@@ -547,7 +547,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// do with each other in duration. The motion lasts exactly one hold window —
             /// the server integrates a held direction for <c>WorldEvery</c> base ticks and
             /// then stops (<c>LocalMovePredictor.ApplyHeld</c>, the
-            /// <c>baseTick - heldFrom &gt;= HoldTicks</c> guard), which is one snapshot
+            /// <c>baseTick - heldFrom &gt; MaxBankedTicks</c> guard), which is the silence timeout
             /// interval, ~67 ms at 60 Hz base / 15 Hz world. The <i>watch</i> lasts until
             /// the acknowledgement comes back, which is round-trip time plus up to a
             /// snapshot interval, and against a remote game server that is comfortably
@@ -827,7 +827,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             //
             // A sample sends one input and then watches until the server acknowledges it.
             // The motion that input produces lasts exactly one hold window — ApplyHeld
-            // stops at `baseTick - heldFrom >= HoldTicks` — and the watch outlasts it.
+            // stops at `baseTick - heldFrom > MaxBankedTicks` — and the watch outlasts it.
             // Every frame after that is the avatar correctly at rest: the predictor has
             // stopped because the server has, which is why corrections stay at zero
             // straight through them. Counting them made the figure a ratio of two
@@ -1429,7 +1429,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
             }
 
             run.DistinctPositions = view.DistinctTrackedPositions;
-            run.HoldTicksInUse = predictor?.HoldTicks ?? 0;
+            // The window in force, not the snapshot gap. The two used to be the same
+            // number because the gap WAS the window; the window is now the shared silence
+            // timeout, and printing the gap under a "HOLD WINDOW" label would report 4 where
+            // the client is holding for 15.
+            run.HoldTicksInUse = predictor?.MaxBankedTicks ?? 0;
             run.SetStateCalls = view.SetStateCalls;
 
             if (run.FrameSeconds.Count > 0)
@@ -1569,10 +1573,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                           "Each one is a still run a whole base tick long."
                         : string.Empty) + "\n" +
                 $"    ... expired            {run.SkipExpired}   " +
-                    "(baseTick - heldFrom >= HoldTicks)\n" +
+                    "(baseTick - heldFrom > MaxBankedTicks)\n" +
                 $"    ... nothing held       {run.SkipNothingHeld}   (an explicit stop, or no input yet)\n" +
                 $"    ... input already      {run.SkipInputAlreadyStepped}   (rule 1 — not a fault)\n" +
-                $"    ... no hold window     {run.SkipNoHoldWindow}   (HoldTicks <= 1)\n" +
+                $"    ... no hold window     {run.SkipNoHoldWindow}   (retired; always 0)\n" +
                 $"    ... model refused      {run.SkipRefusedByMovementModel}\n" +
                 $"    ... no displacement    {run.SkipNoDisplacement}\n" +
                 $"  held steps applied       {run.HeldStepsApplied}   " +
@@ -1756,14 +1760,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
             string clock;
             if (bankedCap > 0 && nearest >= bankedCap)
             {
-                clock = $" — at or above the {bankedCap}-step banked-movement cap " +
-                        "(rule 3, MaxBankedMovementMs), so read this as a disagreement " +
-                        "about time banked while stationary, NOT as a clock error";
+                clock = $" — at or above the {bankedCap}-step hold window " +
+                        "(MaxBankedMovementMs), so read this as a disagreement about how " +
+                        "long each side coasted a held direction, NOT as a clock error";
             }
             else if (hold > 0)
             {
                 clock = $" — if this is clock error it implies {1f + steps / hold:F2}x " +
-                        $"real time; if it is banked movement the cap is {bankedCap} steps";
+                        $"real time; if it is a coast disagreement the window is {bankedCap} steps";
             }
             else
             {
@@ -1781,11 +1785,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// </summary>
         /// <remarks>
         /// <para>
-        /// The window is derived, not advertised: <c>TickRateEstimator.SnapshotTickGap</c>
-        /// reports the base ticks between consecutive snapshots and
-        /// <c>WorldViewBinder</c> feeds it to <c>LocalMovePredictor.SetHoldTicks</c>. It
-        /// should equal the server's <c>WorldEvery</c> — base rate over world rate, 4 at
-        /// 60/15.
+        /// The window is now a shared constant — <c>GameConstants.MaxBankedMovementMs</c>,
+        /// 250ms, 15 base ticks at 60Hz — read by <c>LocalMovePredictor.MaxBankedTicks</c>
+        /// and by the server's <c>InputHandler</c>. It used to be derived from
+        /// <c>TickRateEstimator.SnapshotTickGap</c> and fed in through <c>SetHoldTicks</c>,
+        /// which is why this check compared it against the server's <c>WorldEvery</c>. A
+        /// derived window is what this line was written to catch; it is checked against the
+        /// constant now, and a mismatch means the two sides are compiled against different
+        /// versions of <c>Shared.GameLogic</c>.
         /// </para>
         /// <para>
         /// <b>It has to be printed on its own line even when nothing looks wrong.</b> It
@@ -1805,28 +1812,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 return "   (no predictor in this configuration)";
             }
 
-            if (run.HoldTicksInUse == 1)
+            if (run.TickRateInUse <= 0)
             {
-                return "   <<< 1 means NO HOLD AT ALL — ApplyHeld returns false on every " +
-                       "base tick, so the predicted position advances only when an input " +
-                       "is sent and holds still in between";
+                return "   (cannot be checked: no rate in use yet)";
             }
 
-            if (run.MeasuredTickRate <= 0f || run.TickRateInUse <= 0)
-            {
-                return "   (cannot be checked: no measured rate yet)";
-            }
-
-            // Snapshots are emitted one world tick apart, so the cadence the estimator saw
-            // IS the expected window. Recomputing it from the rates here would just be the
-            // same assumption twice; what this compares is the window in use against the
-            // 60/15 the server is configured for.
-            const int expected = 4;
+            int expected = GameConstants.MaxBankedMovementTicks(run.TickRateInUse);
             return run.HoldTicksInUse == expected
-                ? $"   (matches the {expected} expected at 60/15)"
-                : $"   <<< expected {expected} at 60/15. The client stops integrating the " +
-                  $"held direction {expected - run.HoldTicksInUse} base ticks before the " +
-                  "server does, then renders nothing until the next input or snapshot";
+                ? $"   (matches the {expected} the shared constant gives at " +
+                  $"{run.TickRateInUse} Hz)"
+                : $"   <<< expected {expected} at {run.TickRateInUse} Hz. Client and server " +
+                  "are not reading the same MaxBankedMovementMs, so one stops integrating " +
+                  "the held direction before the other and the difference arrives as a " +
+                  "correction on every snapshot";
         }
 
         /// <summary>
@@ -1842,7 +1840,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// Compares the observation window against the motion the hold window can produce.
         /// </summary>
         /// <remarks>
-        /// One input's motion lasts <c>HoldTicks</c> base ticks and no longer: nothing
+        /// One input's motion lasts <c>MaxBankedTicks</c> base ticks and no longer: nothing
         /// re-arms the hold, so every tick after it hits <c>ApplyHeld</c>'s expiry guard
         /// and the rendered position is constant for that tick's whole duration. If the
         /// window is much longer than that, a large still-frame percentage follows from

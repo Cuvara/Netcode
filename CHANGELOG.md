@@ -7,6 +7,879 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Snapshot gap tracking no longer blocked by alternating gaps.** The single-candidate
+  design tracked one gap value at a time; alternating gaps (e.g. 3, 4, 3, 4 ticks) reset
+  the counter on every switch, preventing either from reaching the 2-confirmation
+  threshold. `SnapshotTickGap` stayed at 0, disabling the hold window. Replaced with
+  per-gap-value counting (fixed 16-slot array, zero allocation): each gap value
+  accumulates its own confirmation count independently. Test added:
+  `AlternatingGapsAreEachConfirmedIndependently`.
+
+## [0.28.1] - 2026-08-28
+
+### Fixed
+
+- **No health line while the session is down** (#59, follow-up). A health window
+  landing mid-outage printed negative garbage: the predictor is reset during the
+  outage (counters and base tick back to zero) while the baselines still held the
+  old session's totals. The sample now re-baselines and stays silent unless the
+  client is in world, so the first line after a reconnect measures from the
+  reconnect.
+
+## [0.28.0] - 2026-08-28
+
+### Fixed
+
+- **Ghost entities after an automatic reconnect** (#59). `StartPrediction`
+  replaced the `WorldViewBinder` without despawning what the old binder held, so
+  the new binder's despawn pass could never consider those entities and anything
+  that left AOI or died during the outage stayed rendered forever, frozen.
+  `StartPrediction` now calls `Reset()` on the outgoing binder first.
+- **Negative health-line figures after a reconnect** (#59). The sample bridge's
+  health baselines (`_lastFramesRx`, predictor counter marks) survived the
+  session swap while the new session's counters restarted at zero — observed live
+  as `reconciles=-179 framesRx=-36.6/s`. The `Reconnected` handler zeroes them.
+- **`DOTSEntityView.SetState` erased entity rotation every frame** (#60). The
+  unconditional `LocalTransform` write reset `Rotation` to identity; position
+  writes now preserve the rest of the transform.
+
+### Changed
+
+- **The DOTS sample's per-frame view cost collapsed** (#60):
+  - One shared `RenderMeshArray` (palette + enemy materials, both meshes) built at
+    construction, indexed per entity via `MaterialMeshInfo` — materials were
+    previously created per spawn, never destroyed (a steady leak under AOI churn),
+    and put every entity in its own render batch.
+  - `SetState` is change-gated on cached position/HP: static entities cost a
+    dictionary lookup instead of 3–5 EntityManager accesses per entity per frame.
+  - The entity-label sweep runs once per frame in `LateUpdate`; `OnGUI` reads the
+    cache, draws only on `Repaint`, and reuses a cached `CalcSize` measurement.
+  - Combat/attack polls guard with `IsEmptyIgnoreFilter` instead of
+    `CalculateEntityCount()`, which completed the query's dependency chain — a
+    per-frame sync against the simulation group to learn a number the guard never
+    used.
+  - `AutoAttackSystem` — the one O(players × enemies) system — is Burst-compiled
+    like its siblings; nothing blocked the attribute.
+  - `WorldViewBinder.Tick` skips its local-entity view write once `AdvanceFrame`
+    owns the rendering (same condition under which it owns the clock); the write
+    was superseded within the same frame, costing a wasted round trip.
+  - `_binder.AdvanceFrame` runs on `Time.unscaledDeltaTime` — `deltaTime` is
+    scaled by `timeScale` and clamped by `maximumDeltaTime`, while the binder's
+    own clock and the camera follow are wall-time; the disagreement surfaced as a
+    reconciliation snap after pauses and hitches.
+  - `GameObjectEntityView` writes the health-squash `localScale` only when HP
+    changed, instead of dirtying the transform hierarchy every frame.
+
+## [0.27.0] - 2026-08-27
+
+### Added
+
+- **Automatic reconnect on `server_shutdown`** (#54). The server holds a
+  disconnected player's entity for 30 s precisely so the client can come back
+  into its own body, and nothing in the package consumed that window — a
+  shutdown notice just ended the session. When the session closes with the
+  server's `server_shutdown` reason, an `IAuthProvider` is registered, and
+  `NetworkSettings.ReconnectOnServerShutdown` is on (the default),
+  `NetworkClient` now re-runs the whole connect flow by itself: up to
+  `ReconnectAttempts` (5) rounds, pausing `ReconnectDelay × round` plus jitter
+  so the default schedule spans the hold window and a restart's reconnect wave
+  arrives spread out instead of as one synchronized storm. New events —
+  `ReconnectAttemptStarted`, `Reconnected`, `ReconnectFailed` — let a caller
+  narrate it; a user-initiated `Disconnect()`/`Dispose()` never triggers it.
+- **`DelegateAuthProvider`** — adapts a delegate to `IAuthProvider`, for token
+  sources that are a method on an existing object (the DOTS sample's Nakama
+  helper, a test fixture).
+- **`NetworkSettings.EnterWorldTimeout`** (20 s) and **`RetryJitter`** (500 ms).
+
+### Fixed
+
+- The retry/reconnect EditMode tests wait on wall-clock deadlines instead of
+  frame counts, and the pauses themselves go through a new
+  `NetworkSettings.DelayScheduler` seam (default: the realtime player-loop
+  delay used until now). The headless EditMode runner can spin a
+  [UnityTest]'s `yield return null` steps without ever pumping the editor
+  tick that completes a real `UniTask.Delay`, so a policy test crossing one
+  stalled forever in CI while passing in an interactive Editor; the tests
+  now schedule those pauses synchronously.
+- **A retryable `enter_world` refusal now consumes a join attempt instead of
+  aborting the connect** (#54). `EnterWorldAsync` sat inside the retry loop but
+  outside its `try`: the gateway deliberately types "server is starting, retry
+  shortly" as retryable and its single-flight allocation assumes the client
+  retries — yet any assignment failure escaped with zero of the
+  `JoinAttempts` burned. Refusals are now classified: the gateway's terminal
+  precondition answers (`session expired`, `rate limited`) abort immediately
+  with the real error instead of drowning it under "could not join"; everything
+  else retries with a jittered pause.
+- **`enter_world` runs under its own 20 s budget instead of `ConnectTimeout`'s
+  10 s** (#54, server side rpg-mmo-server#235). Against a cold map the gateway
+  may allocate a server and wait for it to register (its own handler budget is
+  18 s); the old 10 s cancelled client-side a join the gateway was about to
+  complete, and the cancellation aborted the whole connect.
+
+### Changed (sample)
+
+- **A reconnect is no longer a cold login.** `SampleNakamaAuth` caches the
+  gateway JWT with its `exp` and answers from it while >30 s of validity
+  remain, falling back to Nakama session refresh before device re-auth. Before
+  this, every reconnect re-ran device auth (a Postgres round trip and the
+  rate-limited `gateway_token` RPC, burst 5) for a credential the client
+  already held — a 200-client server restart was ~400 avoidable Nakama calls,
+  and more than five network flaps in an hour became a login failure. The
+  bridge registers a `DelegateAuthProvider` over the cached path, which is
+  what arms the package's automatic reconnect, and surfaces the new reconnect
+  events in its status line.
+
+## [0.26.0] - 2026-08-26
+
+### Fixed (sample)
+
+- **Only the local player auto-attacks, and only inside the server's range.** Two defects
+  in `DOTSEntityView`, exposed together by the server's new `/status` attack counters
+  during a zero-leaderboard-kills investigation (345 of 364 attacks rejected in 90 s,
+  breadcrumb `target out of range: distance 18.42 exceeds 3.00`):
+  - every player entity — remote ghosts included — received `AutoAttack`, so the bridge
+    forwarded attacks that remote players' ghosts fired to the server **as the local
+    player's input**, aimed from positions up to a map away (18.42 on a client whose own
+    range check was 10 is only possible from another player's position);
+  - the firing range was a hardcoded `10f` while the server's validator accepts 3.0
+    (`GameConstants.AttackRange`), so the client rendered bullets and "attacked" targets
+    the server silently refused — visually working, doing nothing.
+  `AutoAttack` is now added only when `isLocal`, and its range is
+  `Shared.GameLogic.Components.GameConstants.AttackRange` — the shared library exists
+  exactly so client and server cannot disagree on a rule; the sample now uses it for
+  this one too.
+
+## [0.25.0] - 2026-08-26
+
+### Changed (sample)
+
+- **The combat path stops logging every shot.** `AutoAttackSystem` logged each fire and the
+  bridge logged each attack send — together ~**1,200 log lines per minute** on a running
+  client, the largest remaining source after the poll and counter spam was gated in 0.21.0.
+  The bridge's send log moves behind `verboseLogging`; the per-fire log in the DOTS system is
+  removed outright, because a `SystemBase` has no clean reach into that MonoBehaviour toggle
+  and a log that cannot be turned off does not belong at several lines per second. The
+  `verboseLogging` attack-counter diagnostics still cover the path when it is under
+  investigation. Measured after: **~30 lines per minute**, all of them health lines.
+
+
+## [0.24.0] - 2026-08-26
+
+### Fixed
+
+- **The render path allocates zero bytes per frame.** `WorldViewBinder.Tick` enumerated
+  `WorldState.Entities` through its `IReadOnlyDictionary` interface, which boxes the
+  dictionary's struct enumerator — **88 bytes per foreach, measured**, once per rendered
+  frame, ~44 KB/s at 500 fps into Unity's stop-the-world GC. It was the only per-frame
+  allocation left in the audited surface (`LocalMovePredictor`, the estimators and the
+  interpolation path all measure 0 B on their per-frame paths). The binder now enumerates
+  `WorldState.EntityMap` — the same map as its concrete type, added in `Shared.GameLogic`
+  `sgl-v0.3.0` — which measures 0 B and is ~20 % faster at 100 entities (4,865 → 3,864 ns),
+  the interface dispatch going with the box. `EntityMapIsTheSameMapAsEntities_NotACopy`
+  pins the identity contract. Requires `com.rpgmmo.shared-gamelogic` at `sgl-v0.3.0`
+  (manifest **and** lock).
+
+### Added
+
+- **`Clock Sync Probe` sample scene.** Two synthetic clocks, no server, no network: a dial
+  sets how fast the client's clock runs against the server's, `SnapshotStalenessEstimator`
+  fits the ratio from snapshot arrivals alone, and the prediction clock steers on it. The
+  default dial position is **+110 ×10³ ppm — this package's own development machine**, the
+  measured value that sat just past the original clamp and silently disabled the fit until
+  0.23.0. Convergence, refusal past the clamp (now a colour, once a silence), a stalled
+  frame eating into `ClampedFrames` instead of burst-advancing, and a stepped server clock
+  moving `HardResyncs` instead of `Snaps` — each visible rather than read about. UI Toolkit
+  (UXML/USS), per the sample-scene contract; readouts are the same counters
+  `[DOTSNet/health]` prints, so numbers here compare directly with a live client.
+
+
+### Added
+
+- **`WireConnectionDispatchTests` — the transport layer's first tests (#50).** Five cases
+  drive `WireConnection` through a scripted `ITransport`: every decoded frame is counted
+  before dispatch decides its fate, a 1000-frame burst drains inside one `Start()` with
+  exactly one read per frame, a ping is answered with a pong echoing its timestamp, the
+  kick/disconnect pair closes once with the kick's cause, and a frame decoded after the
+  eviction never reaches the consumer.
+
+  What makes them runnable without pumping a player loop: a completed UniTask continues
+  synchronously, so a transport serving pre-canned frames is drained entirely inside
+  `Start()`, and when the script is exhausted the read loop parks on a task that never
+  completes — exactly as it parks on a quiet socket. The one asynchronous case (the pong,
+  whose write crosses a `Task.AsUniTask()` continuation posted to Unity's synchronization
+  context even when the task completed synchronously) is a `[UnityTest]` coroutine for that
+  reason, and the reason is written on it.
+
+  The burst case is the regression fence for the half-the-player-loop-rate ceiling fixed in
+  0.22.0: a read path that costs a scheduler hop per frame cannot drain a burst inside one
+  call, and this asserts it in fifty lines instead of the investigation it actually took.
+  `TcpTransport` itself — real-socket framing and scheduling cost — remains uncovered and
+  #50 stays open for that half.
+
+- The test assembly now references `UniTask`, which the fake transport needs.
+
+
+## [0.23.0] - 2026-08-26
+
+### Fixed
+
+- **The skew clamp was set at the edge of reality, so the staleness fit was refused on every
+  snapshot and nothing said so.** `MinimumSkew`/`MaximumSkew` were 0.90/1.10. The development
+  machine's true ratio is about **1.1107** — the Windows performance counter runs fast against
+  the Linux clock the server ticks on — so every pair was rejected, `IsUsable` stayed false for
+  a whole session, and the steering silently fell back to the derived figure.
+
+  It was invisible by construction: `SkewPpm` reads 0 without a fit, which is exactly what two
+  clocks that agree look like. It surfaced only because a live client reported `fits=0` after
+  215 s while `stSamples=540` proved the estimator was being fed.
+
+  Bounds are now **0.75/1.33**. Between "two ordinary machines" and "a tick rate that is simply
+  wrong" there is an order of magnitude — a client predicting at 60 against a 15 Hz server is
+  off by 300 %, not by 10 — and the bound belongs in the middle of that gap rather than at the
+  edge of the first. `FitsRefused` and `RefusedSkewPpm` now report a refusal and the value that
+  was refused, so a bound that is wrong can be seen to be wrong instead of inferred from an
+  absence.
+
+  Measured after: `fits=16 refusedFits=0 skew=110,703 ppm staleness=0.21–0.28 ticks`, and the
+  reconcile correction improved from 0.027 to **0.0134–0.0154 units** because the steering is
+  using the measured staleness again rather than the derived one.
+
+- **The DOTS sample renews its Nakama session instead of using one token until it stops
+  working.** `SampleNakamaAuth` kept the session token and discarded everything else; on a
+  default Nakama (`session.token_expiry_sec = 60`) every backend call was dead a minute into
+  every session, silently, because the game connection uses a separate gateway token and keeps
+  running (#48).
+
+  It now keeps the `refresh_token` and the device id, reads the expiry from the token's own
+  `exp` claim rather than assuming a server setting, and renews ten seconds early via
+  `/v2/account/session/refresh` — falling back to a full device authentication when the refresh
+  token has expired too (an hour by default). `Refreshes` and `Reauthentications` are counted
+  separately, because "refreshing every minute" and "re-authenticating every minute" look the
+  same from outside and mean different things.
+
+  Renewal happens before each authenticated poll rather than on a 401, because a refresh on 401
+  still costs one user-visible failure per expiry. Verified live: **185 s of running — three
+  times the expiry — with zero `Auth token invalid`**, where the same setup previously failed
+  and never recovered.
+
+### Changed (diagnostics)
+
+- The health line reports `stSamples`, `fits`, `refusedFits` and `refusedSkew`. The first two
+  are what distinguished "the estimator is not being fed" from "the estimator is refusing what
+  it is fed", which was the whole of the investigation above.
+
+
+## [0.22.0] - 2026-08-26
+
+### Fixed
+
+- **The read path could not keep up with the snapshot stream below ~34 fps.** Every await in
+  `TcpTransport` goes through `UniTask`, whose continuation is scheduled on Unity's
+  `SynchronizationContext` and therefore costs a whole player-loop frame.
+  `ReadFrameAsync` performed **two** awaits per frame — one for the 4-byte length header, one
+  for the body — which caps the read loop at **half the player-loop rate**. Measured against a
+  15/s server: 15.0/s at 60 fps, 10.00/s at 20 fps, **5.00/s at 10 fps**, with the socket
+  backlog growing without bound below the knee.
+
+  `ReadFrameAsync` now parses frames out of a 16 KiB receive buffer and touches the socket
+  only when the buffer cannot satisfy the next frame; a `UniTask` that completes synchronously
+  never hops the player loop, so a backlog drains within one frame instead of one frame per
+  frame. The same sweep afterwards: **15.0/s held all the way down to 5 fps**.
+  `ReadExactAsync` becomes `ReadSomeAsync` — one read, no read-exactly loop, because on a real
+  network a split body made it three awaits per frame and dropped the ceiling to a third.
+
+  Also removes `FlushAsync` from `WriteFrameAsync`: `NetworkStream.Flush` is a documented
+  no-op, and on the player loop that await was not free. At 60 Hz input the write path had the
+  same ceiling, so below ~120 fps a client could not send the input it was producing.
+
+  **Irrelevant on a desktop at 480 fps, which is where this was investigated. Not irrelevant
+  on Android**, where 30 fps is a normal target and 30 fps is exactly the knee.
+
+### Not a defect, recorded because it cost an investigation
+
+- **A client whose clock runs fast reports a low snapshot rate, and nothing is wrong.** On the
+  development machine the Windows performance counter — which `Stopwatch` and
+  `Time.realtimeSinceStartup` both read — runs measurably fast against the Linux clock the
+  server ticks on (60.502 s against 58.290 s over one interval). A client counting frames in
+  its own seconds therefore reads **13.7/s from a server sending 15.0/s**, its observed tick
+  stream reads 54/s against 60, and `SkewPpm` reports ~81,400.
+
+  All of that is the estimator working: it fits offset **and** rate, measured the real 8 %
+  difference, and the steering absorbed it — which is why `Snaps` stays 0 and the reconcile
+  correction stays near 0.02 units on a client whose clock disagrees with the server's by 8 %.
+  The pre-0.20.0 design, a minimum-filtered offset with no rate term, would have read this as
+  an offset growing forever.
+
+  Two lessons worth keeping. **Agreement between a client's own clocks proves nothing** —
+  `clockRatio = 1.0000` between `Time.realtimeSinceStartup` and `Stopwatch` was taken as
+  evidence the seconds were real, and both read the same wrong counter. And **the 10 % clamp
+  on the fit is closer to load-bearing than it looks**: one ordinary development machine eats
+  8 % of it.
+
+
+## [0.21.0] - 2026-08-25
+
+### Changed (diagnostics)
+
+- **The health line measures both clocks over the same window.** A snapshot rate that reads
+  low is either frames that did not arrive or a second that is not a second, and only
+  measuring both separates them. `unityWin` (`Time.realtimeSinceStartup`) against `swWin`
+  (`System.Diagnostics.Stopwatch`, which is what the netcode itself reads) settled it in one
+  run: `clockRatio=1.0000` over five seconds against `framesRx=13.8/s` from a server proven to
+  send 15.000/s. The seconds are real and the frames are genuinely missing — see #49.
+
+
+### Changed (sample)
+
+- **The DOTS sample stops logging once a second for the lifetime of the client.** An
+  `[Debug] AttackRequest count:` line fired every second unconditionally, and every consumed
+  attack request logged as well. Both are kept — they were clearly useful once — behind a new
+  `verboseLogging` inspector flag, off by default. The timer itself now ticks only when the
+  flag is on.
+
+- **The three Nakama pollers back off and stop repeating themselves.** `PollLeaderboardAsync`,
+  `PollEconomyAsync` and `PollServerStatusAsync` each looped at a fixed cadence forever. Against
+  a backend where the leaderboard has not been created that is a 404 and a warning every ten
+  seconds for the whole session; against a backend that is simply down it is two HTTP requests
+  every `statusPollInterval` with nothing to draw either way.
+
+  One shared `PollBackoff` helper now doubles the interval per consecutive failure to a 60 s
+  ceiling and resets on the first success. The log reports **state changes**: one line when a
+  poll starts failing, one when it recovers carrying the failure count, and nothing in between.
+  A poll that has been failing for ten minutes used to produce sixty identical warnings, which
+  is the shape that hides a real change — see #48, where a token expiring at T+60 s was
+  invisible inside exactly that noise. Per-poll response and body logs move behind
+  `verboseLogging`. The on-screen error panels are untouched.
+
+
+## [0.20.0] - 2026-08-25
+
+### Added
+
+- **A test scene for remote interpolation, which 0.19.0 owed and did not ship.**
+  `Samples~/InterpolationProbe` drives a synthetic 15 Hz snapshot stream into the
+  interpolation core — no server, no network, no backend to start — and renders it beside
+  the reset-on-arrival algorithm the same release deleted, so the pop is visible as a
+  difference between two dots instead of a paragraph.
+  - **Why a shipped feature was still short something.** The free-running render clock
+    landed with a changelog entry, a `Documentation~/NETCODE.md` section and four tests in
+    `RemoteInterpolationContinuityTests`. Every one of those describes the fix in *numbers*.
+    None of them carries what the change was actually about, which is how the motion
+    **looks** — "stepped backwards 0.2000 units" is a sentence, whereas a dot snapping back
+    is the defect itself. The standing rule here is that a feature ships a changelog entry,
+    documentation **and** a scene; the scene is the deliverable that gets forgotten, and it
+    was forgotten precisely because the other two were unusually thorough. Nobody could
+    have looked at this fix and judged it by eye until now.
+  - **What the scene shows.** One entity on a circle at a constant server speed, three
+    dots: server truth now, the production core, and the pre-0.19 algorithm. Buttons inject
+    a single early arrival, late arrival or skipped tick — the same three scenarios
+    `RemoteInterpolationContinuityTests` constructs, reused rather than reinvented so the
+    scene demonstrates what the suite actually defends. A repeat mode applies any of them to
+    every *other* snapshot, and a jitter slider runs to ±150 ms.
+  - **Measured by replaying the scene's own loop headlessly**, at 200 fps against 15 Hz
+    snapshots, as a multiple of the median frame step: an injected early arrival renders at
+    **1.13× on the production track against 4.36× on the old one** — reproducing the 4.3×
+    the 0.19.0 entry reported, from an independent harness; a late arrival, **1.09× against
+    7.86×** with two backward steps on the old track; a skipped tick, **1.05× against
+    7.44×**. Continuous ±15 ms jitter costs the production track nothing and gives the old
+    one **48 backward steps**. The production track's backward-step count is **zero in every
+    scenario the scene can produce**, and the readout says in words that a non-zero one is
+    a bug worth reporting.
+  - **The jitter slider deliberately runs past the buffer.** `TargetDelay` is 100 ms, and
+    at ±100 ms of arrival jitter the production track's largest step jumps from 1.25× to
+    **4.52×** — the buffer emptying, exactly where its own depth says it should. Past that,
+    at ±150 ms, motion is visibly uneven and **still has not stepped backwards once**,
+    because the clock rate is floored above zero unconditionally whatever the config says.
+    A slider that stopped below 100 ms could never have shown either half of that.
+  - **The old algorithm is duplicated inside the sample, on purpose and under a banner.**
+    `Scripts/ObsoleteResetOnArrivalInterpolator.cs` reimplements the deleted pre-0.19
+    arithmetic — arrival-stamped phase, `t <= 1.2` clamp, EMA of arrival gaps — because a
+    side-by-side is a far stronger demonstration than a description, and there is nothing
+    left in `Runtime/` to compare against. It is referenced from nothing outside
+    `Samples~/`, it is not tested, and the file opens with a block saying it must never be
+    fixed, extended or reused: improving it would destroy the only thing it is for.
+  - UI is UXML and USS, like every scene in this package — no IMGUI and no uGUI canvas —
+    and every asset in the sample carries its committed `.meta`.
+
+
+### Added — the snapshot's age is measured, and it steers the prediction clock
+
+- **`SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and* rate
+  — and reports how old the newest snapshot is when it is acted on.** A snapshot stamped with
+  base tick `T` was produced at server time `T / hz` and observed at local time `t`, so
+  `t = offset + skew * (T / hz) + delay` with `delay >= 0`. Because the delay is never
+  negative the samples lie **above** a line and touch it at their best moments; fitting that
+  lower envelope gives the offset and the rate, and a sample's height above it is that
+  snapshot's age. Least squares would be wrong — it fits the middle of a distribution whose
+  upper side is unbounded delay, so every bad frame drags the answer.
+
+  The envelope is fitted through two anchors, each the lowest sample of its own epoch, kept
+  far apart so the delay is largely divided out: the long baseline is what makes a small rate
+  difference measurable at all. It is the cheap form of the convex-hull method used for clock
+  synchronisation over paths with unknown delay. Sampled at the moment of **use**, so the wait
+  for a client frame — the term a fixed formula cannot express — is inside it. `SkewPpm`,
+  `BaselineSeconds` and `Fits` report the fit. 17 tests, all driven by a synthetic clock so a
+  reading is a property of the arithmetic rather than of the machine.
+
+- **`WorldViewBinder` steers on it**, with the derived figure (one snapshot interval plus the
+  rounded half round trip) as the fallback for the first seconds of a session, and a ceiling
+  of two snapshot intervals plus a round trip. The ceiling is not decoration: this number
+  steers a clock, and a measurement that can run away takes the simulation with it.
+
+- **`LocalMovePredictor.TickRateHz`** — the rate the predictor was built with, so a tick → time
+  conversion uses the rate the *server* stamped ticks at rather than one estimated off the
+  wire.
+
+**Why it is measured rather than derived.** The derived figure is whole ticks while the real
+age is fractional and set by where a client's frame loop falls against the server's send
+cadence — a phase fixed at join that then holds for the session. Two clients on one machine
+against one server, started six seconds apart: an unlucky phase left one with a constant
+**0.3333-unit, 4.00-step** correction on every snapshot while the other sat at 0.0033.
+
+**Why the rate term is not optional, and what it cost to learn.** A first version fitted the
+offset alone against a fixed rate. A minimum-filtered offset cannot see a rate difference, and
+one it cannot see appears as an offset that grows without bound. Wired to the steering target
+it made a live client categorically worse, twice: fed a rate measured off the wire (57.7 Hz
+for a 60 Hz server) it drifted 4 %/s, the reading passed **613 ticks** with the target
+following it and snaps reached **71 per five-second window**; fed the advertised rate it still
+settled around **205 ticks** where two or three was right. Both are one defect — a term the
+model did not have. `ARateDifferenceIsMeasuredRatherThanAccumulated` now covers 500, 5 000 and
+40 000 ppm, the last being exactly the case that broke the old design.
+
+**Measured live, two clients, the join stagger that used to be the bad case:**
+
+| | before | after |
+|---|---|---|
+| staleness reading | 205–613 ticks, climbing | **0.00–3.44 ticks** |
+| correction, client A | 0.0033 | **0.0029–0.0151** |
+| correction, client B | **0.3333 constant** | **0.0000–0.0147** |
+| snaps | 0 | 0 |
+
+**A finding the fit hands over.** The rate it settles on is **~81 400 ppm — 8.1 %**: the
+snapshot-tick stream a client observes advances that much slower than its own clock. That is
+the "server writes 15 snapshots/s, client counts 14.2" gap, quantified rather than inferred,
+and it is now absorbed instead of accumulating. It is **not explained** — the server's
+`snapshots_frames_written_total` says 15/s per client reached a socket, so the loss is in the
+client's read path. Worth its own investigation; the 10 % clamp is what stands between a worse
+figure and a refused fit.
+
+### Changed
+
+- **Prediction no longer banks elapsed time: every step is exactly one tick.**
+  `StepDeltaTime` returned `min(now - lastMoveTick, MaxBankedTicks) * dt`, mirroring what
+  the server then did, so the inputs per-tick coalescing discards from a burst did not take
+  their simulated time with them. **Both sides have dropped it in the same change**
+  (`rpg-mmo-server` `gameserver-dotnet` CHANGELOG, same date) — a client that banks against
+  a server that does not is the same defect pointing the other way.
+
+  It restored the right distance and destroyed the frames it was supposed to save: measured
+  against a live server, a 1.36-unit step where a normal one is 0.083, read by a player as
+  the avatar jumping. Worse, agreement depended on the two ends' *independent* measurements
+  of elapsed time matching, which across a network is exactly what cannot be relied on — so
+  a correctly predicting client was snapped back on ordinary jitter. That is the reported
+  symptom: move one step, jerk back, continue. One step per tick makes the two sides agree
+  **by construction**: over any interval each takes one step per tick, so each travels
+  `speed x ticks`. Jitter can shift *when* a step happens, never *how many*.
+
+- **The hold window is the shared silence timeout, not the measured snapshot gap.**
+  `ApplyHeld` expired a held direction at `baseTick - heldFrom >= HoldTicks`, where
+  `HoldTicks` came off the wire through `SetHoldTicks`. It is now
+  `> MaxBankedTicks` — `GameConstants.MaxBankedMovementTicks`, 250 ms, the same constant
+  `InputHandler` compiles against. Two consequences: the client can no longer expire a
+  direction on a different tick from the server, and the join-keyframe failure mode
+  (`SnapshotTickGap` pinned at 1, hold off for the whole session) is gone at the source.
+  `>` rather than `>=` is deliberate and matches the server: gaps `1..MaxBankedTicks` step
+  inclusive.
+
+  `HoldTicks` and `SetHoldTicks` remain as **diagnostics** — `WorldViewBinder` still feeds
+  the cadence to the interpolation clock, where it still means what it says — and gate no
+  movement. `SkipNoHoldWindow` is retired at 0; nothing can switch the hold off now.
+
+### Fixed
+
+- **An explicit stop landing on a tick the hold had already stepped was swallowed.**
+  `RecordInput` forced the verdict to `Accepted` on a coalesced input, which *refreshed* the
+  held direction instead of clearing it — so releasing the stick on such a tick coasted for
+  the full 250 ms silence timeout, the one artefact a player attributes directly to their
+  own input. The vector is now put to `MovementSystem` for its verdict and the position
+  thrown away, which is the client's half of the guard `InputHandler.ProcessInput` already
+  had. Unreachable before this release: an input never landed on a tick the hold had
+  stepped, because the hold expired on exactly the tick the next input arrived on.
+
+- **A coalesced input froze the rendered position for the rest of the tick.** It zeroed
+  `_step` and restarted `_sinceInput` while the step the *hold* took on that tick was still
+  mid-interpolation. Measured as a render lag rising from 1.00 to 2.04 steps on the tick
+  after every send and decaying back over the interval — a hitch once per send, invisible to
+  every correction counter because the simulated position was right throughout. Render state
+  is now left alone by an input that produced no displacement; the lag is flat at 1.00 step.
+
+### Fixed (continued)
+
+- **A direction change landed one base tick late, and the live path disagreed with its own
+  replay.** `Advance` steps the hold on *entry* to a base tick, so on a tick whose own input
+  has not arrived yet the hold applied the OLD direction and rule 1 then coalesced the new
+  one away. The server has no such ambiguity — `TickLoop` drains a tick's inputs and calls
+  `ApplyHeldMovement` after — and `Reconcile`'s replay loop has always run in that order.
+
+  Rule 1 is **"one step per tick", not "first step wins"**. An input arriving on a tick the
+  hold already stepped now **re-takes** that tick's single step, from the position the tick
+  began at, in the input's direction: same count, same origin, same arithmetic, newest
+  direction. A stop or a vector the model refuses rolls the tick back instead, which is what
+  the server does by never taking the step at all; the rollback is folded into the render
+  offset and decays rather than jumping.
+
+  Reordering `Advance` to close out the ending tick was the other candidate and was measured:
+  it fixes the same eight tests and puts the hold's step a tick late for the renderer, taking
+  frame-delta burstiness from 1.00 to 3.23. Replacement keeps both properties.
+
+  `PendingInput.LastMoveTickBefore` carries the pre-hold value for a replaced tick, which is
+  how `Reconcile` knows the hold got there first and reproduces the same ordering. Without
+  that, replay coalesced the input away, applied the hold in the previous direction, and the
+  correction *accumulated* instead of converging — measured at 120 steps over 30 snapshots.
+
+- **A replacement reported a zero step to the renderer** — it measured the step against the
+  position after the hold's step rather than against the position the tick began at, so an
+  unchanged direction read as "this tick produced no motion". The rendered position stalled
+  for the rest of every send interval: lag rising from 1.00 to 1.95 steps and decaying back,
+  once per send. Measured from the tick's start it is flat at 1.00 step.
+
+### Added
+
+- **`LocalMovePredictor` clamps how many base ticks one `Advance` may consume**
+  (`MaxCatchUpTicks`, the same 250 ms budget as the hold window), and reports
+  `ClampedFrames` / `DiscardedCatchUpSeconds`. `deltaTime` is whatever the last frame took,
+  and at startup or after a focus loss that is *seconds*: without the clamp one frame
+  burst-advances hundreds of base ticks, each stepping the held direction, and the lead that
+  creates is never given back — the reconcile's lead replay is bounded by the hold window, so
+  anything past it lands as a correction. Time over the budget is discarded rather than
+  carried, which the second test pins: carrying it is the same burst one frame later.
+
+- **`WireConnection.FramesReceived` and `WorldViewBinder.LastServerTick`**, diagnostics only.
+  The first separates "the server did not send it" from "the client did not consume it" —
+  opposite fixes, and no counter in the package could tell them apart. The second, against
+  `LocalMovePredictor.BaseTick`, is the prediction lead in ticks: the one number that says
+  whether the two clocks are keeping step.
+
+### Changed (sample)
+
+- **The DOTS sample auto-joins the map named on the command line.** `-cuvara-map map_01`
+  was already parsed into `MapExplicit` but the bridge still waited for the on-screen map
+  picker whenever more than one map was offered, so a built player sat on the selector
+  forever — unusable for an automated run against a live server, which is the case the
+  sample exists to serve.
+
+- **`[DOTSNet/health]` prints the counters every 5 s** — reconciles, smoothed corrections,
+  snaps, smoothing span against observed step interval, held steps against base ticks, fps,
+  snapshots applied per second, frames received per second, RTT, and the client-vs-server
+  tick lead. "It still feels jerky" and "Snaps=0" cannot both be acted on without this line,
+  and every smoothness defect this package has shipped left the reconcile counters clean
+  because the simulated position was right and only the rendered one was wrong.
+
+### Changed (project)
+
+- **`ProjectSettings.runInBackground` is now 1.** A server-authoritative client that pauses
+  when it loses focus keeps its connection open while its simulation stops, then resumes
+  with a multi-second `deltaTime` — the exact burst the new clamp exists to bound, and a
+  guaranteed desync on top. It also made a built player untestable from a script, since a
+  player launched without focus never progressed past scene setup.
+
+### Changed (tests)
+
+- **`LocalMovePredictorTests.ServerWalk` still implemented the banked rule** and was the last
+  copy of it in the client. Unbanked; the walks it backs now advance *between* inputs rather
+  than after the last one, which was adding a held step the model had no input for.
+
+- **`TheCorrectionMeasuresTheClockError` is now `AWrongClockStillShowsUpAsACorrection`, and
+  the instrument it pinned is gone.** `correction_steps = (clockFactor - 1) * SendEvery` held
+  exactly at every factor; 1.25x, 1.5x and 2.0x now all report **1.00**. Three-argument
+  `Reconcile` replays the ticks between the snapshot's tick and the client's as prediction
+  lead (#53), and the lead it accepts is bounded by the hold window — which went from 66 ms
+  to 250 ms. A clock error smaller than that is now replayed rather than corrected. Read the
+  clock off the harness's `tick rate measured` against `TICK RATE IN USE` instead;
+  `LastCorrection` still answers "do the two sides agree" exactly, and
+  `ACorrectClockProducesNoCorrectionAtAll` still reads 0.00.
+
+- **`RenderSmoothingTests` assumed one input meant one step** — true only while the hold was
+  off for want of a measured snapshot gap. Its three stationary-avatar cases now release the
+  stick explicitly, and `TheStepIsFullyShownAfterOneInputInterval` compares against the step
+  that was taken rather than against a simulated position the hold has since moved on from.
+
+## [0.19.0] - 2026-08-22
+
+## [0.18.0] - 2026-08-22
+
+### Fixed
+
+- **Remote entities no longer pop, stall or sprint when a snapshot is early, late or
+  dropped.** `WorldViewBinder` now renders them through the shared interpolation core
+  instead of its own arrival-phase arithmetic. Three separate visible defects, all of them
+  the same root cause and all of them previously invisible to the test suite, which
+  asserted only `Is.LessThan(1f)` at the instant a snapshot landed.
+  - **What a player saw before.** *Early arrival:* the avatar **lurched forward** — the
+    unrendered remainder of the current segment was discarded when the phase restarted at
+    zero, measured at **4.3x a normal frame's travel in a single frame**, on ordinary
+    jitter with **no packet loss required**. Note the direction: forward, not backward. A
+    test asserting only "never moves backwards" passes on the old code in this case, which
+    is how it stayed uncovered. *Late arrival:* the phase ran to the `t <= 1.2` clamp, the
+    entity **froze for two frames and then stepped backwards 0.2 units** — the extrapolated
+    fifth of a segment being undone rather than absorbed. That is what rubber-banding is.
+    *One dropped snapshot:* the entity rendered at **1.54x speed (23.1 units/s against
+    15.0) and then stalled**, though the server never changed its speed — it covered two
+    units in two ticks as always.
+  - **What a player sees now**, measured on the same three streams: a maximum single-frame
+    step of **1.15x the median** on the early arrival (against an assertion bound of 2.5x),
+    **1.06x** on the late one, **no backward step anywhere in any of the three**, and a
+    skipped tick rendering at **1.008x** its ordinary speed. The perfectly periodic control
+    stream is unchanged at 1.06x against its tighter 1.5x bound.
+  - **The mechanism, not the symptom.** The interpolation factor used to be
+    `(now - arrivalTime) / measuredArrivalInterval`, with the arrival stamped and the
+    factor read in the same `Tick` call — so it was exactly zero on every arriving
+    snapshot, whatever the previous frame had drawn. Where an entity was drawn was
+    therefore a function of when a packet arrived. It now comes from a free-running clock
+    that an arrival does not reset, samples are bracketed by their tick rather than by
+    time since arrival, and the interval is estimated per tick rather than per snapshot.
+    None of the three defects can recur by construction rather than by care.
+  - **The two-sample pair became an 8-deep ring**, which is what lets an early snapshot
+    *wait* instead of displacing the segment being rendered. Rings are pooled across
+    despawns: area-of-interest churn makes spawn and despawn steady-state events here, and
+    a fresh array per entry would hand that churn to the garbage collector. The per-frame
+    render path allocates **zero bytes**, measured — byte-for-byte identical to before this
+    change, including the one pre-existing 88 B/frame allocation that comes from
+    `foreach`-ing `WorldState.Entities`, an `IReadOnlyDictionary` whose enumerator boxes.
+    That one is untouched and is not new; fixing it means changing `WorldState`'s public
+    surface, which is a separate change.
+  - **Remote entities now render 100 ms behind the newest received tick** (about 1.5
+    snapshot intervals) where they previously ran one interval behind with no margin at
+    all — which is precisely why they extrapolated and popped. **The local player pays
+    none of it**: it is excluded from interpolation entirely and still renders at the
+    newest received position, or at the predicted one when a `LocalMovePredictor` is
+    supplied. Nothing about prediction, reconciliation or the `AdvanceFrame` clock-
+    ownership rule changed.
+  - `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock, InterpolationConfig)` is
+    a new overload for a deployment at a different world rate; every existing overload
+    keeps the defaults and every existing call site compiles unchanged. `RenderTick` is
+    exposed for diagnostics — it should sit a little under `TargetDelay` behind the newest
+    received tick, and a value drifting away from that is the shape of a rate-estimate
+    problem.
+
+- **The samples job compiled one sample out of five** (#30). The gate added to close that
+  issue named `DOTSSample` directly, so `DemoBootstrap`, `WorldView`, `E2ECertification` and
+  `ContentPipeline` shipped with nothing compiling them while the job reported success over
+  samples it had never seen. It now copies every sample `package.json` declares.
+  A list maintained by hand goes stale silently, which is the exact failure #30 was opened
+  about — naming one sample in the fix reproduced it one sample at a time.
+  - Compiling all five immediately found a real break: **`WorldView` does not compile** in
+    the CI project. Its screenshot helper calls `Texture2D.EncodeToPNG`, an extension method
+    living in `com.unity.modules.imageconversion`, which a real Unity project has by default
+    and this job's hand-written manifest did not. The sample compiled everywhere except the
+    one place that was supposed to be checking it. Module added to the samples manifest.
+
+### Added
+
+- **A shared snapshot-interpolation core in `Runtime/Interpolation/` — no Unity types, no
+  ECS types, no allocation, no managed fields.** `InterpolationSample`,
+  `InterpolationConfig`, `InterpolationClock`, `ISampleBuffer`, `InterpolationRing` and
+  the static `SnapshotInterpolation`. Nothing consumes it in this entry; it is added
+  first, tested first, and wired in separately, so the swap can be reviewed as a swap.
+  - **Extracted rather than fixed in place, because a second copy is the real risk.** The
+    math has lived exactly once, in `WorldViewBinder`, and the DOTS path consumes its
+    output through `IEntityView.SetState` rather than reimplementing it. Fixing it inside
+    the binder would have kept that true only until the ECS path needed to evaluate at
+    frame rate in a job, at which point there would have been two implementations of a
+    thing whose entire job is that the client and the renderer agree. `Evaluate` is
+    generic over `where TBuffer : struct, ISampleBuffer` precisely so Burst can specialise
+    it per concrete buffer: the GameObject path passes a struct over a pooled array, the
+    ECS path will pass a struct over a `DynamicBuffer`, and neither boxes.
+  - **The render moment is a fractional server tick, not a phase between two samples.**
+    `InterpolationClock.RenderTick` advances with real frame time and is steered toward
+    `NewestTick - TargetDelay / SecondsPerTick` by running slightly fast or slightly slow,
+    capped at 10 %. It is never snapped. The rate is `1 + adjust` and is floored above
+    zero whatever the config says, so `RenderTick` is **strictly increasing for any
+    positive frame delta** — which is what turns "a remote entity never steps backwards
+    between two frames" from a hope into a property of the design, because the rendered
+    position is a monotonic function of a monotonic clock along a fixed path.
+  - **The target is built from a tick number, so arrival jitter cannot move it.** A tick
+    is an exact integer off the wire. The cost is that the effective delay settles about
+    half a tick beyond `TargetDelay`, since the target steps on arrivals while the clock
+    runs continuously; 33 ms at 15 Hz, and worth paying for a target nothing can jitter.
+  - **Seconds-per-tick, not seconds-per-snapshot.** The estimate is an EMA of
+    `arrivalGap / tickGap`, seeded from `TickRateEstimator.SnapshotTickGap` — which was
+    already being computed and handed to the predictor two lines away, and which the
+    interpolator ignored. Because a dropped snapshot carries a proportionally larger tick
+    delta, the ratio does not move. The first real measurement replaces the seed outright
+    rather than being smoothed into it, so a join at a rate the seed guessed wrong does
+    not render at the wrong speed for several seconds.
+  - **Every magic number is now a named field with a stated reason.** `TargetDelay`
+    100 ms (~1.5 intervals at 15 Hz: one interval is the minimum that can work at all,
+    the extra half is jitter margin sized against the measured 8-13 ms RTT spread plus
+    ±16 ms of scheduling jitter on a 60 Hz client); `MaxExtrapolation` 50 ms replacing the
+    bare `t <= 1.2`; `RingCapacity` 8, ~0.53 s of history and the size that keeps a DOTS
+    `DynamicBuffer` in chunk memory. `default(InterpolationConfig)` is all zeroes, so
+    `Normalized()` fills any non-positive field from the defaults — except
+    `MaxExtrapolation`, where zero is a deliberate "never extrapolate" and defaulting it
+    would silently overrule a deployment that asked for no guessing.
+  - **24 tests in `Tests/Editor/InterpolationCoreTests.cs`** pin the edges the four
+    continuity tests cannot reach, because those are integration-level and would cover a
+    single-sample buffer or a ring wrap only by accident: clock seeding and catch-up
+    bounds, strict monotonicity under sustained maximum error, out-of-order rejection,
+    empty and single-sample buffers, bracketing inside a deep buffer, the two-tick segment,
+    the extrapolation cap and its disable, ring wraparound and ordering across several
+    wraps, duplicate-tick refusal, and reuse after `Clear`.
+
+- **`IViewClock` — `WorldViewBinder`'s interpolation clock is injectable.** A third
+  constructor overload, `WorldViewBinder(IEntityView, LocalMovePredictor, IViewClock)`,
+  takes the time source remote interpolation is derived from; passing null (or using
+  either existing overload) gets `StopwatchViewClock`, which is the same self-starting
+  `Stopwatch` the binder has always held privately. **Nothing observable changes at
+  runtime** — no production call site passes a clock, and the default reads the same
+  `Stopwatch.Elapsed.TotalMilliseconds` from the same two places it always did.
+  - **Why it had to exist before anything else could be asserted.** The interpolation
+    factor is `(now − arrival) / measuredInterval`, so every property worth asserting
+    about the rendered motion — that it never steps backwards between frames, that a
+    skipped server tick does not double the rendered speed — is a property of the curve
+    *between* arrivals. With the clock private and self-starting, a test can only sample
+    the instant it happened to execute at, and immediately after handing the binder a
+    snapshot that instant is `t ≈ 0`: the one point on the curve where continuity is
+    trivially true no matter how discontinuous the curve is elsewhere. That is why the
+    existing interpolation tests assert `Is.LessThan(1f)` and nothing sharper, and their
+    own fixture remark says so.
+  - **Arrival time and frame time move independently through it**, which is the property
+    that matters, because the defect being characterised is precisely the relationship
+    between the two. The binder stamps an arrival with whatever the clock reads on the
+    pass carrying a new snapshot and computes the render phase with whatever it reads on
+    every other pass, so setting the clock before each `Tick` places arrivals and frames
+    at chosen, unrelated instants on one timeline. A single knob that advanced both
+    together would not have been enough.
+  - Shaped as a null-defaulting constructor overload rather than an `internal` field plus
+    `InternalsVisibleTo`, matching how the same class already takes its optional
+    `LocalMovePredictor`, and as an interface in its own file with its implementation
+    beside it, matching `INetLog`/`UnityNetLog`. `InternalsVisibleTo` appears nowhere in
+    this package and would have been a new convention imported for one field.
+
+- **`RemoteInterpolationContinuityTests` — four tests that characterise remote
+  interpolation as a curve rather than as a point.** One remote entity travelling in a
+  straight line at a constant server speed, arrivals at the package's own 15 Hz and frames
+  every 5 ms, driven through the new `IViewClock` so arrival time and frame time are placed
+  independently. Each test asserts on the *frame-to-frame* displacement — its sign, its
+  size relative to the median step, and the rendered speed across an interval — never on an
+  absolute coordinate, because a coordinate cannot distinguish smooth motion from motion
+  that arrived by lurching.
+  - **Three of them fail on the current implementation, deliberately, and are committed
+    failing.** A suite that went straight from "does not exist" to "green" would never have
+    shown anyone the defect it was written for. They are not `[Ignore]`d: a test that proves
+    a defect has to run and be seen failing, and each carries a comment naming the specific
+    production line it fails at and the free-running render clock that will make it pass.
+  - **`APerfectlyPeriodicStreamRendersSmoothly` is the control and passes today.** Without
+    it a failing suite is indistinguishable from a broken harness — if the clock seam, the
+    frame pump or the sampling were wrong, everything would fail and the three failures
+    would prove nothing. It is held to a tighter bound (1.5x the median step, against 2.5x
+    for the others) because on a stream with no jitter the only irregularity left is the
+    frame that straddles an arrival, 5 ms not dividing 66.7 ms evenly.
+  - **The early-arrival case lurches FORWARD, and the test had to be written for that
+    rather than for the backward pop it was expected to show.** When a snapshot lands, the
+    interpolator shifts `From = To` and restarts the phase at 0, so it renders the *older
+    endpoint of the new pair* — which is ahead of wherever the previous frame had
+    interpolated to. Measured: a single frame moving **4.3x the median step** when the
+    snapshot arrives 16.7 ms early, with **no backward step anywhere in the run**. A test
+    asserting only "never moves backwards" — the obvious shape, and the one the defect
+    report called for — would therefore have **passed** here and left the real
+    early-arrival discontinuity uncovered. Both bounds are asserted for that reason.
+  - **The backward pop belongs to the late-arrival case**, where `t` runs to the `1.2`
+    extrapolation cap, the entity freezes, and the arriving snapshot then undoes the
+    extrapolated distance instead of absorbing it: measured at **0.2 units backwards after
+    2 stalled frames**, ~2.7x the median forward step. Stall-then-jump is what a player
+    reads as rubber-banding, and it is bounded by the cap rather than by how late the
+    snapshot was.
+  - **A skipped server tick renders at 1.54x speed**, measured. The entity never changed
+    speed — two units in two ticks is the same one unit per tick as always — but the binder
+    divides a doubled position delta by an interval its EMA has moved only 30 % of the way
+    (66.7 ms to ~86.7 ms), so a dropped packet reads on screen as sprinting and then
+    freezing. Asserted on the mean over the affected interval, which is the stable
+    statistic; the instantaneous peak is worse and is what is actually visible.
+
+- **`Reconcile(Vec2, long, long)` — the prediction lead survives an acknowledgement that
+  empties the pending buffer** (#53). The third argument is the base tick the snapshot was
+  produced on.
+  - An **overload, never a change**: the two-argument form is a cross-package contract
+    enforced by `PredictionSurfaceContractTests` and driven by `com.cuvara.dots`. Callers
+    that cannot supply the tick keep today's behaviour exactly, including today's defect,
+    and a test pins that.
+  - `WorldViewBinder` passes `world.Tick`, which it already had — it was feeding the same
+    value to `SeedBaseTick` one line above, so the two clocks were already in one space and
+    the plumbing was a single argument.
+  - **Why the tick is genuinely required.** The cheaper fix was implemented first and
+    measured: anchor the replay to the acknowledged input's own base tick, which the
+    predictor already holds, needing no new parameter. It rebuilds the lead correctly and
+    then over-replays whenever the snapshot already covers the hold window — **3 steps of
+    phantom correction on a case with no lead at all**. The anchor supplies a start; only
+    the snapshot's tick supplies the end. That attempt is not in any branch; the test that
+    rejected it is.
+  - Two things are deliberately not replayed, each an earlier attempt's measured failure:
+    the acknowledged input's own step (the server applied it, so it is in `authoritative`),
+    and anything at or before the snapshot's tick (the snapshot already includes it).
+
+- **`ReconcileLeadTests` — a harness that actually measures the prediction lead** (#53).
+  The defect is unfixed; this is the instrument a fix can be judged with, which #53 says has
+  to exist first.
+  - An earlier fixture of this name was shipped `[Ignore]`d by its own author because every
+    configuration returned a constant `1.000` step — zero latency and both code paths alike.
+    It never reached `develop` and no longer exists. A fix evaluated against it would have
+    been evaluated against nothing.
+  - What makes this one trustworthy is two tests, not the numbers: `ZeroLead_CorrectsByNothing`
+    reads **0** where there is no lead to lose, and `PendingInputSurvives_TheLeadIsRebuilt`
+    reads **materially different values on the anchored and unanchored paths** — compared
+    against each other rather than a threshold, since indistinguishable readings were the old
+    fixture's whole failure.
+  - Three drafts were needed and each was corrected by a measurement rather than by reasoning:
+    passing base ticks where `RecordInput` expects input ticks read one step off at every lead
+    including zero; advancing after a consumed hold window produced no lead at all and looked
+    like the defect being absent; and an anchor recorded *after* the held ticks rebuilt nothing,
+    reading identically to the unanchored path. That last one is a real property of the replay
+    and is documented at the call site.
+  - The defect is pinned as characterization: `EmptyBuffer_DiscardsTheLead...` asserts the
+    correction tracks the acknowledgement interval — 1, 2 and 3 steps for 1, 2 and 3 held
+    ticks — and says at the call site that the expected value becomes `0` once #53 is fixed.
+    These pass today. A fixture that failed would be reverted or ignored, and an ignored
+    fixture is how the last one died.
+
+- **`Generated Wire.cs matches the backend` CI job** (#20).
+  `Runtime/Protocol/Generated/Wire.cs` is the third generated copy of `wire.proto` and the
+  only one nothing guarded; the backend's two are covered by its
+  `proto-generated-up-to-date` job.
+  - A stale copy is the expensive kind of wrong: it **decodes cleanly**, reading any field
+    added since generation as that type's default, so the symptom is a feature that looks
+    wired up and silently does nothing while every test on both sides passes.
+  - It diffs against the backend's **committed generated file** rather than running
+    `protoc`. Both sides generate from one schema with one generator, so the artefacts are
+    byte-identical by construction — md5 `c77092611a6e7815` on both when this landed.
+    Regenerating here would mean pinning `protoc` and the C# plugin to the backend's exact
+    versions, since generated output moves between generator versions; that yields diffs
+    which are not drift, and a gate that cries wolf gets switched off.
+  - It compares against the backend's `develop`, unpinned on purpose. A schema change
+    landing there **should** turn this red until this package regenerates. A pin would hide
+    the drift until someone moved it — the failure mode of the stale copy itself. The cost
+    is that a backend change can redden a netcode PR that did not cause it; that is the
+    two-repo protocol contract being enforced, not a defect.
+  - On failure it prints the diff and names the trap the issue documented: a bare
+    `--csharp_out` nests output under the `csharp_namespace`, writing
+    `Generated/RpgMmo/Wire/V1/Wire.cs` and leaving the committed `Generated/Wire.cs`
+    untouched **while reporting success**.
+
+- **`sync-main.yml` — `main` now follows the release tag by itself.** Runs on a `v*` push and
+  opens an auto-merging pull request moving `main` to the tagged commit.
+  - It opens a PR instead of pushing: `main` requires a pull request and four passing checks,
+    and a workflow that bypassed that would be removing the gate from the branch other people
+    read. No approval is required there, so a green PR lands on its own.
+  - No-ops when `main` already contains the tag, and warns instead of forcing when the move
+    would not be a fast-forward.
+  - `workflow_dispatch` accepts a tag, for a tag pushed while this was broken or a sync PR
+    that was closed.
+  - Written because a `main` that drifts is worse than one that is obviously abandoned: it
+    *looks* current while being stale, which is exactly how `develop` sat two releases behind
+    with nothing noticing.
+
 ### Changed
 
 - **`develop` is the integration branch, and release tags are cut on it.** PRs target

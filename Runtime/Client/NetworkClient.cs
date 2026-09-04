@@ -41,6 +41,14 @@ namespace Cuvara.Netcode.Client
         private GatewayClient _gateway;
         private GameSessionClient _session;
 
+        // Reconnect state. _lastMapId is what a shutdown-triggered reconnect
+        // rejoins; _userClosed distinguishes "the user left" from "the server
+        // left" so Disconnect()/Dispose() never fight an automatic reconnect.
+        private string _lastMapId;
+        private volatile bool _userClosed;
+        private CancellationTokenSource _reconnectCts;
+        private readonly Random _jitter = new Random();
+
         public NetworkClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log,
             IAuthProvider auth = null)
         {
@@ -56,6 +64,23 @@ namespace Cuvara.Netcode.Client
 
         /// <summary>Raised once when the gameplay connection ends.</summary>
         public event Action<DisconnectInfo> SessionClosed;
+
+        /// <summary>
+        /// Raised before each automatic reconnect round (1-based attempt number).
+        /// Only fires when <see cref="NetworkSettings.ReconnectOnServerShutdown"/>
+        /// is on, an <c>IAuthProvider</c> is registered, and the session ended with
+        /// the server's <c>server_shutdown</c> reason.
+        /// </summary>
+        public event Action<int> ReconnectAttemptStarted;
+
+        /// <summary>Raised once when an automatic reconnect lands back in world.</summary>
+        public event Action Reconnected;
+
+        /// <summary>
+        /// Raised once when every automatic reconnect round failed. The session
+        /// stays down; the caller decides what a player sees next.
+        /// </summary>
+        public event Action<Exception> ReconnectFailed;
 
         /// <summary>
         /// Raised once when the gateway connection ends. A
@@ -143,7 +168,11 @@ namespace Cuvara.Netcode.Client
         /// </summary>
         public async UniTask ConnectAsync(string jwt, string mapId, CancellationToken cancellationToken)
         {
-            Dispose();
+            // Tear down connections only — NOT the reconnect machinery. The
+            // reconnect loop reaches here itself; full Dispose() would cancel the
+            // very token this call is running under.
+            TeardownConnections();
+            _userClosed = false;
 
             // Nothing from a previous session survives a new join: entity ids are
             // only meaningful within one game server's world.
@@ -161,43 +190,56 @@ namespace Cuvara.Netcode.Client
 
             for (var attempt = 1; attempt <= attempts; attempt++)
             {
-                State = NetworkClientState.Assigning;
-                var assignment = await gateway.EnterWorldAsync(mapId, cancellationToken);
-
-                var session = new GameSessionClient(_settings, _transports, _codec, _log);
-                session.SnapshotReceived += OnSnapshot;
-                session.Closed += OnSessionClosed;
-
+                GameSessionClient session = null;
                 try
                 {
+                    // Inside the try, so a refused assignment consumes an attempt
+                    // like a refused join does. It used to sit outside: the gateway
+                    // deliberately types "server is starting, retry shortly" as
+                    // retryable and its single-flight allocation ASSUMES the client
+                    // retries — yet any enter_world failure aborted the whole
+                    // connect with zero of the attempts burned (#54).
+                    State = NetworkClientState.Assigning;
+                    var assignment = await gateway.EnterWorldAsync(mapId, cancellationToken);
+
+                    session = new GameSessionClient(_settings, _transports, _codec, _log);
+                    session.SnapshotReceived += OnSnapshot;
+                    session.Closed += OnSessionClosed;
+
                     State = NetworkClientState.Joining;
                     await session.JoinAsync(assignment, cancellationToken);
 
                     _session = session;
+                    _lastMapId = mapId;
                     State = NetworkClientState.InWorld;
                     gateway.StartMonitoring();
                     return;
                 }
                 catch (NetworkException ex)
                 {
-                    session.SnapshotReceived -= OnSnapshot;
-                    session.Closed -= OnSessionClosed;
-                    session.Dispose();
+                    DropFailedSession(session);
                     lastFailure = ex;
+
+                    // A precondition refusal (expired session, rate limit, bad
+                    // token) cannot be fixed by asking again on this connection:
+                    // retrying it burns the remaining attempts against a terminal
+                    // answer and hides the real error under "could not join".
+                    if (!IsRetryable(ex))
+                    {
+                        State = NetworkClientState.Disconnected;
+                        throw;
+                    }
                     _log.Warn($"join attempt {attempt}/{attempts} failed: {ex.Message}");
                 }
                 catch
                 {
-                    session.SnapshotReceived -= OnSnapshot;
-                    session.Closed -= OnSessionClosed;
-                    session.Dispose();
+                    DropFailedSession(session);
                     throw;
                 }
 
                 if (attempt < attempts)
                 {
-                    await UniTask.Delay(_settings.JoinRetryDelay, DelayType.Realtime, PlayerLoopTiming.Update,
-                        cancellationToken);
+                    await _settings.DelayScheduler(WithJitter(_settings.JoinRetryDelay), cancellationToken);
                 }
             }
 
@@ -205,15 +247,81 @@ namespace Cuvara.Netcode.Client
             throw lastFailure ?? new NetworkException("could not join a game server");
         }
 
+        /// <summary>
+        /// Whether asking again can change the answer. The retryable set is the
+        /// gateway's, not ours: it types transient assignment refusals with these
+        /// exact strings and its allocation flow assumes the client comes back.
+        /// Anything unrecognised is treated as retryable too — the server's error
+        /// set is the server's to extend, and wrongly retrying a terminal error
+        /// costs a few seconds where wrongly aborting a transient one costs the
+        /// connect.
+        /// </summary>
+        private static bool IsRetryable(NetworkException ex)
+        {
+            switch (ex.ServerError)
+            {
+                // Preconditions the gateway answers via auth_resp (its exact
+                // strings): this connection will keep giving the same answer.
+                case "session expired":
+                case "rate limited":
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        private void DropFailedSession(GameSessionClient session)
+        {
+            if (session == null)
+            {
+                return;
+            }
+            session.SnapshotReceived -= OnSnapshot;
+            session.Closed -= OnSessionClosed;
+            session.Dispose();
+        }
+
+        private TimeSpan WithJitter(TimeSpan baseDelay)
+        {
+            var jitterMs = _settings.RetryJitter.TotalMilliseconds;
+            if (jitterMs <= 0)
+            {
+                return baseDelay;
+            }
+            return baseDelay + TimeSpan.FromMilliseconds(_jitter.NextDouble() * jitterMs);
+        }
+
         /// <summary>Leaves the world and drops both connections.</summary>
         public void Disconnect()
         {
+            // The user chose to leave: no close that follows from this is the
+            // server's doing, so the automatic reconnect must not fire.
+            _userClosed = true;
+            CancelReconnect();
             _session?.Leave();
             _gateway?.Close();
             State = NetworkClientState.Ended;
         }
 
         public void Dispose()
+        {
+            _userClosed = true;
+            CancelReconnect();
+            TeardownConnections();
+        }
+
+        private void CancelReconnect()
+        {
+            var cts = _reconnectCts;
+            _reconnectCts = null;
+            if (cts != null)
+            {
+                cts.Cancel();
+                cts.Dispose();
+            }
+        }
+
+        private void TeardownConnections()
         {
             var session = _session;
             _session = null;
@@ -249,6 +357,71 @@ namespace Cuvara.Netcode.Client
         {
             State = NetworkClientState.Ended;
             SessionClosed?.Invoke(info);
+
+            // server_shutdown is the one close that PROMISES a comeback is worth
+            // trying: the server said "I am going away, reconnect elsewhere", and
+            // the backend holds the entity for 30 s for exactly this. Everything
+            // else — kicks, protocol errors, plain drops — stays with the caller.
+            if (_settings.ReconnectOnServerShutdown
+                && _auth != null
+                && !_userClosed
+                && info.Reason == Protocol.KickReasons.ServerShutdown
+                && !string.IsNullOrEmpty(_lastMapId))
+            {
+                StartReconnect();
+            }
+        }
+
+        private void StartReconnect()
+        {
+            _log.Info($"session ended with server_shutdown; automatic reconnect armed for '{_lastMapId}'");
+            _reconnectCts?.Cancel();
+            _reconnectCts?.Dispose();
+            _reconnectCts = new CancellationTokenSource();
+            ReconnectLoopAsync(_lastMapId, _reconnectCts.Token).Forget();
+        }
+
+        private async UniTaskVoid ReconnectLoopAsync(string mapId, CancellationToken ct)
+        {
+            var attempts = Math.Max(1, _settings.ReconnectAttempts);
+            Exception lastFailure = null;
+
+            for (var attempt = 1; attempt <= attempts; attempt++)
+            {
+                try
+                {
+                    // Linear-plus-jitter, sized so the default five rounds span the
+                    // server's 30 s entity hold. Delay FIRST: the shutdown that
+                    // triggered this reaches every client in the same instant, and
+                    // an immediate retry is a synchronized storm at a gateway that
+                    // is likely still allocating the replacement server.
+                    var pause = TimeSpan.FromTicks(_settings.ReconnectDelay.Ticks * attempt);
+                    await _settings.DelayScheduler(WithJitter(pause), ct);
+
+                    ReconnectAttemptStarted?.Invoke(attempt);
+                    _log.Info($"reconnect attempt {attempt}/{attempts} to '{mapId}'");
+
+                    // The provider answers with its cached credential when it is
+                    // still valid — a reconnect should cost zero auth traffic in
+                    // the common case. Cold re-auth is the provider's fallback,
+                    // not this loop's business.
+                    await ConnectAsync(mapId, ct);
+
+                    Reconnected?.Invoke();
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    return; // user left, or a newer reconnect superseded this one
+                }
+                catch (Exception ex)
+                {
+                    lastFailure = ex;
+                    _log.Warn($"reconnect attempt {attempt}/{attempts} failed: {ex.Message}");
+                }
+            }
+
+            ReconnectFailed?.Invoke(lastFailure);
         }
 
         private void OnGatewayClosed(DisconnectInfo info)
