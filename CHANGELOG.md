@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Snapshot gap tracking no longer blocked by alternating gaps.** The single-candidate
+  design tracked one gap value at a time; alternating gaps (e.g. 3, 4, 3, 4 ticks) reset
+  the counter on every switch, preventing either from reaching the 2-confirmation
+  threshold. `SnapshotTickGap` stayed at 0, disabling the hold window. Replaced with
+  per-gap-value counting (fixed 16-slot array, zero allocation): each gap value
+  accumulates its own confirmation count independently. Test added:
+  `AlternatingGapsAreEachConfirmedIndependently`.
+
 ## [0.28.1] - 2026-08-28
 
 ### Fixed

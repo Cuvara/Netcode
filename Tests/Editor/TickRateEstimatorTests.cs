@@ -156,6 +156,26 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void AlternatingGapsAreEachConfirmedIndependently()
+        {
+            // The previous single-candidate design tracked one gap at a time. Alternating
+            // gaps (3, 4, 3, 4) reset the counter on every switch, so neither ever reached
+            // the confirmation threshold and the hold window stayed at 0. With per-value
+            // counting, each gap accumulates its own count independently.
+            var e = new TickRateEstimator();
+
+            e.Sample(100, 0.000);
+            e.Sample(103, 0.050);   // gap 3 (first)
+            e.Sample(107, 0.117);   // gap 4 (first)
+            e.Sample(110, 0.167);   // gap 3 (second — confirmed)
+            e.Sample(114, 0.233);   // gap 4 (second — confirmed, but 3 already won)
+
+            Assert.That(e.SnapshotTickGap, Is.EqualTo(3),
+                "alternating 3/4 gaps: 3 is confirmed on its second sighting and adopted " +
+                "as the minimum, not blocked by 4 resetting a shared counter");
+        }
+
+        [Test]
         public void ADroppedSnapshotDoesNotWidenTheHoldWindow()
         {
             // Drops only ever widen a gap, and the minimum is what makes them harmless.

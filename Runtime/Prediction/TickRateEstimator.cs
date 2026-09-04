@@ -58,10 +58,12 @@ namespace Cuvara.Netcode.Prediction
 
         private int _minGap;
 
-        // A candidate narrower gap, and how many times it has been seen. A gap only
-        // becomes the hold window on its SECOND sighting; see the Sample remarks.
-        private int _candidateGap;
-        private int _candidateCount;
+        // Per-gap-value confirmation counts. A gap only becomes the hold window on
+        // its SECOND sighting; tracking counts per value (not one candidate) means
+        // alternating gaps (e.g. 3, 4, 3, 4) can each accumulate independently.
+        // Fixed at 16 slots — gap values above that are not snapshot cadences.
+        private const int MaxTrackedGap = 16;
+        private readonly int[] _gapCounts = new int[MaxTrackedGap];
         private long _firstTick;
         private double _firstSeconds;
         private long _lastTick;
@@ -182,25 +184,19 @@ namespace Cuvara.Netcode.Prediction
             }
 
             long gap = tick - _lastTick;
-            if (gap > 0 && gap < int.MaxValue && (_minGap == 0 || gap < _minGap))
+            if (gap > 0 && gap < MaxTrackedGap && (_minGap == 0 || gap < _minGap))
             {
                 // Confirm before adopting. One sighting of a narrow gap is as likely to be
                 // the join keyframe's off-cadence phase, or two snapshots batched into one
                 // read, as it is to be the cadence. Two sightings of the same gap is not.
-                var candidate = (int)gap;
-                if (candidate == _candidateGap)
-                {
-                    _candidateCount++;
-                }
-                else
-                {
-                    _candidateGap = candidate;
-                    _candidateCount = 1;
-                }
+                // Counts are tracked per gap value so alternating gaps (e.g. 3, 4, 3, 4)
+                // each accumulate independently — the previous single-candidate design
+                // reset the counter on every alternation, preventing either from confirming.
+                _gapCounts[(int)gap]++;
 
-                if (_candidateCount >= 2)
+                if (_gapCounts[(int)gap] >= 2)
                 {
-                    _minGap = candidate;
+                    _minGap = (int)gap;
                 }
             }
 
@@ -239,8 +235,7 @@ namespace Cuvara.Netcode.Prediction
         {
             Samples = 0;
             _minGap = 0;
-            _candidateGap = 0;
-            _candidateCount = 0;
+            System.Array.Clear(_gapCounts, 0, _gapCounts.Length);
             _firstTick = 0;
             _lastTick = 0;
             _firstSeconds = 0;
