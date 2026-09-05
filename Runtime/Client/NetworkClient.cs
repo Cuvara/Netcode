@@ -94,9 +94,17 @@ namespace Cuvara.Netcode.Client
         /// Raised on every state transition, in order. Exists so a caller can narrate
         /// the two-hop handshake without reaching into either hop.
         /// </summary>
+        /// <summary>Fired on state change. Carries only the new state (legacy).</summary>
         public event Action<NetworkClientState> StateChanged;
 
+        /// <summary>
+        /// Fired on state change with full context: previous state, new state, and reason.
+        /// Prefer this over <see cref="StateChanged"/> for new code.
+        /// </summary>
+        public event Action<ConnectionStateChangedEvent> ConnectionStateChanged;
+
         private NetworkClientState _state = NetworkClientState.Disconnected;
+        private string _lastTransitionReason = "";
 
         public NetworkClientState State
         {
@@ -108,8 +116,11 @@ namespace Cuvara.Netcode.Client
                     return;
                 }
 
+                var previous = _state;
                 _state = value;
                 StateChanged?.Invoke(value);
+                ConnectionStateChanged?.Invoke(new ConnectionStateChangedEvent(previous, value, _lastTransitionReason));
+                _lastTransitionReason = "";
             }
         }
 
