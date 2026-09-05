@@ -1090,15 +1090,55 @@ still: a suite reporting success while executing nothing is the failure mode thi
 repository has paid for repeatedly. **An Ignore with a reason is visible in the report and
 says what is missing**, which is the only honest option of the three.
 
+## KCP transport
+
+`KcpTransport` implements `ITransport` over UDP using the same ARQ state machine the game
+server runs (ported from `GameServer.Net.Transport.Kcp`, itself a port of kcp-go v5).
+
+**Stream mode** is on (`Kcp.Stream = 1`), so KCP delivers a byte stream — the same contract
+as TCP. The identical `[4-byte BE length][body]` framing sits on top, and nothing above
+`ITransport` knows which transport it is on. The framing is in `WireFraming`, shared by both
+transports.
+
+**Selection is server-driven.** The `enter_world_resp` carries a `transport` field (`"tcp"` or
+`"kcp"`); `TransportKinds.Parse` maps it to the enum; `DefaultTransportFactory.Create` builds
+the right transport. A server advertising KCP is not listening on TCP, so falling back would
+be a silent failure — this is why the factory threw before the transport existed.
+
+**Encryption** is optional. `KcpCrypto` implements kcp-go's AES-256-CFB per-packet encryption
+(nonce + CRC32 + payload, fixed IV). The key is passed through `DefaultTransportFactory`'s
+constructor; empty means plaintext (the dev default). Key derivation matches Go's
+`backend/shared/transport/crypto.go` — 64 hex chars decoded verbatim, anything else stretched
+with HKDF-SHA256. A wrong key fails the CRC and the session never forms.
+
+**Tuning** matches `KcpTuning` in the server and `backend/shared/transport/transport.go`
+exactly: `NoDelay=1, Interval=10ms, FastResend=2, NoCongestion=1, Wnd=128, MTU=1350`.
+
+## Map transfer
+
+`NetworkClient.TransferToMapAsync(mapId, ct)` transfers the player to a different map. The
+gateway is already a redirector (ADR-3) and `enter_world` accepts any map id on an
+authenticated connection, so a map transfer needs no new wire message.
+
+The flow:
+1. `State = Transferring` (for UI loading screens)
+2. Cancel any in-progress automatic reconnect
+3. `session.Leave()` — polite disconnect from the current game server
+4. `ConnectAsync(mapId)` — full two-hop: new gateway auth + `enter_world` + game server join
+5. `State = InWorld`, `CurrentMapId = mapId`
+
+The `IAuthProvider` supplies a cached JWT in the common case, so a transfer costs zero auth
+traffic. The entity on the old server is released when the socket closes; the new server
+creates one from persistent state.
+
 ## Not implemented
 
 | | Status |
 |---|---|
-| KCP transport | `DefaultTransportFactory` throws rather than silently downgrading to TCP — a KCP server is not listening on TCP at all, so a fallback would surface as an unexplained connection refusal |
 | WebGL | `System.Net.Sockets` is unavailable there; needs a WebSocket `ITransport`, which the gateway does not speak today either |
-| Map transfer (13/14) | `transfer_map` is not sent; an inbound `transfer_map_resp` decodes to a null payload and is logged |
-| Reconnect / resume | none. A closed session is reported, not retried; the server holds the entity 30 s (60 s in a dungeon) |
 | Prediction of anything but movement | deliberate — see below |
+| Ability cast protocol | tracked as Cuvara/Netcode#85 |
+| Status effects in snapshot | tracked as Cuvara/Netcode#86 |
 
 Three rows were removed from this table because they had stopped being true and nothing
 failed when they stopped: **"Protobuf codec — interface and sniff in place, no

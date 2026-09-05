@@ -5,7 +5,7 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 
 ## Features
 
-- **Wire transport** — TCP (KCP planned), 4-byte BE length-prefix framing
+- **Wire transport** — TCP and KCP (reliable UDP, kcp-go v5 compatible), 4-byte BE length-prefix framing, optional AES-256-CFB encryption for KCP
 - **Codec** — JSON and Protobuf wire codecs, distinguished inbound by a one-byte sniff
 - **Two-hop handshake** — Gateway auth → JoinToken → Game server connect. Retryable assignment refusals ("server is starting…") consume a join attempt with a jittered pause; the gateway's terminal precondition answers abort with the real error
 - **Automatic reconnect** — a `server_shutdown` close re-runs the connect flow through the registered `IAuthProvider` (jittered, linearly-backed-off rounds spanning the server's 30 s entity hold); off per user-initiated disconnects, observable via `ReconnectAttemptStarted`/`Reconnected`/`ReconnectFailed`
@@ -13,6 +13,8 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
 - **Prediction** — Local player movement predicted on input and reconciled against the server's `AckTick`, replaying through `Shared.GameLogic` so client and server agree bit-for-bit. Refuses to run rather than approximate when it cannot match the server. Movement only — combat stays server-authoritative
+- **Map transfer** — `NetworkClient.TransferToMapAsync` for seamless map transitions, reusing the gateway redirect flow with no new wire message
+- **Network metrics** — `INetworkMetrics` / `NetworkMetrics` with observable RTT, jitter, snapshot rate, bandwidth, reconciliation tracking; event-driven publishing over a configurable window
 - **VContainer DI** — One-line registration via `NetworkingRegistration.RegisterNetworking()`
 - **Two wire encodings** — Protobuf (the backend default, with entity-id interning and the entity-type enum) and legacy JSON. JSON is the registration default so upgrades do not change behaviour; pass `WireEncoding.Protobuf` to opt in. Ships one vendored third-party binary, `Google.Protobuf` — see `Documentation~/NETCODE.md` for why it is unavoidable.
 

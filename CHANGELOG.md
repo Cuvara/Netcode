@@ -5,6 +5,51 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **KCP transport — reliable UDP, wire-compatible with kcp-go v5.** `KcpTransport`
+  implements `ITransport` over UDP using the same ARQ state machine the game server
+  runs, ported from `GameServer.Net.Transport.Kcp`. Stream mode with the identical
+  `[4-byte BE length][body]` framing as TCP, so nothing above `ITransport` knows which
+  transport it is on. Tuning matches the server exactly: NoDelay=1, Interval=10ms,
+  FastResend=2, NoCongestion=1, Wnd=128, MTU=1350. `DefaultTransportFactory` now
+  returns a `KcpTransport` when the game server advertises `transport:"kcp"` instead
+  of throwing. Optional AES-256-CFB encryption compatible with kcp-go's
+  `NewAESBlockCrypt`, gated on a transport key passed to the factory.
+  - `Kcp.cs` — pure ARQ protocol: no sockets, no threads, no Unity types.
+  - `KcpTransport.cs` — `ITransport` over `UdpClient` with receive/update loops.
+  - `KcpCrypto.cs` — kcp-go-compatible AES-256-CFB + CRC32 + HKDF key derivation
+    (hand-rolled for .NET Standard 2.1 compatibility — Unity does not ship
+    `System.Security.Cryptography.HKDF`).
+  - `AssemblyInfo.cs` — `InternalsVisibleTo` for the test assembly, scoped to testing
+    only; no runtime seam uses it.
+  - 8 `KcpCoreTests` — delivery, bidirectional, stream ordering, fragmentation,
+    framing, conv mismatch, empty send.
+  - 8 `KcpCryptoTests` — roundtrip, wrong key, same key different instances, hex key
+    decode, HKDF stretch, CRC32 known value, short packet.
+  - **KCP Probe** sample scene — two KCP state machines back-to-back with configurable
+    packet loss, no server needed.
+
+- **Seamless map transfer via `NetworkClient.TransferToMapAsync(mapId, ct)`.** The
+  gateway is already a redirector (ADR-3) and `enter_world` accepts any map id, so a
+  map transfer is an orchestrated disconnect + re-join with no new wire message. Leaves
+  the current game server cleanly, re-authenticates through a fresh gateway connection
+  (the `IAuthProvider` returns a cached credential in the common case), and joins the
+  new map's server. Cancels any in-progress automatic reconnect.
+  - `NetworkClientState.Transferring` — emitted before the transfer begins.
+  - `NetworkClient.CurrentMapId` — the map the client is on or was last on.
+
+- **Structured network metrics via `INetworkMetrics` / `NetworkMetrics`.** Observable
+  metrics with event-driven publishing: smoothed RTT + jitter, snapshot rate, bandwidth
+  in/out, reconciliation count + mean correction, server/ack tick. The default
+  implementation accumulates over a configurable window (5 s, matching the health line's
+  existing cadence) and publishes a `NetworkMetricsSnapshot` struct. The health line in
+  the DOTS sample can become a consumer rather than computing its own counters.
+  - 8 `NetworkMetricsTests` — window publishing, RTT smoothing, bytes tracking,
+    reconciliation tracking, reset, multi-window independence, zero-reconciliation edge.
+
 ## [0.28.2] - 2026-09-05
 
 ### Fixed
