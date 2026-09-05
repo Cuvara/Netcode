@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-06
+
+### Added
+
+- ConnectionStateChangedEvent with Previous, Current, Reason fields
+- IConnectionStateObserver interface
+- NetworkDiagnosticsViewModel for HUD binding
+- ReconnectionProgress data struct
+- ServerTimeInfo for debug HUD
+- ContentReadyEvent for loading screens
+- GracefulDisconnectOptions
+
 ## [0.29.0] - 2026-09-06
 
 ### Added
