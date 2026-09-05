@@ -17,7 +17,10 @@ namespace Cuvara.Netcode.Client
         /// <summary>Joined. Input goes up and snapshots come down.</summary>
         InWorld = 4,
 
+        /// <summary>Leaving the current map and joining a new one.</summary>
+        Transferring = 5,
+
         /// <summary>The gameplay connection ended. Inspect the reported cause.</summary>
-        Ended = 5
+        Ended = 6
     }
 }
