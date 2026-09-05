@@ -291,6 +291,47 @@ namespace Cuvara.Netcode.Client
             return baseDelay + TimeSpan.FromMilliseconds(_jitter.NextDouble() * jitterMs);
         }
 
+        /// <summary>
+        /// Transfers to a different map. Leaves the current game server cleanly,
+        /// re-authenticates through the gateway, and joins the new map's server.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The gateway is already a redirector (ADR-3), and <c>enter_world</c>
+        /// accepts any map id on an authenticated connection. A map transfer is
+        /// therefore an orchestrated disconnect + re-join, not a new wire message.
+        /// The entity on the old server is released when the socket closes; the new
+        /// server creates one from persistent state.
+        /// </para>
+        /// <para>
+        /// Requires an <see cref="IAuthProvider"/> — the provider returns a cached
+        /// credential in the common case, so a transfer costs zero auth traffic.
+        /// </para>
+        /// </remarks>
+        public async UniTask TransferToMapAsync(string mapId, CancellationToken cancellationToken)
+        {
+            if (_auth == null)
+            {
+                throw new InvalidOperationException(
+                    "map transfer requires an IAuthProvider for re-authentication");
+            }
+
+            if (string.IsNullOrEmpty(mapId))
+            {
+                throw new ArgumentException("mapId must not be empty", nameof(mapId));
+            }
+
+            _log.Info($"transferring to map '{mapId}'");
+            State = NetworkClientState.Transferring;
+
+            CancelReconnect();
+            _session?.Leave();
+            await ConnectAsync(mapId, cancellationToken);
+        }
+
+        /// <summary>The map id the client is currently on, or was last on.</summary>
+        public string CurrentMapId => _lastMapId;
+
         /// <summary>Leaves the world and drops both connections.</summary>
         public void Disconnect()
         {
