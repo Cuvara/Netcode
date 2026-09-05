@@ -57,7 +57,7 @@ namespace Cuvara.Netcode.Snapshot
             }
 
             var entities = new List<ResolvedEntity>(snapshot.Entities.Count);
-            var pending = new List<KeyValuePair<uint, string>>();
+            List<KeyValuePair<uint, string>> pending = null;
 
             foreach (var e in snapshot.Entities)
             {
@@ -91,6 +91,7 @@ namespace Cuvara.Netcode.Snapshot
                         // This message introduces the binding. Recorded only once the
                         // whole snapshot has resolved, so an abort leaves nothing
                         // half-bound.
+                        if (pending == null) pending = new List<KeyValuePair<uint, string>>();
                         pending.Add(new KeyValuePair<uint, string>(e.Handle, id));
                     }
                 }
@@ -117,9 +118,12 @@ namespace Cuvara.Netcode.Snapshot
                 _handles.Clear();
             }
 
-            foreach (var binding in pending)
+            if (pending != null)
             {
-                _handles.Bind(binding.Key, binding.Value);
+                foreach (var binding in pending)
+                {
+                    _handles.Bind(binding.Key, binding.Value);
+                }
             }
 
             resolved = new ResolvedSnapshot(
