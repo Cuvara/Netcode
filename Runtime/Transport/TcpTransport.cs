@@ -67,6 +67,9 @@ namespace Cuvara.Netcode.Transport
         /// </summary>
         private const int ReceiveBufferSize = 16 * 1024;
 
+        /// <summary>Reusable write buffer (header + body), grown with headroom and never shrunk.</summary>
+        private byte[] _writeBuf = Array.Empty<byte>();
+
         private TcpClient _client;
         private NetworkStream _stream;
         private int _closed;
@@ -187,9 +190,11 @@ namespace Cuvara.Netcode.Transport
             // One buffer, one write: a separate header write can be observed by the
             // peer as a frame that never arrives if the connection dies between the
             // two, and costs an extra segment on every tick.
-            var frame = new byte[WireFraming.HeaderSize + body.Length];
-            WireFraming.WriteLength(frame, body.Length);
-            Buffer.BlockCopy(body, 0, frame, WireFraming.HeaderSize, body.Length);
+            var frameLen = WireFraming.HeaderSize + body.Length;
+            if (_writeBuf.Length < frameLen)
+                _writeBuf = new byte[frameLen + (frameLen >> 2)];
+            WireFraming.WriteLength(_writeBuf, body.Length);
+            Buffer.BlockCopy(body, 0, _writeBuf, WireFraming.HeaderSize, body.Length);
 
             try
             {
@@ -197,7 +202,7 @@ namespace Cuvara.Netcode.Transport
                 // Unity player loop that await was not free — the same measurement that
                 // put the read path's ceiling at playerLoopHz/2 puts this path's at
                 // playerLoopHz/2 as well, halved again by a flush that does nothing.
-                await stream.WriteAsync(frame, 0, frame.Length, cancellationToken).AsUniTask();
+                await stream.WriteAsync(_writeBuf, 0, frameLen, cancellationToken).AsUniTask();
             }
             catch (OperationCanceledException)
             {

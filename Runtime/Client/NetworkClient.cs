@@ -291,6 +291,27 @@ namespace Cuvara.Netcode.Client
             return baseDelay + TimeSpan.FromMilliseconds(_jitter.NextDouble() * jitterMs);
         }
 
+        /// <summary>
+        /// Transfers to a different map. Leaves the current game server cleanly,
+        /// re-authenticates through the gateway, and joins the new map's server.
+        /// </summary>
+        public async UniTask TransferToMapAsync(string mapId, CancellationToken cancellationToken)
+        {
+            if (_auth == null)
+                throw new InvalidOperationException("map transfer requires an IAuthProvider");
+            if (string.IsNullOrEmpty(mapId))
+                throw new ArgumentException("mapId must not be empty", nameof(mapId));
+
+            _log.Info($"transferring to map '{mapId}'");
+            State = NetworkClientState.Transferring;
+            CancelReconnect();
+            _session?.Leave();
+            await ConnectAsync(mapId, cancellationToken);
+        }
+
+        /// <summary>The map id the client is currently on, or was last on.</summary>
+        public string CurrentMapId => _lastMapId;
+
         /// <summary>Leaves the world and drops both connections.</summary>
         public void Disconnect()
         {
