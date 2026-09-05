@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-06
+
 ### Added
 
 - **KCP transport — reliable UDP, wire-compatible with kcp-go v5.** `KcpTransport`
