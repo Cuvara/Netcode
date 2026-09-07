@@ -82,6 +82,9 @@ namespace Cuvara.Netcode.Client
 
         public bool IsConnected => _connection != null && _connection.IsRunning;
 
+        /// <summary>How the gameplay connection ended, once it has; null while it is up.</summary>
+        public DisconnectInfo? CloseInfo => _connection?.CloseInfo;
+
         /// <summary>
         /// Dials the assigned game server and consumes the join token.
         /// </summary>

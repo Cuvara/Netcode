@@ -264,6 +264,9 @@ namespace Cuvara.Netcode.Bootstrap
                 case NetworkClientState.Ended:
                     Debug.Log("[bootstrap]   → session ended");
                     break;
+                case NetworkClientState.Reconnecting:
+                    Debug.Log("[bootstrap]   → reconnecting: waiting out a backoff pause before re-running both hops");
+                    break;
                 case NetworkClientState.Disconnected:
                     Debug.Log("[bootstrap]   → disconnected");
                     break;

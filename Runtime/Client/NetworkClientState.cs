@@ -21,6 +21,14 @@ namespace Cuvara.Netcode.Client
         Transferring = 5,
 
         /// <summary>The gameplay connection ended. Inspect the reported cause.</summary>
-        Ended = 6
+        Ended = 6,
+
+        /// <summary>
+        /// The gameplay connection ended and the automatic reconnect is waiting
+        /// out a backoff pause. Each round then walks <see cref="Authenticating"/>
+        /// → <see cref="Assigning"/> → <see cref="Joining"/> again; a failed round
+        /// returns here, an exhausted budget goes to <see cref="Ended"/>.
+        /// </summary>
+        Reconnecting = 7
     }
 }
