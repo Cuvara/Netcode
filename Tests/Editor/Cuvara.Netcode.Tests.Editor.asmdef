@@ -6,7 +6,9 @@
         "UnityEditor.TestRunner",
         "Shared.GameLogic",
         "Cuvara.Netcode.Runtime",
-        "UniTask"
+        "UniTask",
+        "VContainer",
+        "Cuvara.Netcode.DI"
     ],
     "includePlatforms": [
         "Editor"
@@ -21,6 +23,12 @@
     "defineConstraints": [
         "UNITY_INCLUDE_TESTS"
     ],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "jp.hadashikick.vcontainer",
+            "expression": "1.0.0",
+            "define": "CUVARA_NETCODE_VCONTAINER"
+        }
+    ],
     "noEngineReferences": false
 }
