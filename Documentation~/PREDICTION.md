@@ -129,6 +129,32 @@ correction of up to one step (0.0833 units). That is quantisation, not disagreem
 and no lead can remove it. A measurement that expects corrections to be rare across
 many start/stop transitions is measuring it.
 
+### The clock runs on the server's timebase
+
+`SteerToServerTick` corrects the base-tick clock's **phase**. It is proportional (gain 0.1,
+called once per snapshot) and has no integral term, so a constant **rate** difference is not
+something it can remove — it settles at a standing offset instead:
+
+```
+standing tick error  =  drift / (gain x snapshotHz)
+                     =  (clockRatio - 1) x baseHz / (0.1 x snapshotHz)
+```
+
+At 60/15 that is `drift / 1.5`, so a client clock 9% fast sits 3.6 base ticks ahead of the
+server forever. Because `Reconcile` compares at the snapshot's own tick *number*, an offset
+of n ticks makes the two sides label different moments with the same number and the whole of
+it is returned as position — a correction at every start and stop.
+
+So the rate is corrected separately, and by feed-forward rather than by an integrator:
+`SnapshotStalenessEstimator` already fits it (`SkewPpm`), and `WorldViewBinder` hands it to
+`LocalMovePredictor.SetClockRateScale` before each steer. Only when the line is **fitted** —
+the provisional warm-up reading carries no rate at all — and only within the reciprocals of
+the estimator's own skew bounds, outside which a value is refused rather than clamped and
+counted in `RefusedClockRateScales`.
+
+A ratio near 1.10 is not exotic: it is the Windows performance counter against the Linux
+clock the server ticks on, and it is what the development machine measures.
+
 ### Reading a correction figure
 
 Size a correction by the tick rate **measured off the wire**, never by the one the client
@@ -147,6 +173,12 @@ causes is how big each correction is:
 | ~1 step | the ±1 base tick two free-running clocks cost at a transition. The floor. |
 | ~`SnapshotTickGap` steps (4 at 60/15) | the prediction clock is steered to the wrong offset — compare `TARGET LEAD` against `SNAPSHOT AGE` |
 | a ratio of the two rates | a genuine tick-rate mismatch; `TickRateEstimator.Disagrees` should be true as well |
+| `clock error` steps, with `clock rate difference` large | proportional droop against a clock-rate difference — check `clock rate correction` is not 1.0 |
+
+`replayed steps 0` is a **healthy** reading, not an open loop: the history path is the
+accurate one and replaying is its fallback, so a client whose clock tracks the server hits
+the history every time and replays nothing. Read `reconciles from history` for whether the
+loop closed.
 
 The `[Measure]` block prints `SNAPSHOT AGE measured`, `TARGET LEAD in use`, `snapshot gap
 measured` and `clock error (last steer)` for every run, prediction-OFF included, because

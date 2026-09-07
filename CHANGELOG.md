@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The prediction clock now runs on the server's timebase, not the client machine's.**
+  `SteerToServerTick` is a proportional controller with no integral term, so against a
+  constant clock-rate difference it settles at a standing tick offset instead of removing
+  it — ordinary droop, of exactly `drift / (gain * snapshotHz)`. At gain 0.1 and 15
+  snapshots a second that is `drift / 1.5`: a client clock 9% fast against a 60 Hz server
+  gains 5.4 ticks a second and sits **3.6 base ticks** ahead, permanently. Reproduced
+  across 1.00x–1.103x, matching the formula to two decimals, and now pinned by
+  `PredictionClockRateTests`.
+
+  That offset is not a diagnostic. `Reconcile`'s history path compares at the snapshot's
+  own tick NUMBER, so an offset of n ticks makes the two sides label different moments
+  with the same number and the whole of it comes back as position — a correction at every
+  start and stop, sized by the offset. Live, a client measuring the wire at **55.0 Hz
+  against an advertised 60** (ratio 1.091 — the Windows-performance-counter-against-Linux
+  case `MinimumSkew`'s remarks document) sat at a clock error of **3** and corrected 2–3
+  steps at every transition, with the lead correct and every other counter clean.
+
+  `SnapshotStalenessEstimator` had already fitted that rate as `SkewPpm`, and nothing in
+  `Runtime/` read it. `LocalMovePredictor.SetClockRateScale(float)` now scales the
+  base-tick accumulator onto the server's timebase, and `WorldViewBinder` feeds it the
+  fitted rate before each steer. Feed-forward rather than an integral term: the number is
+  already measured, and an integrator would rediscover it slowly and with wind-up. Only
+  the tick accumulator is scaled — `_sinceInput` and `_elapsed` pace rendering against the
+  real frame clock and are correct in client seconds.
+
+  Guarded three ways: gated on `Staleness.IsUsable` (a fitted line, never the provisional
+  reading, which carries no rate); scales outside the reciprocals of the estimator's own
+  `MinimumSkew`/`MaximumSkew` are **refused rather than clamped** and counted in
+  `RefusedClockRateScales`; non-finite and non-positive values leave the last good scale
+  standing. Default is 1.0, which is exactly the previous behaviour.
+
+- **`PredictionLatencyMeasurement`'s reconciliation guard no longer reads a healthy client
+  as an open loop.** `ReplayedSteps > 0` was written when replaying was the only thing a
+  reconcile could do. `Reconcile` now has two paths, and the history path — compare at the
+  snapshot's own tick, apply the difference, return — leaves nothing to replay, so
+  `ReplayedSteps` stays at zero on a client whose clock tracks the server. Replaying is
+  the FALLBACK. A live run failed claiming prediction "ran open-loop" with 140 reconciles
+  and 0 replayed steps; the loop had closed 140 times. The guard is now
+  `HistoryHits + ReplayedSteps > 0`, and both counters are reported.
+
+- **Correction figures are sampled across the whole run rather than inside the sample
+  windows.** `MaxCorrection` was only read inside a sample's watch loop, which ends when
+  the acknowledgement lands. That was survivable at a ~62 ms window against a 67 ms
+  snapshot interval and stopped being so when the loop closed faster: a live run with a
+  32 ms window reported the forced-divergence configuration — whose entire job is to prove
+  a correction CAN happen — at `max correction 0.0000`, because no snapshot arrived inside
+  any of its twenty windows. The new `CorrectionSampler` is polled from the settle pumps
+  too and is edge-triggered on the reconcile count. The 1.5 s pre-roll stays unsampled:
+  measurement starts when the stimulus does.
+
 - **The prediction clock no longer runs a whole snapshot interval past the server for
   the first eight seconds of every session.** `WorldViewBinder.TargetLeadTicks()` took
   the snapshot's age from `SnapshotStalenessEstimator` and, until that estimator had
@@ -88,6 +138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LocalMovePredictor.SetClockRateScale`, `ClockRateScale`, `RefusedClockRateScales`.
+- `PredictionClockRateTests`, pinning both the droop and its removal — the droop case
+  deliberately included so the fix reads as a removal rather than as a widened tolerance.
+- `[Measure]` now reports `reconciles from history`, `clock rate difference` (ppm),
+  `clock rate correction`, and a `clock error` note that prints the droop the measured
+  rate difference predicts next to the observed error — the two agreeing is what
+  identifies droop and separates it from a clock that is genuinely lost.
 - `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
 - `PredictionLatencyMeasurement`: `CorrectionsAboveOneStep`, `ReconcileCorrections`,
   `StalenessFitted`, `StalenessTicks`, `TargetLeadTicks`, `SnapshotGapTicks`,

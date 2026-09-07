@@ -122,6 +122,66 @@ namespace Cuvara.Netcode.Tests.PlayMode
         // acknowledges the tick — so the input leaves the buffer — having moved somewhere
         // else, and the disagreement is real and permanent.
 
+        /// <summary>
+        /// Records every reconcile's correction, wherever in the run it happens.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Scope, and why it is not the sample window.</b> The correction figures used to
+        /// be sampled only inside a sample's watch loop, which ends the moment the
+        /// acknowledgement lands. That was survivable while the window was ~62 ms and a
+        /// snapshot interval is 67 ms; once the loop closed faster it was not. A live run
+        /// with a 32 ms window reported the forced-divergence configuration at
+        /// <c>max correction 0.0000</c> — the run whose entire job is to prove a correction
+        /// CAN happen — because no snapshot arrived inside any of its twenty windows. A
+        /// falsifiability check that silently measures nothing is worse than none.
+        /// </para>
+        /// <para>
+        /// <b>Edge-triggered on the reconcile count.</b> <c>LastCorrection</c> persists until
+        /// the next reconcile and these loops run at ~900 fps, so sampling per frame counts
+        /// one correction hundreds of times.
+        /// </para>
+        /// </remarks>
+        private sealed class CorrectionSampler
+        {
+            private readonly Run _run;
+            private readonly LocalMovePredictor _predictor;
+            private int _lastCountedReconcile = -1;
+
+            public CorrectionSampler(Run run, LocalMovePredictor predictor)
+            {
+                _run = run;
+                _predictor = predictor;
+            }
+
+            public void Poll()
+            {
+                if (_predictor == null || _predictor.Reconciles == _lastCountedReconcile)
+                {
+                    return;
+                }
+
+                _lastCountedReconcile = _predictor.Reconciles;
+
+                if (_predictor.LastCorrection <= 0f)
+                {
+                    return;
+                }
+
+                // Raw, sized afterwards: ExpectedStepFromWire needs the wire's tick-rate
+                // estimate, which is still warming up while the first samples run. Sizing
+                // here would judge the early corrections against a yardstick that does not
+                // exist yet and silently skip them — the early ones being exactly the ones a
+                // warm-up defect produces.
+                _run.ReconcileCorrections.Add(_predictor.LastCorrection);
+
+                if (_predictor.LastCorrection > _run.MaxCorrection)
+                {
+                    _run.MaxCorrection = _predictor.LastCorrection;
+                }
+            }
+        }
+
         private sealed class Sample
         {
             public float InputToVisibleMs;
@@ -300,6 +360,36 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Base ticks the prediction clock was told to run ahead of the newest snapshot.</summary>
             /// <inheritdoc cref="StalenessFitted"/>
             public int TargetLeadTicks;
+
+            /// <summary>Reconciles answered by comparing at the snapshot's own tick.</summary>
+            /// <remarks>
+            /// With <see cref="ReplayedSteps"/>, this is the evidence that the loop closed.
+            /// A high hit rate is the HEALTHY reading — the history path is the accurate one
+            /// and replaying is its fallback — so a run of all hits and no replays says the
+            /// client's clock is tracking, not that nothing happened.
+            /// </remarks>
+            public int HistoryHits;
+
+            /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
+            /// <inheritdoc cref="HistoryHits"/>
+            public int HistoryMisses;
+
+            /// <summary>Fitted client/server clock rate difference, parts per million.</summary>
+            /// <remarks>
+            /// <para>
+            /// A few hundred ppm is two ordinary crystals. Tens of thousands is a real rate
+            /// difference — the Windows performance counter against the Linux clock the
+            /// server ticks on measures ~103 000 here — and it matters because the tick
+            /// steering is proportional: with no rate correction it settles at a standing
+            /// offset of <c>drift / (gain * snapshotHz)</c> rather than removing it, and the
+            /// reconcile returns that offset as position.
+            /// </para>
+            /// </remarks>
+            public double SkewPpm;
+
+            /// <summary>Rate correction the predictor's base-tick clock is running with.</summary>
+            /// <remarks>1.0 means none is applied — the pre-fix behaviour.</remarks>
+            public float ClockRateScale;
 
             /// <summary>Base ticks between consecutive snapshots, measured off the wire.</summary>
             /// <remarks>
@@ -827,11 +917,32 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Assert.That(withPrediction.PendingPeak, Is.GreaterThan(0),
                 "no input was ever pending acknowledgement — inputs are not reaching the " +
                 "buffer, so nothing was predicted ahead of the server.");
-            Assert.That(withPrediction.ReplayedSteps, Is.GreaterThan(0),
-                "no input was ever replayed after a reconcile. Prediction ran open-loop: " +
-                "it never rewound to an authoritative position, so its agreement with the " +
-                "server is untested and this measurement proves nothing about " +
-                "reconciliation.");
+            // WAS `ReplayedSteps > 0`, AND THAT BECAME WRONG WITHOUT BECOMING FALSE.
+            //
+            // It was written when replaying was the only thing a reconcile could do, and it
+            // asked the right question — did the loop close? — through the only counter that
+            // then answered it. Reconcile now has two paths. The history path compares the
+            // client's own recorded position AT THE SNAPSHOT'S TICK against the authoritative
+            // one, applies the difference, and returns: like for like, so there is nothing
+            // left to replay and ReplayedSteps stays at zero. Replaying is the FALLBACK, for
+            // when the history does not reach back far enough.
+            //
+            // So the old guard reads "the fallback fired at least once", and a client whose
+            // clock tracks the server perfectly hits the history path every time and trips
+            // it. A live run did exactly that: 140 reconciles, 0 replayed steps, and the
+            // measurement failed claiming prediction "ran open-loop" while the loop had in
+            // fact closed 140 times.
+            //
+            // What closes the loop is the COMPARISON, whichever path made it.
+            Assert.That(withPrediction.HistoryHits + withPrediction.ReplayedSteps,
+                Is.GreaterThan(0),
+                $"the reconcile never compared against an authoritative position: " +
+                $"{withPrediction.Reconciles} reconciles, {withPrediction.HistoryHits} " +
+                $"answered from the history and {withPrediction.ReplayedSteps} steps " +
+                "replayed. Prediction ran open-loop, so its agreement with the server is " +
+                "untested and this measurement proves nothing about reconciliation. " +
+                "(Zero REPLAYED steps alone is not that: it is the normal reading when the " +
+                "history reaches every snapshot, which is what a client in step produces.)");
 
             // NOT asserted: MaxCorrection > 0 on the healthy run.
             //
@@ -1226,9 +1337,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             long tick = 0;
             var lastSendAt = 0.0;
 
-            // Last value of predictor.Reconciles that CorrectionsAboveOneStep has already
-            // judged. See the counting site for why an edge is required.
-            var lastCountedReconcile = -1;
+            // Polled from BOTH loops — the sample windows and the settle pumps — because a
+            // reconcile that lands between windows is still a reconcile. See CorrectionSampler.
+            var corrections = new CorrectionSampler(run, predictor);
 
             // double, not float, and deliberately.
             //
@@ -1282,6 +1393,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
             float dt = 1f / LiveBackendConfig.TickRate;
 
             // Let the world arrive and the local entity spawn before measuring.
+            // Deliberately NOT sampled for corrections: measurement starts when the
+            // stimulus does. This pre-roll is "let the world arrive and the entity spawn",
+            // and a reconcile that folds in a spawn position is not a disagreement about
+            // prediction.
             await PumpAsync(client, binder, localId, seconds: 1.5f, ct);
 
             // PumpAsync runs its own frame clock and has already advanced this span.
@@ -1296,7 +1411,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     tick++;
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
-                    await PumpAsync(client, binder, localId, dt, ct);
+                    await PumpAsync(client, binder, localId, dt, ct, corrections);
                     lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
 
@@ -1445,27 +1560,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     if (predictor != null)
                     {
                         run.PendingPeak = Math.Max(run.PendingPeak, predictor.PendingCount);
-                        run.MaxCorrection = Math.Max(run.MaxCorrection, predictor.LastCorrection);
-
-                        // Edge-triggered on the reconcile, not level-triggered on the frame:
-                        // LastCorrection persists until the next Reconcile, and this loop
-                        // runs at ~900 fps, so sampling it per frame would count one
-                        // correction hundreds of times. Reconciles is the edge.
-                        if (predictor.Reconciles != lastCountedReconcile)
-                        {
-                            lastCountedReconcile = predictor.Reconciles;
-
-                            if (predictor.LastCorrection > 0f)
-                            {
-                                // Recorded raw and sized afterwards: ExpectedStepFromWire
-                                // needs the wire's tick-rate estimate, which is still warming
-                                // up while the first samples run. Sizing here would judge the
-                                // early corrections against a yardstick that does not exist
-                                // yet and silently skip them — the early ones being exactly
-                                // the ones the warm-up defect produced.
-                                run.ReconcileCorrections.Add(predictor.LastCorrection);
-                            }
-                        }
+                        corrections.Poll();
                     }
 
                     // The sampling loop is a frame loop too, and it is the one whose
@@ -1611,6 +1706,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.StalenessTicks = binder.Staleness.StalenessTicks;
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
+            run.SkewPpm = binder.Staleness.SkewPpm;
+            run.ClockRateScale = predictor?.ClockRateScale ?? 1f;
             run.TickErrorTicks = predictor?.TickError ?? 0;
 
             if (predictor != null)
@@ -1619,6 +1716,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.Reconciles = predictor.Reconciles;
                 run.Snaps = predictor.Snaps;
                 run.SmoothedCorrections = predictor.SmoothedCorrections;
+                run.HistoryHits = predictor.HistoryHits;
+                run.HistoryMisses = predictor.HistoryMisses;
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
                 run.IntegrationTimestepMs = predictor.IntegrationTimestep * 1000f;
                 run.SmoothingSpanMs = predictor.EffectiveSmoothingSpan * 1000f;
@@ -1646,7 +1745,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         /// <summary>Drives the binder for a wall-clock duration, as a frame loop would.</summary>
         private static async UniTask PumpAsync(
-            NetworkClient client, WorldViewBinder binder, string localId, float seconds, CancellationToken ct)
+            NetworkClient client, WorldViewBinder binder, string localId, float seconds,
+            CancellationToken ct, CorrectionSampler corrections = null)
         {
             double until = Time.realtimeSinceStartupAsDouble + seconds;
             double last = Time.realtimeSinceStartupAsDouble;
@@ -1654,6 +1754,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             while (Time.realtimeSinceStartupAsDouble < until)
             {
                 binder.Tick(client.World, localId);
+                corrections?.Poll();
 
                 // Per frame, not per snapshot. Snapshot processing advances prediction
                 // once per arriving snapshot, which is the world rate; a client that
@@ -1683,7 +1784,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  predicting               {run.Predicting}\n" +
                 $"  pending peak             {run.PendingPeak}\n" +
                 $"  reconciles               {run.Reconciles}\n" +
-                $"  replayed steps           {run.ReplayedSteps}   (zero is normal when nothing was pending)\n" +
+                $"  replayed steps           {run.ReplayedSteps}   " +
+                    "(zero is the HEALTHY reading — replaying is the fallback for when the\n" +
+                "                             history does not reach the snapshot's tick; see the next line)\n" +
+                $"  reconciles from history  {run.HistoryHits} hit, {run.HistoryMisses} missed" +
+                    ((run.HistoryHits + run.ReplayedSteps) == 0 && run.Reconciles > 0
+                        ? "   <<< NOTHING closed the loop"
+                        : "   <<< THE LOOP CLOSING — compared at the snapshot's own tick") + "\n" +
                 $"  corrections smoothed     {run.SmoothedCorrections}" +
                     "   (ANY nonzero error, over every reconcile — a floor, not a fault:\n" +
                 "                             ~2 per sample is what two free-running clocks cost\n" +
@@ -1740,10 +1847,17 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     LeadNote(run) + "\n" +
                 $"  snapshot gap measured    {run.SnapshotGapTicks} base ticks   " +
                     "(a lead equal to this is the warm-up fallback, not a measurement)\n" +
+                $"  clock rate difference    {run.SkewPpm:F0} ppm" +
+                    (Math.Abs(run.SkewPpm) > 10_000
+                        ? "   <<< the two clocks run at materially different rates\n" +
+                          "                             (a few hundred ppm is two crystals; this is the machine)"
+                        : "   (a few hundred is two ordinary crystals)") + "\n" +
+                $"  clock rate correction    {run.ClockRateScale:F4}x" +
+                    (Math.Abs(run.ClockRateScale - 1f) < 1e-4f
+                        ? "   (none applied — the clock runs at the client's own rate)"
+                        : "   (server seconds per client second, from the fitted line)") + "\n" +
                 $"  clock error (last steer) {run.TickErrorTicks} base ticks" +
-                    (Math.Abs(run.TickErrorTicks) > 2
-                        ? "   <<< the clock is not tracking the steering target"
-                        : "   (client base tick minus the target; 0 is in step)") + "\n" +
+                    ClockErrorNote(run) + "\n" +
                 $"  --- smoothness (per render frame, while moving) ---\n" +
                 $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
                     "high means the avatar teleports once per input and is frozen between\n" +
@@ -2015,6 +2129,50 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// dominant in a short one: <c>SnapshotStalenessEstimator</c> needs ~8 s of snapshots
         /// before it can fit a rate, and a 20-sample run is ~10 s end to end.
         /// </remarks>
+        /// <summary>
+        /// Explains a standing clock error, which is otherwise read as a transient.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <see cref="LocalMovePredictor.SteerToServerTick"/> is proportional and has no
+        /// integral term, so against a constant rate difference it settles at a standing
+        /// error rather than removing it: <c>drift / (gain * snapshotHz)</c>, which at the
+        /// default gain of 0.1 and 15 snapshots a second is <c>drift / 1.5</c>. The note
+        /// prints that predicted figure next to the measured one, because the two agreeing is
+        /// what identifies droop and separates it from a clock that is genuinely lost.
+        /// </para>
+        /// <para>
+        /// It matters because the reconcile compares at the snapshot's own tick NUMBER: an
+        /// offset of n ticks makes the two sides label different moments with the same number
+        /// and the whole of it comes back as position, at every start and stop.
+        /// </para>
+        /// </remarks>
+        private static string ClockErrorNote(Run run)
+        {
+            if (Math.Abs(run.TickErrorTicks) <= 1)
+            {
+                return "   (client base tick minus the target; 0 is in step)";
+            }
+
+            // drift in ticks/sec, from the fitted rate difference against the base rate
+            double drift = run.SkewPpm / 1e6 * run.TickRateInUse;
+            double snapshotHz = run.SnapshotGapTicks > 0
+                ? run.TickRateInUse / (double)run.SnapshotGapTicks
+                : 0.0;
+            double droop = snapshotHz > 0 ? drift / (0.1 * snapshotHz) : 0.0;
+
+            if (Math.Abs(droop) >= 1.0 && Math.Sign(droop) == Math.Sign(run.TickErrorTicks))
+            {
+                return $"   <<< PROPORTIONAL DROOP, not a lost clock: a {run.SkewPpm:F0} ppm\n" +
+                       $"                             rate difference drifts {drift:F1} ticks/s and " +
+                       $"steering at gain 0.1\n" +
+                       $"                             x {snapshotHz:F0} Hz settles at {droop:F1}. " +
+                       "Feed the fitted rate to the clock.";
+            }
+
+            return "   <<< the clock is not tracking the steering target";
+        }
+
         private static string LeadNote(Run run)
         {
             if (run.StalenessFitted)
