@@ -1245,7 +1245,16 @@ namespace Cuvara.Netcode.Prediction
             // 60 Hz base tick. Stepping here is what closes that.
             if (_dt > 0f)
             {
-                _tickAccumulator += deltaTime;
+                // Scaled onto the SERVER's timebase before it becomes base ticks. See
+                // SetClockRateScale: without this the tick counter advances at the client
+                // machine's rate, and the phase steering is left to fight a rate difference
+                // it cannot win against, because it has no integral term.
+                //
+                // Only the tick accumulator is scaled. _sinceInput and _elapsed above pace
+                // the RENDERING of a step against the real frame clock and are correct in
+                // client seconds; a few percent there is invisible, while a few percent here
+                // is a standing offset of whole ticks.
+                _tickAccumulator += deltaTime * _clockRateScale;
 
                 // A SINGLE FRAME MAY NOT MANUFACTURE AN UNBOUNDED NUMBER OF TICKS.
                 //
@@ -1503,6 +1512,99 @@ namespace Cuvara.Netcode.Prediction
                 _tickAccumulator = -_dt;
             }
         }
+
+        /// <summary>
+        /// Client-to-server clock rate correction applied to the base-tick clock. 1 until
+        /// <see cref="SetClockRateScale"/> is called, which is exactly today's behaviour.
+        /// </summary>
+        private float _clockRateScale = 1f;
+
+        /// <summary>The scale in force, for diagnostics. 1 means no correction is applied.</summary>
+        public float ClockRateScale => _clockRateScale;
+
+        /// <summary>
+        /// Narrowest and widest rate correction accepted, as a ratio of server time to
+        /// client time.
+        /// </summary>
+        /// <remarks>
+        /// The reciprocals of <see cref="SnapshotStalenessEstimator.MaximumSkew"/> and
+        /// <see cref="SnapshotStalenessEstimator.MinimumSkew"/>, deliberately: a scale this
+        /// class would refuse is one that estimator would not have fitted in the first place,
+        /// and two bounds that can disagree are two bounds one of which is wrong.
+        /// </remarks>
+        private const float MinClockRateScale = 1f / 1.33f;
+
+        /// <inheritdoc cref="MinClockRateScale"/>
+        private const float MaxClockRateScale = 1f / 0.75f;
+
+        /// <summary>
+        /// Corrects the rate the base-tick clock runs at, given how fast the client's clock
+        /// runs against the server's tick stream.
+        /// </summary>
+        /// <param name="scale">
+        /// Server seconds per client second — the reciprocal of the fitted skew. 1 disables
+        /// the correction. Values outside
+        /// <see cref="MinClockRateScale"/>..<see cref="MaxClockRateScale"/>, and anything
+        /// non-finite or non-positive, are ignored rather than clamped: a scale that far out
+        /// is a bad measurement, and steering the simulation onto a clamped bad measurement
+        /// is worse than not steering onto it at all.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>What this is for, measured.</b> <see cref="SteerToServerTick"/> is proportional
+        /// and has no integral term, so against a constant rate difference it settles at a
+        /// standing error rather than removing it — ordinary proportional droop, of exactly
+        /// <c>drift / (gain * snapshotHz)</c>. At the default gain of 0.1 and 15 snapshots a
+        /// second that is <c>drift / 1.5</c>: a client clock 9% fast against a 60 Hz server
+        /// gains 5.4 ticks a second and settles <b>3.6 base ticks</b> ahead, permanently.
+        /// Reproduced across 1.00x to 1.103x and matching the formula to two decimals.
+        /// </para>
+        /// <para>
+        /// That standing offset is not a diagnostic. The reconcile's history path compares at
+        /// the snapshot's own tick number, so an offset of n ticks makes the two sides label
+        /// different moments with the same number and the whole of it comes back as position
+        /// — a correction at every start and stop, sized by the offset. Live, a client
+        /// measuring the wire at <b>55.0 Hz against an advertised 60</b> (a ratio of 1.091,
+        /// the Windows-performance-counter-against-Linux case
+        /// <see cref="SnapshotStalenessEstimator.MinimumSkew"/> documents) sat at a clock
+        /// error of <b>3</b> and corrected by 2 to 3 steps at every transition.
+        /// </para>
+        /// <para>
+        /// <b>Feed-forward, not an integrator.</b> The rate is already measured —
+        /// <see cref="SnapshotStalenessEstimator.SkewPpm"/> fits it and, until now, nothing
+        /// in the package read it. Handing the measurement to the clock removes the drift the
+        /// phase loop was drooping against, which leaves that loop doing what it is for:
+        /// phase, not rate. An integral term would also close the droop, and would do it by
+        /// rediscovering, slowly and with wind-up, a number the estimator already has.
+        /// </para>
+        /// <para>
+        /// <b>Call it only from a FITTED line.</b> An unfitted rate is noise, and this scales
+        /// the simulation clock — the failure mode the estimator's own remarks record twice,
+        /// where a rate wired into the steering ran the reading to 613 ticks. The caller's
+        /// gate is <see cref="SnapshotStalenessEstimator.IsUsable"/>.
+        /// </para>
+        /// </remarks>
+        public void SetClockRateScale(float scale)
+        {
+            if (!float.IsFinite(scale) || scale <= 0f)
+            {
+                return;
+            }
+
+            if (scale < MinClockRateScale || scale > MaxClockRateScale)
+            {
+                RefusedClockRateScales++;
+                return;
+            }
+
+            _clockRateScale = scale;
+        }
+
+        /// <summary>
+        /// Rate corrections refused as out of range. Nonzero means something is offering a
+        /// rate the estimator's own bounds would not have fitted.
+        /// </summary>
+        public int RefusedClockRateScales { get; private set; }
 
         /// <summary>Fraction of the tick error corrected per steering call.</summary>
         private const float SteerGain = 0.1f;

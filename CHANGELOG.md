@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-08
+
+### Fixed
+
+- **The prediction clock no longer runs a whole snapshot interval past the server for the
+  first eight seconds of every session.** `WorldViewBinder.TargetLeadTicks()` took the
+  snapshot's age from `SnapshotStalenessEstimator` and, until that estimator had fitted a
+  rate, fell back to a derived one snapshot interval. A rate is a slope and cannot honestly
+  be fitted over a short baseline, so `IsUsable` cannot turn true early; measured against a
+  15 Hz snapshot stream the first fit lands **8.2 s after join** — epoch one only sets an
+  anchor, and two consecutive two-second epochs cannot span the four seconds a fit needs.
+
+  On localhost the derived fallback is **4 base ticks against a real age of 0.06**. The lead
+  steers a clock rather than reporting one, so that error makes a tick number stop naming the
+  same moment on the two sides, and `LocalMovePredictor.Reconcile`'s history path — which
+  indexes the client's own history by the *server's* tick number — returns the whole of it as
+  a positional correction of **0.3333 world units, 4.00 steps** at every start and stop. A
+  live run read 162 reconciles, 36 corrections and a max correction of 4.00 steps with both
+  sides agreeing on 60 Hz, `TickRateDisagrees` false and every other counter clean — the
+  signature of a 4x tick-rate mismatch, produced by no rate mismatch at all.
+
+  `SnapshotStalenessEstimator` now offers the age *provisionally* from
+  `MinimumProvisionalSamples` snapshots (~0.2 s) onward, as the height above a running
+  unit-rate floor, flagged by the new `HasEstimate` alongside the unchanged `IsUsable`. The
+  age does not need the rate: over a few seconds the envelope's slope is one to within a few
+  hundred ppm, 0.02 base ticks over ten seconds against the four it replaces. The rate fit,
+  its baseline requirement and the test that pins it are untouched.
+
+  The binder takes `min(provisional, derived)` while the line is unfitted and believes a
+  fitted reading outright. The asymmetry is not a heuristic: an unfitted rate can only drift
+  the reading upward, so below the derived figure the reading is evidence and above it it is
+  drift. Taking the smaller is never worse than the fallback it replaces.
+
+  Measured live: **max correction 4.00 steps to 2.00**, and `TARGET LEAD` from 4 to 0 off a
+  fitted line.
+
+- **The base-tick clock now runs on the server's timebase, using the rate already fitted.**
+  `SteerToServerTick` is a proportional controller with no integral term, so against a
+  constant clock-rate difference it settles at a standing tick offset instead of removing it
+  — ordinary droop, of exactly `drift / (gain * snapshotHz)`. At gain 0.1 and 15 snapshots a
+  second that is `drift / 1.5`: a client clock 9% fast against a 60 Hz server gains 5.4 ticks
+  a second and sits **3.6 base ticks** ahead, permanently. Reproduced across 1.00x–1.103x,
+  matching the formula to two decimals, and pinned by `PredictionClockRateTests`.
+
+  That offset is not a diagnostic. `Reconcile`'s history path compares at the snapshot's own
+  tick NUMBER, so an offset of n ticks makes the two sides label different moments with the
+  same number and the whole of it comes back as position. Live, a client measuring the wire
+  at **55.0 Hz against an advertised 60** (ratio 1.091 — the Windows-performance-counter-
+  against-Linux case `MinimumSkew`'s remarks document) sat at a clock error of **3**.
+
+  `SnapshotStalenessEstimator` had already fitted that rate as `SkewPpm` and nothing in
+  `Runtime/` read it. `LocalMovePredictor.SetClockRateScale(float)` now scales the base-tick
+  accumulator onto the server's timebase and `WorldViewBinder` feeds it the fitted rate
+  before each steer. Feed-forward rather than an integral term: the number is already
+  measured, and an integrator would rediscover it slowly and with wind-up. Only the tick
+  accumulator is scaled — `_sinceInput` and `_elapsed` pace rendering against the real frame
+  clock and are correct in client seconds.
+
+  Gated on `Staleness.IsUsable`, never the provisional reading, which carries no rate at all;
+  scales outside the reciprocals of the estimator's own `MinimumSkew`/`MaximumSkew` are
+  **refused rather than clamped** and counted in `RefusedClockRateScales`; non-finite and
+  non-positive values leave the last good scale standing. The default is 1.0 — exactly the
+  previous behaviour.
+
+  Measured live: **clock error 3 to -1**, with `clock rate correction` reading 0.9170x
+  against a fitted 90 558 ppm.
+
+### Changed
+
+- **`PredictionLatencyMeasurement` bounds the correction MAGNITUDE instead of counting
+  corrections**, and reports the clock offset that causes one.
+  `SmoothedCorrections <= Samples / 4` was unreachable by correct code — it compared a run
+  total over ~162 reconciles against a budget worded per sample, printing "36 of 20 samples"
+  — and it misdirected twice, both times reading a high count with clean rate counters as a
+  "4x tick-rate mismatch". The stimulus is 20 isolated impulses, so 40 start/stop
+  transitions, and two free-running clocks at the same rate disagree by ±1 base tick about
+  which tick a transition lands on: one step of correction at each is the floor. It is
+  replaced by `MaxCorrection / ExpectedStepFromWire <= 1.5` steps plus
+  `CorrectionsAboveOneStep <= 2`, sized by the rate measured off the wire because a client on
+  the wrong rate sizes its own yardstick by that rate.
+
+- **The reconciliation guard no longer reads a healthy client as an open loop.**
+  `ReplayedSteps > 0` was written when replaying was the only thing a reconcile could do; the
+  history path compares at the snapshot's own tick and returns, leaving nothing to replay. A
+  live run failed claiming prediction "ran open-loop" with 140 reconciles and 0 replayed
+  steps. The guard is now `HistoryHits + ReplayedSteps > 0`.
+
+- **Correction figures are sampled across the whole run**, not inside the sample windows.
+  Once the acknowledgement loop closed faster than a snapshot interval, the
+  forced-divergence configuration — whose entire job is to prove a correction CAN happen —
+  reported `max correction 0.0000`, because no snapshot arrived inside any of its windows.
+
+- **The report gained the numbers that identify a clock offset rather than its symptoms**:
+  `reconciles from history`, `SNAPSHOT AGE measured`, `TARGET LEAD in use`, `snapshot gap
+  measured`, `round trip reported`, `ACK FLOOR`, `clock rate difference` (ppm), `clock rate
+  correction`, and a `clock error` note that prints the droop the measured rate difference
+  predicts beside the observed error. The harness also sets `binder.RoundTripMs`, which every
+  real consumer does and it never did.
+
+### Known
+
+- **`InputToVisibleMovement_WithAndWithoutPrediction` is `[Ignore]`d with every assertion
+  standing: the steering target does not yet cover `uplink + snapshot age`.** The client
+  applies an input at its own base tick and the server applies it at the tick its packet is
+  drained on, so the lead must cover the uplink; that plus the snapshot's minimum age is
+  ~1 base tick on localhost and comes back as position at every start and stop. The residual
+  is **2.00 steps against a floor of 1.00**, so the 1.5-step budget is correct and must not be
+  widened — a bound that accepted 2.00 would accept the defect it measures. Every other
+  counter reads clean, because a lower-envelope fit absorbs the constant by construction,
+  which is why this has twice been misdiagnosed as a tick-rate mismatch. Follow-up:
+  `AckLatencyEstimator` on branch **`feat/ack-latency-estimator`** — taken off this branch
+  because it did not converge inside the measurement's ~9 s window (0.14 base ticks against
+  the harness's own observed minimum of 0.68) and moved the clock error from -1 to -2.
+
+### Added
+
+- `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
+- `LocalMovePredictor.SetClockRateScale`, `ClockRateScale`, `RefusedClockRateScales`.
+- `PredictionClockRateTests`, pinning both the droop and its removal — the droop case
+  deliberately included so the fix reads as a removal rather than a widened tolerance.
+- `WorldViewBinderLeadTests`, pinning the steering target directly rather than through a
+  downstream symptom; the defect it catches was invisible on every other counter.
+- `InternalsVisibleTo("Cuvara.Netcode.Tests.PlayMode")`, so the measurement can report
+  `WorldViewBinder.TargetLeadTicks()`. Diagnostic only.
+
 ## [0.32.0] - 2026-09-07
 
 ### Fixed
