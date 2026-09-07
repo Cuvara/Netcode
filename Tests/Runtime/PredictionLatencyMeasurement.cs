@@ -374,6 +374,36 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="HistoryHits"/>
             public int HistoryMisses;
 
+            /// <summary>Round trip the session reported, milliseconds.</summary>
+            public long RoundTripMs;
+
+            /// <summary>
+            /// Smallest input-to-acknowledgement time seen, in base ticks — an upper bound on
+            /// the pipeline constant the steering target is still missing.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>What it bounds.</b> The client applies an input at its own tick; the server
+            /// applies it at the tick its packet is drained on, and reports it on a snapshot
+            /// that is already old when it is read. The two label the same input with the same
+            /// tick number only if the client's clock leads the server's by the uplink delay,
+            /// which makes the required steering target <c>uplink + snapshot age</c>. Both
+            /// terms are CONSTANTS of the pipeline, and
+            /// <see cref="SnapshotStalenessEstimator"/> fits a lower envelope, which absorbs
+            /// constants by construction — so neither appears in <see cref="StalenessTicks"/>
+            /// and no counter here can see them directly.
+            /// </para>
+            /// <para>
+            /// This is the closest thing available. One measurement is
+            /// <c>uplink + wait for the next snapshot + age</c>; the wait is what varies, so
+            /// the MINIMUM over the samples is an upper bound on <c>uplink + age</c> and
+            /// approaches it as some sample catches a snapshot about to be sent. Live it read
+            /// <b>21.3 ms = 1.28 base ticks</b> against a residual correction of 2.00 steps,
+            /// where the mechanism predicts <c>1 (clock quantisation) + (uplink + age - lead)</c>.
+            /// </para>
+            /// </remarks>
+            public float AckFloorTicks;
+
             /// <summary>Fitted client/server clock rate difference, parts per million.</summary>
             /// <remarks>
             /// <para>
@@ -1157,7 +1187,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "that the rates differ. Read TARGET LEAD and SNAPSHOT AGE in the report above: " +
                 $"the lead was {withPrediction.TargetLeadTicks} base ticks against a measured " +
                 $"age of {withPrediction.StalenessTicks:F2}, staleness " +
-                $"{(withPrediction.StalenessFitted ? "fitted" : "NOT fitted — the warm-up path")}.");
+                $"{(withPrediction.StalenessFitted ? "fitted" : "NOT fitted — the warm-up path")}, " +
+                $"clock error {withPrediction.TickErrorTicks}, ACK FLOOR " +
+                $"{withPrediction.AckFloorTicks:F2} base ticks. " +
+                "With the clock in step and the lead from a fitted line, the term left is the " +
+                "PIPELINE CONSTANT: the client applies an input at its own tick and the server " +
+                "applies it at the tick its packet is drained on, so the lead must be " +
+                "uplink + snapshot age — both invisible to a lower-envelope fit, which absorbs " +
+                "constants by construction. Expect ~1 step of clock quantisation plus that " +
+                "constant, less whatever the lead already supplies.");
 
             // The wider net, per transition rather than per run. One step is the floor, so
             // this counts only the reconciles that are a disagreement; 2 leaves room for a
@@ -1471,6 +1509,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 while (Time.realtimeSinceStartupAsDouble - t0 < SampleTimeoutSeconds &&
                        !(sawVisible && sawAuthoritative))
                 {
+                    // As DOTSNetworkBridge does every frame. The harness never set this, so
+                    // TargetLeadTicks' round-trip term was permanently zero here and the
+                    // measurement was not exercising the arithmetic a real client runs.
+                    binder.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
                     binder.Tick(client.World, localId);
 
                     // One reading per render frame: how far the avatar moved since the
@@ -1707,6 +1749,13 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
             run.SkewPpm = binder.Staleness.SkewPpm;
+            run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
+
+            var acked = run.Samples.Where(x => !x.AuthoritativeTimedOut)
+                .Select(x => x.InputToAuthoritativeMs).ToList();
+            run.AckFloorTicks = acked.Count > 0 && run.TickRateInUse > 0
+                ? acked.Min() / 1000f * run.TickRateInUse
+                : float.NaN;
             run.ClockRateScale = predictor?.ClockRateScale ?? 1f;
             run.TickErrorTicks = predictor?.TickError ?? 0;
 
@@ -1753,6 +1802,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             while (Time.realtimeSinceStartupAsDouble < until)
             {
+                binder.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
                 binder.Tick(client.World, localId);
                 corrections?.Poll();
 
@@ -1847,6 +1897,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     LeadNote(run) + "\n" +
                 $"  snapshot gap measured    {run.SnapshotGapTicks} base ticks   " +
                     "(a lead equal to this is the warm-up fallback, not a measurement)\n" +
+                $"  round trip reported      {run.RoundTripMs} ms   " +
+                    (run.RoundTripMs == 0
+                        ? "<<< the session has reported none; the lead's round-trip term is 0"
+                        : "(the lead adds half of this)") + "\n" +
+                $"  ACK FLOOR                {run.AckFloorTicks:F2} base ticks   " +
+                    "<<< upper bound on uplink + snapshot age, the term the\n" +
+                "                             lead is still missing. Residual correction should be\n" +
+                "                             ~1 step (clock quantisation) + this, less the lead.\n" +
                 $"  clock rate difference    {run.SkewPpm:F0} ppm" +
                     (Math.Abs(run.SkewPpm) > 10_000
                         ? "   <<< the two clocks run at materially different rates\n" +

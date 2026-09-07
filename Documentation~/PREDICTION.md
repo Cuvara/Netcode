@@ -155,6 +155,40 @@ counted in `RefusedClockRateScales`.
 A ratio near 1.10 is not exotic: it is the Windows performance counter against the Linux
 clock the server ticks on, and it is what the development machine measures.
 
+### The lead must cover the pipeline, not just the snapshot's age
+
+The client applies an input at its **own** tick T. The server applies it at the tick its
+packet is drained on — `InputHandler` uses the stamped tick only for ordering and the ack,
+never to place the step in time. So the two label the same input with the same tick number
+only if the client's clock leads the server's by the uplink delay. Steering to
+`snapshotTick + lead` puts the client `lead - age` ticks ahead of the server, so:
+
+```
+required lead  =  uplink  +  snapshot age
+residual correction (steps)  =  1  +  (uplink + age - lead)
+```
+
+where the 1 is the ±1 base tick two free-running clocks cost at a transition.
+
+**Neither term is visible to `SnapshotStalenessEstimator`.** It fits a *lower envelope*, so
+it reports only the variable delay above the floor; the constant part is absorbed into the
+fitted offset along with the clocks' origins. `StalenessTicks` reads ~0.02 whether the
+pipeline constant is 0 or 2 ticks, and the steering error reads 0 throughout. That is why a
+residual here survives with every other counter clean.
+
+`TargetLeadTicks` therefore takes the constant from the caller, as `RoundTripMs * 0.5`. Set
+`binder.RoundTripMs` every frame — `DOTSNetworkBridge` does — or that term is zero. Be aware
+that the heartbeat round trip measures the **socket**, not the server's staged snapshot write
+or the input drain quantisation, so it under-reports the constant: on localhost it is ~1 ms
+where the missing term measures ~17 ms.
+
+The measurement to prefer, not yet implemented, is a lower envelope over **input-to-
+acknowledgement** latency. The client knows when it sent input tick N and when it first saw a
+snapshot with `ack_tick >= N`; that interval is `uplink + wait for the next snapshot + age`,
+the wait is what varies, and its minimum over many samples converges on `uplink + age` — the
+exact quantity, with no new wire traffic, using the same minimum-filter argument the staleness
+estimator already makes. `PredictionLatencyMeasurement` reports that minimum as **ACK FLOOR**.
+
 ### Reading a correction figure
 
 Size a correction by the tick rate **measured off the wire**, never by the one the client
@@ -172,6 +206,7 @@ causes is how big each correction is:
 |---|---|
 | ~1 step | the ±1 base tick two free-running clocks cost at a transition. The floor. |
 | ~`SnapshotTickGap` steps (4 at 60/15) | the prediction clock is steered to the wrong offset — compare `TARGET LEAD` against `SNAPSHOT AGE` |
+| ~1 + ACK FLOOR steps | the pipeline constant above — the lead is not covering uplink + age |
 | a ratio of the two rates | a genuine tick-rate mismatch; `TickRateEstimator.Disagrees` should be true as well |
 | `clock error` steps, with `clock rate difference` large | proportional droop against a clock-rate difference — check `clock rate correction` is not 1.0 |
 

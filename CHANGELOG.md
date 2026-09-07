@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RefusedClockRateScales`; non-finite and non-positive values leave the last good scale
   standing. Default is 1.0, which is exactly the previous behaviour.
 
+- **`PredictionLatencyMeasurement` now sets `binder.RoundTripMs`.** Every real consumer does
+  (`DOTSNetworkBridge` sets it each frame); the harness never did, so `TargetLeadTicks`'
+  round-trip term was permanently zero there and the measurement was not exercising the
+  arithmetic a shipped client runs. It also reports the round trip and a new **ACK FLOOR** —
+  the smallest input-to-acknowledgement time, in base ticks — which upper-bounds the
+  pipeline constant the steering target is still missing. See PREDICTION.md.
+
 - **`PredictionLatencyMeasurement`'s reconciliation guard no longer reads a healthy client
   as an open loop.** `ReplayedSteps > 0` was written when replaying was the only thing a
   reconcile could do. `Reconcile` now has two paths, and the history path — compare at the
@@ -136,6 +143,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is why the same defect was diagnosed as a tick-rate mismatch twice. `corrections smoothed`
   is kept but re-labelled as the floor it is, with the asserted count printed beneath it.
 
+### Known
+
+- **A residual correction of ~1 base tick above the quantisation floor remains, and it is a
+  pipeline constant no measurement in the package can currently see.** The client applies an
+  input at its own tick; the server applies it at the tick its packet is drained on
+  (`InputHandler` uses the stamped tick only for ordering and the ack) and reports it on a
+  snapshot that is already old when it is read. The two label the same input with the same
+  tick number only if the client's clock leads the server's by the uplink delay, which makes
+  the required steering target `uplink + snapshot age`.
+
+  Both terms are constants, and `SnapshotStalenessEstimator` fits a **lower envelope**, which
+  absorbs constants by construction — so neither appears in `StalenessTicks`, and the
+  steering error reads 0 throughout. Modelled by varying the two independently: the residual
+  is `1 step (clock quantisation) + (uplink + age - lead)` exactly, and uplink and age are
+  interchangeable in their effect, so this measurement identifies their SUM and cannot
+  apportion it. Live: 2.00 steps with an ACK FLOOR of 1.28 base ticks.
+
+  `TargetLeadTicks` already expects the caller to supply the constant — its remarks say the
+  one-way delay "sits inside the fitted offset ... and the caller must supply it" — as
+  `RoundTripMs * 0.5`. Two problems: the harness never set `RoundTripMs` (now fixed), and
+  the heartbeat round trip measures the socket, not the server's staged snapshot write or
+  the input drain, so on localhost it is ~1 ms where the missing term is ~17 ms. The
+  proposed fix is a lower-envelope estimator over input-to-acknowledgement latency, which
+  needs no new wire traffic — see PREDICTION.md. Not implemented here.
+
+  The correction budget stays at 1.5 steps and this measurement stays red until that lands.
+  Widening it to 2.5 would hide a one-to-two-tick lead error, which is the exact class of
+  defect this whole sequence of changes was about.
+
 ### Added
 
 - `LocalMovePredictor.SetClockRateScale`, `ClockRateScale`, `RefusedClockRateScales`.
@@ -145,6 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `clock rate correction`, and a `clock error` note that prints the droop the measured
   rate difference predicts next to the observed error — the two agreeing is what
   identifies droop and separates it from a clock that is genuinely lost.
+- `PredictionLatencyMeasurement`: `RoundTripMs`, `AckFloorTicks`.
 - `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
 - `PredictionLatencyMeasurement`: `CorrectionsAboveOneStep`, `ReconcileCorrections`,
   `StalenessFitted`, `StalenessTicks`, `TargetLeadTicks`, `SnapshotGapTicks`,
