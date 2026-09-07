@@ -65,6 +65,11 @@
       "path": "Samples~/ClockSyncProbe"
     },
     {
+      "displayName": "Reconnect Policy Demo",
+      "description": "NetworkClient built through RegisterNetworking() in a VContainer scope, against a live backend: authenticate, join, then break the connection on purpose — kill the game-session transport, starve the heartbeat until PongTimeout, or close as the user — and watch the reconnect policy decide (PeerClosed/HeartbeatTimeout reconnect inside the 60 s budget with attempt n/N and backoff; a user close never does). Live panel for state, generation, elapsed budget and every ReconnectProgress event. Needs a running backend and VContainer.",
+      "path": "Samples~/ReconnectPolicyDemo"
+    },
+    {
       "displayName": "KCP Probe",
       "description": "Two KCP state machines back-to-back, no server, no network. Sends messages through the ARQ with configurable packet loss and renders the results on screen: reliable delivery, fragmentation/reassembly, and retransmission under loss — all visible rather than read about.",
       "path": "Samples~/KcpProbe"

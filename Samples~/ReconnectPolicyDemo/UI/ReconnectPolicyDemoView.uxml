@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <engine:Style src="ReconnectPolicyDemoView.uss" />
+
+    <engine:VisualElement name="reconnect-demo" class="cuvara-probe" picking-mode="Ignore">
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Reconnect policy demo" class="cuvara-probe__title" />
+            <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                          text="NetworkClient built through RegisterNetworking() in a VContainer scope. Break the connection on purpose and watch the policy decide: a transport that dies or a heartbeat that starves reconnects inside the 60 s budget; a user close never does." />
+
+            <engine:Label text="Session" class="cuvara-probe__section" />
+            <engine:Label name="backend-line" class="cuvara-probe__readout" />
+            <engine:Label name="state-line" class="cuvara-probe__readout" />
+            <engine:Label name="generation-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="Reconnect" class="cuvara-probe__section" />
+            <engine:Label name="attempt-line" class="cuvara-probe__readout" />
+            <engine:VisualElement class="cuvara-probe__bar">
+                <engine:VisualElement name="budget-fill" class="cuvara-probe__bar-fill" />
+            </engine:VisualElement>
+            <engine:Label name="budget-line" class="cuvara-probe__readout" />
+            <engine:Label name="cause-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="Break it" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="kill" text="Kill transport" class="cuvara-probe__button" />
+                <engine:Button name="heartbeat" text="Simulate heartbeat timeout" class="cuvara-probe__button" />
+            </engine:VisualElement>
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="user-close" text="User close"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Button name="connect" text="Connect again"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Events" class="cuvara-probe__section" />
+            <engine:Label name="events" class="cuvara-probe__readout cuvara-probe__mono" />
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

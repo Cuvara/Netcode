@@ -175,6 +175,29 @@ builder.RegisterNetworking(settings, WireEncoding.Protobuf);
 Nothing on the server changes: both servers mirror the encoding of the first frame
 they receive, per connection, so a JSON and a Protobuf client can share one server.
 
+### Substituting a dependency
+
+`RegisterNetworking()` registers **exactly one** `ITransportFactory`, `IWireCodec` and
+`INetLog`. Substitute one by passing it in, never by registering it again:
+
+```csharp
+builder.RegisterNetworking(settings, WireEncoding.Protobuf, transports: myFactory);
+```
+
+A second `builder.Register<ITransportFactory>(…)` after this call is **not** an override.
+The default factory is registered through a factory lambda (VContainer does not honour
+`DefaultTransportFactory`'s `string transportKey = null` default), two lambda registrations
+of one interface share the implementation type `FuncInstanceProvider`, and VContainer's
+duplicate check fails the whole container build at `LifetimeScope.Awake()`:
+
+```
+VContainerException: Conflict implementation type : Registration ITransportFactory
+  ContractTypes=[] Singleton VContainer.Internal.FuncInstanceProvider
+```
+
+`IAuthProvider` is the opposite case: the package registers none, so the host app must
+register one itself (above).
+
 |  | JSON | Protobuf |
 |---|---|---|
 | First body byte | `0x7B` (`{`) | `0x08` |
