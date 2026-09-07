@@ -575,6 +575,25 @@ namespace Cuvara.Netcode.View
                         // minute, dragging the steering with it.
                         Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
 
+                        // RATE FIRST, THEN PHASE. The steering below is proportional and
+                        // has no integral term, so any rate difference it is left to absorb
+                        // settles as a standing tick offset of drift / (gain * snapshotHz)
+                        // — 3.6 base ticks for a client clock 9% fast at 15 snapshots a
+                        // second. The reconcile compares at the snapshot's own tick NUMBER,
+                        // so that offset is not a diagnostic: it comes back as position, at
+                        // every start and every stop. The estimator has already fitted the
+                        // rate and, until now, nothing read it.
+                        //
+                        // Gated on IsUsable, never on HasEstimate: the provisional reading
+                        // carries no rate at all, and a rate wired into this clock from a
+                        // short baseline is the failure SnapshotStalenessEstimator's remarks
+                        // record twice, once reaching 613 ticks.
+                        if (Staleness.IsUsable)
+                        {
+                            _predictor.SetClockRateScale(
+                                (float)(1.0 / (1.0 + Staleness.SkewPpm / 1e6)));
+                        }
+
                         _predictor.SteerToServerTick(world.Tick, TargetLeadTicks());
 
                         // world.Tick is the tick this snapshot was produced on, and
