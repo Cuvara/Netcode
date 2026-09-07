@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-07
+
 ### Fixed
 
 - **Reconnect Policy Demo reported `Reconnected in 0.0 s` for a ~40 s, five-attempt
