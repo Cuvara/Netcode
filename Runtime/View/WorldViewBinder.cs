@@ -322,6 +322,38 @@ namespace Cuvara.Netcode.View
         public SnapshotStalenessEstimator Staleness { get; } = new SnapshotStalenessEstimator();
 
         /// <summary>
+        /// Measures the pipeline constant the staleness fit absorbs. See
+        /// <see cref="Prediction.AckLatencyEstimator"/>.
+        /// </summary>
+        /// <remarks>
+        /// Fed from two places: <see cref="NoteInputSent"/>, which the consumer must call, and
+        /// this binder's own snapshot handling, which already sees every acknowledgement. A
+        /// consumer that never calls <see cref="NoteInputSent"/> simply never gets a floor and
+        /// keeps the round-trip fallback — no worse off than before this existed.
+        /// </remarks>
+        public AckLatencyEstimator AckLatency { get; } = new AckLatencyEstimator();
+
+        /// <summary>
+        /// Tells the binder an input has just been sent, so its acknowledgement can be timed.
+        /// </summary>
+        /// <param name="inputTick">The tick stamped on the input, as handed to <c>SendInput</c>.</param>
+        /// <remarks>
+        /// <para>
+        /// Call it beside <see cref="LocalMovePredictor.RecordInput"/>, with the same tick.
+        /// The binder stamps the time from its own clock rather than taking one, so the two
+        /// ends of the measurement cannot come from different clocks.
+        /// </para>
+        /// <para>
+        /// <b>What it buys.</b> Without it the steering target is missing the constant part of
+        /// <c>uplink + snapshot age</c>, which no other measurement in the package can see, and
+        /// the reconcile returns one step of correction per base tick of it at every start and
+        /// stop. Measured live at 2.00 steps against an acknowledgement floor of 1.28 ticks.
+        /// </para>
+        /// </remarks>
+        public void NoteInputSent(long inputTick) =>
+            AckLatency.RecordSent(inputTick, _clock.NowMs / 1000.0);
+
+        /// <summary>
         /// Base ticks the client's clock should sit ahead of the newest snapshot's tick: how
         /// old that snapshot already is when it is acted on.
         /// </summary>
@@ -405,8 +437,41 @@ namespace Cuvara.Netcode.View
                 lead = gap;
             }
 
+            // THE PIPELINE CONSTANT. The staleness reading above is the age ABOVE its own
+            // envelope floor; this is the constant that envelope absorbed, plus the uplink,
+            // which no arrival-time measurement can recover at all. Their sum is the whole of
+            // uplink + age and neither counts anything twice.
+            //
+            // The measured floor WINS over the round trip when both exist, and that is not a
+            // preference. AckLatency times the real path end to end — the input drain, the
+            // server's staged snapshot write, the wire, the wait for a client frame — which is
+            // the quantity the reconcile needs. RoundTripMs is a heartbeat ping through the
+            // socket: it sees none of the staging, and half of it is not the quantity either.
+            // Measured on localhost the round trip is ~1 ms where the real constant is ~17.
+            //
+            // The round trip stays honoured for a consumer that supplies one and never calls
+            // NoteInputSent, which is exactly the behaviour before this estimator existed.
             int rttTicks = 0;
-            if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
+            if (AckLatency.HasEstimate)
+            {
+                // TRUNCATED, NOT ROUNDED, AND THAT IS THE SAFETY PROPERTY.
+                //
+                // The floor is a minimum over observations of constant + wait, so it is only
+                // near the constant once the wait has swept through its range. SweptEnough
+                // checks that the wait varied, which is necessary and not sufficient: a sweep
+                // that is real but slow still leaves the minimum above the constant, and
+                // modelled over a ten-second window the reading came in up to 0.8 ticks high.
+                //
+                // An over-lead is the ORIGINAL DEFECT arriving from the other side — the
+                // client steered past the server, the reconcile returning the difference as
+                // position at every start and stop. An under-lead merely leaves some of the
+                // residual in place, which is where this started. The two are not symmetric,
+                // so the rounding must not be either: truncating means an inflated reading
+                // costs accuracy and can never cost correctness, and the worst case of this
+                // whole estimator is that it contributes nothing.
+                lead += (float)Math.Floor(AckLatency.FloorTicks);
+            }
+            else if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
             {
                 rttTicks = (int)Math.Round(RoundTripMs * TickRate.EstimatedHz / 1000.0);
                 lead += rttTicks * 0.5f;
@@ -415,7 +480,14 @@ namespace Cuvara.Netcode.View
             int ticks = (int)Math.Round(lead);
             if (ticks < 0) ticks = 0;
 
-            int ceiling = gap * 2 + rttTicks;
+            // The ceiling bounds a RUNAWAY, not a measurement. The acknowledgement floor is a
+            // measured constant with its own refusal band, and on a slow link it legitimately
+            // exceeds two snapshot intervals — clamping it there would reintroduce the
+            // under-lead this estimator exists to remove, on exactly the connections that
+            // suffer most from it. So it raises the ceiling with it rather than being cut by
+            // it, while the derived terms stay bounded as before.
+            int ceiling = gap * 2 + rttTicks
+                          + (AckLatency.HasEstimate ? (int)Math.Floor(AckLatency.FloorTicks) : 0);
             return ticks > ceiling ? ceiling : ticks;
         }
 
@@ -574,6 +646,7 @@ namespace Cuvara.Netcode.View
                         // this from a stable figure to 613 ticks and climbing in under a
                         // minute, dragging the steering with it.
                         Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
+                        AckLatency.RecordAck(world.AckTick, nowSeconds, _predictor.TickRateHz);
 
                         // RATE FIRST, THEN PHASE. The steering below is proportional and
                         // has no integral term, so any rate difference it is left to absorb

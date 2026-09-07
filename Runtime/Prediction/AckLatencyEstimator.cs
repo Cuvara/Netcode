@@ -1,0 +1,314 @@
+using System;
+
+namespace Cuvara.Netcode.Prediction
+{
+    /// <summary>
+    /// Measures the pipeline constant the prediction clock's steering target needs and that
+    /// <see cref="SnapshotStalenessEstimator"/> cannot see: how far the client's clock must
+    /// lead the server's for the two to label the same input with the same tick number.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The quantity.</b> The client applies an input at its OWN base tick. The server
+    /// applies it at the tick its packet is drained on — the wire's <c>tick</c> field orders
+    /// inputs and names the acknowledgement, it does not place the step in time — and reports
+    /// it on a snapshot that is already old when the client acts on it. So the client's tick
+    /// and the server's tick name the same moment only if the client leads by the uplink
+    /// delay, which makes the required steering target <c>uplink + snapshot age</c>.
+    /// </para>
+    /// <para>
+    /// <b>Why the staleness fit cannot supply it.</b> That estimator fits a LOWER ENVELOPE
+    /// and reports the height above it, so it measures the variable delay and absorbs every
+    /// constant into the fitted offset — deliberately, because a constant one-way delay is
+    /// inseparable from the difference between the two clocks' origins. Modelled by varying
+    /// the pipeline constant from 0 to 2 base ticks, its reading stays at 0.02–0.04 and the
+    /// steering error stays at 0 throughout, while the reconcile corrects by one step per
+    /// tick of it at every start and stop. It is invisible to every counter in the package,
+    /// which is why it survived two rounds of fixes with everything else reading clean.
+    /// </para>
+    /// <para>
+    /// <b>The measurement.</b> One observation is the time from sending input tick N to
+    /// seeing the first snapshot whose <c>ack_tick</c> reaches N. That is
+    /// <c>uplink + wait for the next snapshot + age</c>. The wait is the only term that
+    /// varies — it sweeps as the send cadence and the snapshot cadence drift against each
+    /// other — so the MINIMUM over enough observations converges on <c>uplink + age</c>. Same
+    /// argument as <see cref="TickRateEstimator.SnapshotTickGap"/> and the staleness
+    /// envelope: the interesting quantity is the floor, and a mean would measure the jitter
+    /// sitting on top of it.
+    /// </para>
+    /// <para>
+    /// It needs no new wire traffic and no server change. Both endpoints are already at the
+    /// client: it stamped the input, and the acknowledgement is on the snapshot.
+    /// </para>
+    /// <para>
+    /// <b>Where the sweep assumption fails, and why that is checked rather than assumed.</b>
+    /// If the send cadence and the snapshot cadence are locked in phase, no observation ever
+    /// catches a small wait: every one carries the same fixed wait, the minimum is the constant
+    /// PLUS that wait, and the floor reads high by up to a whole snapshot interval. A lead too
+    /// large is the original defect arriving from the other side, so this is not a tolerable
+    /// failure mode — and it is not hypothetical, because a client sending at the world rate is
+    /// sending at exactly the snapshot rate.
+    /// </para>
+    /// <para>
+    /// What rescues it in practice is that the two cadences are driven by different clocks and
+    /// drift against each other, so the wait sweeps. What makes it safe is that the sweep is
+    /// <b>verified before a floor is offered</b>: the observations within an epoch must span at
+    /// least <see cref="MinimumSweepFraction"/> of a snapshot interval, that interval being
+    /// itself measured as the smallest gap between acknowledgements. Without the sweep there is
+    /// no evidence the minimum is near the constant, so nothing is offered and the caller keeps
+    /// whatever it used before.
+    /// </para>
+    /// </remarks>
+    public sealed class AckLatencyEstimator
+    {
+        /// <summary>
+        /// Observations required before a floor is offered.
+        /// </summary>
+        /// <remarks>
+        /// <b>There is deliberately no provisional reading.</b> This number ADDS lead, and a
+        /// lead invented from too little evidence steers the clock past the server — the
+        /// defect this whole estimator exists to remove, arriving from the other side. The
+        /// provisional path in <see cref="SnapshotStalenessEstimator"/> is safe because a
+        /// reading there can only be clamped DOWNWARD to a figure already in use; there is no
+        /// equivalent safe direction here, so nothing is offered until the floor means
+        /// something. Eight observations is about half a second at a 15 Hz send rate.
+        /// </remarks>
+        public const int MinimumSamples = 8;
+
+        /// <summary>How long each epoch collects before it becomes the previous one.</summary>
+        /// <remarks>
+        /// The floor is the smaller of this epoch's minimum and the last one's, so the memory
+        /// is five to ten seconds. Long enough for the send and snapshot cadences to sweep
+        /// against each other and expose a small wait; short enough that a route which has
+        /// genuinely become slower is followed within about ten seconds rather than being
+        /// held down by a measurement from the start of the session.
+        /// </remarks>
+        public const double EpochSeconds = 5.0;
+
+        /// <summary>
+        /// Beyond this, an observation is refused rather than folded in.
+        /// </summary>
+        /// <remarks>
+        /// A floor is not a latency spike. A second of acknowledgement delay is a stall, a
+        /// reconnect, or a process that was suspended — none of which describe the steady
+        /// pipeline this is measuring, and all of which would steer the clock somewhere
+        /// arbitrary if they were allowed to set the floor. Refused and counted, never
+        /// clamped: a clamped bad observation is still wrong and now looks plausible.
+        /// </remarks>
+        public const double MaximumFloorSeconds = 1.0;
+
+        /// <summary>Inputs remembered while they wait for an acknowledgement.</summary>
+        /// <remarks>
+        /// A ring, oldest dropped. At a 15 Hz send rate 64 is four seconds of unacknowledged
+        /// input, which is far past the point at which the connection is the problem.
+        /// </remarks>
+        private const int PendingCapacity = 64;
+
+        private readonly long[] _pendingTick = new long[PendingCapacity];
+        private readonly double[] _pendingSentAt = new double[PendingCapacity];
+        private int _head, _count;
+
+        /// <summary>
+        /// Share of a snapshot interval the observations must span before a floor is offered.
+        /// </summary>
+        /// <remarks>
+        /// The evidence that the minimum is near the constant is that the varying term was seen
+        /// to vary. Half an interval says the phase is sweeping rather than locked, and is small
+        /// enough that a healthy client is not left without a reading.
+        /// </remarks>
+        public const double MinimumSweepFraction = 0.5;
+
+        private double _epochMin = double.MaxValue;
+        private double _epochMax = double.MinValue;
+        private double _previousEpochMin = double.MaxValue;
+        private double _previousEpochMax = double.MinValue;
+        private double _epochStartedAt;
+        private bool _haveEpochStart;
+
+        // Smallest gap between successive acknowledgements: the snapshot interval, measured
+        // the same way everything else here is measured.
+        private double _ackIntervalMin = double.MaxValue;
+        private double _lastAckAt;
+        private long _lastAckTick;
+
+        /// <summary>Acknowledged observations folded in since construction or <see cref="Reset"/>.</summary>
+        public int Samples { get; private set; }
+
+        /// <summary>Observations refused as implausible for a floor. See <see cref="MaximumFloorSeconds"/>.</summary>
+        public int Refused { get; private set; }
+
+        /// <summary>
+        /// Whether <see cref="FloorSeconds"/> and <see cref="FloorTicks"/> mean anything: enough
+        /// observations, a positive floor, and evidence that the wait term swept.
+        /// </summary>
+        public bool HasEstimate =>
+            Samples >= MinimumSamples && FloorSeconds > 0.0 && SweptEnough;
+
+        /// <summary>
+        /// Whether the observations have spanned enough of a snapshot interval for their minimum
+        /// to be near the constant rather than near the constant plus a fixed wait.
+        /// </summary>
+        /// <remarks>
+        /// Exposed so a consumer can tell "no floor yet" from "this link never sweeps", which are
+        /// different problems with different answers and read identically otherwise.
+        /// </remarks>
+        public bool SweptEnough
+        {
+            get
+            {
+                if (_ackIntervalMin == double.MaxValue) return false;
+
+                double lo = Math.Min(_epochMin, _previousEpochMin);
+                double hi = Math.Max(_epochMax, _previousEpochMax);
+                if (lo == double.MaxValue || hi == double.MinValue) return false;
+
+                return hi - lo >= _ackIntervalMin * MinimumSweepFraction;
+            }
+        }
+
+        /// <summary>The snapshot interval as measured from acknowledgement arrivals, seconds.</summary>
+        public double AckIntervalSeconds =>
+            _ackIntervalMin == double.MaxValue ? 0.0 : _ackIntervalMin;
+
+        /// <summary>The measured floor in seconds, or 0 before <see cref="HasEstimate"/>.</summary>
+        public double FloorSeconds
+        {
+            get
+            {
+                double best = Math.Min(_epochMin, _previousEpochMin);
+                return best == double.MaxValue ? 0.0 : best;
+            }
+        }
+
+        /// <summary>The same floor in base ticks, or 0 before <see cref="HasEstimate"/>.</summary>
+        /// <remarks>
+        /// This is the term to ADD to the steering target, alongside the staleness reading.
+        /// The two do not overlap: the staleness fit reports the age ABOVE its envelope floor
+        /// and this reports the constant the envelope absorbed, so their sum is the whole of
+        /// <c>uplink + age</c> and neither counts anything twice.
+        /// </remarks>
+        public float FloorTicks { get; private set; }
+
+        /// <summary>
+        /// Remembers that an input was sent, so its acknowledgement can be timed.
+        /// </summary>
+        /// <param name="inputTick">The tick stamped on the input, as sent on the wire.</param>
+        /// <param name="nowSeconds">
+        /// Local monotonic time of the send. Must come from the same clock as
+        /// <see cref="RecordAck"/>; mixing sources makes the difference meaningless.
+        /// </param>
+        public void RecordSent(long inputTick, double nowSeconds)
+        {
+            if (inputTick <= 0 || double.IsNaN(nowSeconds) || double.IsInfinity(nowSeconds))
+            {
+                return;
+            }
+
+            if (_count == PendingCapacity)
+            {
+                _head = (_head + 1) % PendingCapacity;
+                _count--;
+            }
+
+            int slot = (_head + _count) % PendingCapacity;
+            _pendingTick[slot] = inputTick;
+            _pendingSentAt[slot] = nowSeconds;
+            _count++;
+        }
+
+        /// <summary>
+        /// Folds in a snapshot's acknowledgement, timing every input it covers.
+        /// </summary>
+        /// <param name="ackTick">The snapshot's <c>ack_tick</c>.</param>
+        /// <param name="nowSeconds">Local monotonic time the snapshot is acted on.</param>
+        /// <param name="baseHz">The server's base tick rate, for the tick conversion.</param>
+        public void RecordAck(long ackTick, double nowSeconds, float baseHz)
+        {
+            if (ackTick <= 0 || baseHz <= 0f || double.IsNaN(nowSeconds) || double.IsInfinity(nowSeconds))
+            {
+                return;
+            }
+
+            if (!_haveEpochStart)
+            {
+                _epochStartedAt = nowSeconds;
+                _haveEpochStart = true;
+            }
+            else if (nowSeconds - _epochStartedAt >= EpochSeconds)
+            {
+                _previousEpochMin = _epochMin;
+                _previousEpochMax = _epochMax;
+                _epochMin = double.MaxValue;
+                _epochMax = double.MinValue;
+                _epochStartedAt = nowSeconds;
+            }
+
+            // The snapshot interval, measured as the smallest gap between acknowledgements that
+            // actually advanced. Minimum rather than mean for the same reason as everywhere else
+            // here: a gap can be stretched by a late frame, never shortened below the cadence.
+            if (ackTick > _lastAckTick)
+            {
+                if (_lastAckTick > 0)
+                {
+                    double gap = nowSeconds - _lastAckAt;
+                    if (gap > 0.0 && gap < _ackIntervalMin) _ackIntervalMin = gap;
+                }
+
+                _lastAckTick = ackTick;
+                _lastAckAt = nowSeconds;
+            }
+
+            // Retire every input this acknowledgement covers. Only the newest of them saw a
+            // short wait for the snapshot, but a minimum filter is unharmed by the inflated
+            // ones and retiring all of them is what keeps the ring from filling.
+            while (_count > 0 && _pendingTick[_head] <= ackTick)
+            {
+                double latency = nowSeconds - _pendingSentAt[_head];
+                _head = (_head + 1) % PendingCapacity;
+                _count--;
+
+                if (latency <= 0.0)
+                {
+                    // The acknowledgement cannot precede the send. A non-positive reading is
+                    // a clock that moved, not a fast route.
+                    Refused++;
+                    continue;
+                }
+
+                if (latency > MaximumFloorSeconds)
+                {
+                    Refused++;
+                    continue;
+                }
+
+                Samples++;
+                if (latency < _epochMin) _epochMin = latency;
+                if (latency > _epochMax) _epochMax = latency;
+            }
+
+            FloorTicks = HasEstimate ? (float)(FloorSeconds * baseHz) : 0f;
+        }
+
+        /// <summary>
+        /// Forget the route. Call on a session boundary: this describes one connection to one
+        /// server, and carrying it across a reconnect measures the new one against the old.
+        /// </summary>
+        public void Reset()
+        {
+            _head = 0;
+            _count = 0;
+            _epochMin = double.MaxValue;
+            _epochMax = double.MinValue;
+            _previousEpochMin = double.MaxValue;
+            _previousEpochMax = double.MinValue;
+            _epochStartedAt = 0;
+            _haveEpochStart = false;
+            _ackIntervalMin = double.MaxValue;
+            _lastAckAt = 0;
+            _lastAckTick = 0;
+            Samples = 0;
+            Refused = 0;
+            FloorTicks = 0f;
+        }
+    }
+}
