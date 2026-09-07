@@ -279,9 +279,9 @@ use that window. The table is the contract; `ReconnectPolicyTests` pins it.
 |---|---|---|---|
 | `LocalClose` — `Disconnect()`, `Dispose()`, a transfer, a superseded operation | **Never** | — | — |
 | `Kicked` — `kick`+`disconnect`, any reason (`duplicate_login` today) | **Never**: the account is playing elsewhere; coming back would evict *that* login | — | — |
-| `ServerDisconnect` with `server_shutdown` | **Reconnect after a pause**: a drain hits every client at once, an immediate retry is a storm at a gateway still allocating the replacement | after 1 s + jitter | 25 s |
+| `ServerDisconnect` with `server_shutdown` | **Reconnect after a pause**: a drain hits every client at once, an immediate retry is a storm at a gateway still allocating the replacement | after 1 s + jitter | 60 s |
 | `ServerDisconnect` with any other reason (`duplicate_login` from a pre-`kick` build, unknown) | **Never**: the server chose to end it | — | — |
-| `PeerClosed`, `HeartbeatTimeout`, `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend, dead socket | **Reconnect at once**, then back off | immediately | 25 s |
+| `PeerClosed`, `HeartbeatTimeout`, `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend, dead socket | **Reconnect at once**, then back off | immediately | 60 s |
 | `ProtocolError` — an undecodable frame | **Never**: the same build sends the same frame | — | — |
 | **Gateway** close, `Kicked` | Session untouched (ADR-3); `_evicted` set, so the game server's kick that follows (ADR-20) is terminal | — | — |
 | **Gateway** close, any other cause | Session untouched; **not retried in place** — see below | — | — |
@@ -292,10 +292,17 @@ is no credential to come back with and the policy is never consulted.
 
 **Schedule.** Round pause = `min(ReconnectDelay × 2^(round−1), ReconnectMaxDelay)`
 + `[0, RetryJitter)`; defaults 1 s, 8 s, 500 ms → 1, 2, 4, 8, 8 … A round whose
-pause would end past `ReconnectBudget` (25 s from the close) is not started, and
+pause would end past `ReconnectBudget` (60 s from the close) is not started, and
 `ReconnectAttempts` (8) caps the count regardless. A round in flight when the
 budget expires is allowed to finish — `ConnectTimeout` and `EnterWorldTimeout`
-bound it. The 25 s leaves the last round's own dial + join inside the 30 s hold.
+bound it. Why 60 s and not "inside the 30 s hold": the hold is measured from when the
+*server* notices the drop. On a client-side loss the server's own 30 s heartbeat timeout
+runs first, so the hold can end ~60 s after the client's close; on a server freeze or
+restart the hold does not start until the server is back. Measured 2026-09-07 against a
+game server frozen for 45 s (two real clients): with a 25 s budget one client reconnected
+and the other gave up after four rounds, seconds before the server re-registered, while its
+hold was still ahead. 60 s covers both shapes; past it the hold is gone and a fresh login
+is the honest path.
 Note that a client-side `HeartbeatTimeout` is itself detected 30 s after the last
 pong; the server times out at about the same moment and *its* hold starts then,
 so the budget still applies from the client's close — but if the server saw a
@@ -310,7 +317,7 @@ is the provider's business. `NakamaAuthProvider` mints a fresh gateway token per
 call.
 
 **Stopping early.** A round that fails with one of the servers' *permanent*
-answers ends the loop at once, so the real error surfaces instead of 25 s of
+answers ends the loop at once, so the real error surfaces instead of 60 s of
 identical refusals (`ReconnectPolicy.IsPermanentFailure`):
 
 | Server error string | Source | Meaning |

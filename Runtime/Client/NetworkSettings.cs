@@ -98,7 +98,7 @@ namespace Cuvara.Netcode.Client
         /// bound that normally ends the loop; this one exists so a budget set very
         /// large cannot turn into an unbounded retry.
         /// </summary>
-        public int ReconnectAttempts { get; set; } = 8;
+        public int ReconnectAttempts { get; set; } = 12;
 
         /// <summary>
         /// Base pause of the reconnect backoff, before jitter. Doubles every
@@ -122,16 +122,24 @@ namespace Cuvara.Netcode.Client
         /// <see cref="ReconnectExhaustedException"/> instead.
         /// </summary>
         /// <remarks>
-        /// 25 s: inside the game server's 30 s entity hold with room for the last
-        /// round's own dial + join. A round that is in flight when the budget
-        /// expires is allowed to finish — its timeouts (<see cref="ConnectTimeout"/>,
+        /// 60 s. The game server holds a dropped player's entity for 30 s — but
+        /// measured from when <em>it</em> notices the drop, not from when the client
+        /// does. On a client-side network loss the server's own 30 s heartbeat
+        /// timeout runs first, so the hold can end up to ~60 s after the client's
+        /// close; on a server freeze or restart the hold does not even start until
+        /// the server is back. Measured 2026-09-07 against a game server frozen for
+        /// 45 s: a 25 s budget gave up four rounds in, seconds before the server
+        /// re-registered, while the hold was still ahead of it. 60 s covers both
+        /// shapes; past it the hold is gone anyway and a fresh login is the honest
+        /// path. A round that is in flight when the budget expires is allowed to
+        /// finish — its timeouts (<see cref="ConnectTimeout"/>,
         /// <see cref="EnterWorldTimeout"/>) bound it, not this. After the budget the
         /// session stays <see cref="NetworkClientState.Ended"/>; a later
         /// <see cref="NetworkClient.ConnectAsync(string, System.Threading.CancellationToken)"/>
         /// joins as a fresh login and, if the hold has expired, into a body rebuilt
         /// from persisted state.
         /// </remarks>
-        public TimeSpan ReconnectBudget { get; set; } = TimeSpan.FromSeconds(25);
+        public TimeSpan ReconnectBudget { get; set; } = TimeSpan.FromSeconds(60);
 
         /// <summary>
         /// Keep the gateway connection open for the whole session.

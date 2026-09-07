@@ -112,13 +112,19 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
-        public void DefaultSchedule_FitsInsideTheEntityHold()
+        public void DefaultSchedule_CoversTheEntityHoldFromTheServersClock()
         {
-            // The whole point of the budget: pauses of the rounds that fit inside it
-            // must sum to less than the server's 30 s hold, with the last round's
-            // own dial + join still ahead of it.
+            // The budget is anchored to when the SERVER notices the drop, not the
+            // client: on a client-side loss the server's own 30 s heartbeat timeout
+            // runs before its 30 s hold starts, so the hold can end ~60 s after our
+            // close. Anything shorter gives up while the body is still being held —
+            // measured live 2026-09-07 with a 25 s budget. Anything much longer just
+            // retries into a hold that has already expired.
             var s = new NetworkSettings();
-            Assert.That(s.ReconnectBudget, Is.LessThan(TimeSpan.FromSeconds(30)));
+            Assert.That(s.ReconnectBudget, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(60)),
+                "must outlast heartbeat timeout (30 s) + entity hold (30 s) from the server's clock");
+            Assert.That(s.ReconnectBudget, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(90)),
+                "past the hold a fresh login is the honest path");
 
             var total = TimeSpan.Zero;
             var rounds = 0;

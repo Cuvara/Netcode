@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reconnect policy by disconnect cause** (`ReconnectPolicy`, audit F08). `PeerClosed`,
   `HeartbeatTimeout` and `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend — now
   reconnect automatically, immediately and then with exponential backoff + jitter, inside a
-  total budget sized to the game server's 30 s entity hold. `server_shutdown` keeps its
+  60 s total budget. Not 25 s "inside the 30 s hold": the hold starts when the *server*
+  notices the drop, which on a client-side loss is up to 30 s later and on a server freeze
+  is only after it comes back — measured live 2026-09-07 (45 s freeze, two clients): 25 s
+  gave up four rounds in, seconds before the server re-registered. `server_shutdown` keeps its
   delay-first round (storm spreading). A user close, a `kick` (any reason), an unpaired
   `disconnect` with any reason but `server_shutdown`, and a protocol error never reconnect.
   A gateway `kick` marks the client evicted so the session drop that follows is terminal.
@@ -28,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real error. Full cause → action → budget table in `Documentation~/NETCODE.md`
   ("Reconnect policy"); `ReconnectPolicyTests` pins it.
 - `NetworkSettings.ReconnectOnConnectionLoss` (default on), `ReconnectMaxDelay` (8 s),
-  `ReconnectBudget` (25 s), `HeartbeatScheduler`, `MonotonicClock`.
+  `ReconnectBudget` (60 s), `HeartbeatScheduler`, `MonotonicClock`.
 - `NetworkClient.ReconnectProgress` event carrying the existing `ReconnectionProgress`
   struct (attempt, cap, pause), `NetworkClient.IsReconnecting`,
   `NetworkClientState.Reconnecting`, `ReconnectExhaustedException` (`Attempts`, `Elapsed`,
@@ -55,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `NetworkSettings.ReconnectDelay` default 2 s → **1 s** and the schedule is exponential
   (1, 2, 4, 8, 8 …, capped by `ReconnectMaxDelay`) instead of linear (2, 4, 6 …);
-  `ReconnectAttempts` default 5 → 8 (the budget, not the count, normally ends the loop).
+  `ReconnectAttempts` default 5 → 12 (the budget, not the count, normally ends the loop).
 - `ConnectAsync(jwt, mapId, ct)` rejects an empty `jwt` with `ArgumentException` locally
   instead of sending it to the gateway.
 - `TransferToMapAsync` closes the gateway politely as well as the session before redialing.
