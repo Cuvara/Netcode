@@ -130,6 +130,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InternalsVisibleTo("Cuvara.Netcode.Tests.PlayMode")`, so the measurement can report
   `WorldViewBinder.TargetLeadTicks()`. Diagnostic only.
 
+## [0.32.0] - 2026-09-07
+
+### Fixed
+
+- **Reconnect Policy Demo reported `Reconnected in 0.0 s` for a ~40 s, five-attempt
+  reconnect**, and drove the budget bar from the same wrong origin. `StateChanged(InWorld)`
+  fires before `Reconnected`, and the sample cleared its start timestamp there, so the
+  elapsed was measured from the successful attempt rather than from the close the policy
+  decided to reconnect on. Seen live against a game server frozen 45 s with `docker pause`.
+  Now started at the close, stopped only by `Reconnected`/`ReconnectFailed`, and measured on
+  `NetworkSettings.MonotonicClock` — the same monotonic source the client budgets with —
+  instead of `DateTime.UtcNow`. The header also marks the heartbeat button's
+  `PongTimeout`/`PingInterval` override as sticky, which it always was.
+
+- **A consumer could not supply its own `ITransportFactory` at all (regression in 0.31.1).**
+  0.31.1 moved the default transport factory to a factory lambda; a caller that registered
+  `ITransportFactory` after `RegisterNetworking()` — the documented way to substitute one until
+  now — no longer overrode it but made the *whole container fail to build*, because two lambda
+  registrations of one interface share the implementation type
+  `VContainer.Internal.FuncInstanceProvider` and VContainer rejects the duplicate:
+  `VContainerException: Conflict implementation type : Registration ITransportFactory
+  ContractTypes=[] Singleton VContainer.Internal.FuncInstanceProvider` at
+  `LifetimeScope.Awake()`, followed by a `NullReferenceException` from the scene component whose
+  client never resolved. Seen in a Reconnect Policy Demo player against the live backend,
+  2026-09-07. Fixed by the `transports` parameter below; the Reconnect Policy Demo now uses it.
+
+### Added
+
+- **`RegisterNetworking()` takes the dependencies it registers**, so exactly one registration of
+  each interface exists and substitution needs no second registration:
+  `RegisterNetworking(this IContainerBuilder builder, NetworkSettings settings = null,
+  WireEncoding encoding = WireEncoding.Json, ITransportFactory transports = null,
+  IWireCodec codec = null, INetLog log = null)`. Null keeps the previous default for each
+  (`DefaultTransportFactory`, the codec `encoding` names, `UnityNetLog`); a non-null value is
+  registered as an instance, and `codec` wins over `encoding`. Source-compatible — existing
+  call sites are unchanged. The XML docs state why registering these interfaces yourself
+  afterwards cannot work.
+
+- **Sample: Reconnect Policy Demo** (`Samples~/ReconnectPolicyDemo`). Builds `NetworkClient`
+  through `RegisterNetworking()` in a VContainer `LifetimeScope` — the DI path, not a hand-built
+  client — reads the same `-cuvara-*` / `CUVARA_*` backend flags as the DOTS sample,
+  authenticates with Nakama and joins. UI Toolkit buttons: **Kill transport** (closes the live
+  game-session transport → `PeerClosed`/`TransportError` → automatic reconnect), **Simulate
+  heartbeat timeout** (drops `PongTimeout` to 3 s and blackholes the session transport's reads →
+  `HeartbeatTimeout` → automatic reconnect), **User close** (`Disconnect()` — must not reconnect),
+  **Connect again** (a fresh operation after a user close). A live panel shows state, attempt
+  n/N, elapsed vs the 60 s budget, the operation generation, the last close cause and every
+  `ReconnectProgress`/`Reconnected`/`ReconnectFailed` event; the log carries the `[DOTSNet]`
+  markers the multi-client harness reads.
+- `NetworkClient.Generation` — read-only operation generation for diagnostics overlays (the
+  demo shows it). Pinned by `NetworkClientGenerationTests`.
+
+
+## [0.31.1] - 2026-09-07
+
+### Fixed
+- **`RegisterNetworking()` could not resolve `NetworkClient` from a scope.** It registered
+  `DefaultTransportFactory` by type, whose constructor takes `string transportKey = null`;
+  VContainer does not honour default parameter values, so the first scene component that
+  injected `NetworkClient` failed with `No such registration of type: System.String`
+  (IndieRPGMMOAdventure MainScene, 2026-09-07). Every sample built the client by hand, so the
+  registration had never been exercised. Now registered through a factory lambda, with a
+  bare-container resolution test gated on VContainer being present.
+
+### Added
+
+- **Reconnect policy by disconnect cause** (`ReconnectPolicy`, audit F08). `PeerClosed`,
+  `HeartbeatTimeout` and `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend — now
+  reconnect automatically, immediately and then with exponential backoff + jitter, inside a
+  60 s total budget. Not 25 s "inside the 30 s hold": the hold starts when the *server*
+  notices the drop, which on a client-side loss is up to 30 s later and on a server freeze
+  is only after it comes back — measured live 2026-09-07 (45 s freeze, two clients): 25 s
+  gave up four rounds in, seconds before the server re-registered. `server_shutdown` keeps its
+  delay-first round (storm spreading). A user close, a `kick` (any reason), an unpaired
+  `disconnect` with any reason but `server_shutdown`, and a protocol error never reconnect.
+  A gateway `kick` marks the client evicted so the session drop that follows is terminal.
+  Every round re-authenticates through `IAuthProvider` (the old join token was consumed).
+  Rounds stop early on permanent server answers — `invalid token`, `invalid auth request`,
+  `map is not available`, or a provider that cannot produce a credential — and surface the
+  real error. Full cause → action → budget table in `Documentation~/NETCODE.md`
+  ("Reconnect policy"); `ReconnectPolicyTests` pins it.
+- `NetworkSettings.ReconnectOnConnectionLoss` (default on), `ReconnectMaxDelay` (8 s),
+  `ReconnectBudget` (60 s), `HeartbeatScheduler`, `MonotonicClock`.
+- `NetworkClient.ReconnectProgress` event carrying the existing `ReconnectionProgress`
+  struct (attempt, cap, pause), `NetworkClient.IsReconnecting`,
+  `NetworkClientState.Reconnecting`, `ReconnectExhaustedException` (`Attempts`, `Elapsed`,
+  `Permanent`, last failure as inner) delivered through `ReconnectFailed` when the loop
+  gives up. `GameSessionClient.CloseInfo`.
+- **Operation generation** (audit F09, netcode half). `ConnectAsync`, `TransferToMapAsync`,
+  `Disconnect()`, `Dispose()` and each reconnect round start a new generation; every async
+  step re-checks its token and generation after each await, and a superseded flow completes
+  with `OperationCanceledException` without touching state. The gateway and session are
+  locals owned by the flow until the join lands; a `finally` disposes both on any failure,
+  cancel or supersede, so `State` always matches what is connected. Auth (including the
+  `IAuthProvider` call) moved inside that ownership — a cancel during auth used to leave the
+  gateway socket open and `State == Authenticating`. `NetworkClientRecoveryTests` covers
+  cancel-during-auth, stale completion after `Disconnect()`, a newer connect superseding an
+  older one, and disconnect during a backoff pause.
+- **Monotonic clock for elapsed time.** `WireConnection` measured heartbeat age and RTT with
+  `DateTimeOffset.UtcNow`; an NTP step of +1 h between two pings read as 3600 s of silence
+  and killed a healthy link. Heartbeat age, RTT and the reconnect budget now read
+  `NetworkSettings.MonotonicClock` (a process `Stopwatch`). The `ping.timestamp` protocol
+  field stays wall-clock and is used only as an echo match token; RTT is the monotonic
+  delta to the matched ping. `WireConnectionClockTests` stages ±1 h steps.
+
+### Changed
+
+- `NetworkSettings.ReconnectDelay` default 2 s → **1 s** and the schedule is exponential
+  (1, 2, 4, 8, 8 …, capped by `ReconnectMaxDelay`) instead of linear (2, 4, 6 …);
+  `ReconnectAttempts` default 5 → 12 (the budget, not the count, normally ends the loop).
+- `ConnectAsync(jwt, mapId, ct)` rejects an empty `jwt` with `ArgumentException` locally
+  instead of sending it to the gateway.
+- `TransferToMapAsync` closes the gateway politely as well as the session before redialing.
+- The heartbeat loop logs (rather than silently dies on) an unexpected exception.
+- `NetworkBootstrap` logs the new `Reconnecting` state.
+
+### Documentation
+
+- `Documentation~/NETCODE.md`: new "Reconnect policy" section (cause → action → budget
+  table, permanent-error table, why the gateway link is not retried in place, "One
+  operation at a time"); heartbeat section documents the monotonic clock; map-transfer
+  flow updated. `README.md` feature bullets updated.
+
 ## [0.30.0] - 2026-09-06
 
 ### Added
