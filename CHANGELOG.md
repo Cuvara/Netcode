@@ -143,6 +143,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is why the same defect was diagnosed as a tick-rate mismatch twice. `corrections smoothed`
   is kept but re-labelled as the floor it is, with the asserted count printed beneath it.
 
+- **The steering target now includes the pipeline constant, measured.** `AckLatencyEstimator`
+  times each input from its send to the first snapshot whose `ack_tick` reaches it — that is
+  `uplink + wait for the next snapshot + age` — and takes the minimum, which converges on
+  `uplink + age` as the wait sweeps. No new wire traffic: both endpoints were already at the
+  client. `WorldViewBinder.TargetLeadTicks()` adds it to the staleness reading, and the two
+  do not overlap: the staleness fit reports the age *above* its envelope floor and this
+  reports the constant that envelope absorbed.
+
+  Guarded, in the same discipline as the two fixes before it. **No provisional reading at
+  all** — this number ADDS lead, and a lead invented from thin evidence steers the client
+  past the server, which is the original defect from the other side; there is no safe
+  downward clamp as there was for staleness. **The sweep is verified, not assumed**: a client
+  sending at the world rate sends at exactly the snapshot rate, and if the two stay in phase
+  every observation carries the same fixed wait, the minimum reads high by up to a whole
+  snapshot interval, and the lead is too large. So a floor is offered only once the
+  observations span at least `MinimumSweepFraction` of a snapshot interval — that interval
+  itself measured as the smallest gap between acknowledgements. **The contribution is
+  truncated, not rounded**, so an inflated reading costs accuracy and never correctness: the
+  worst case of the whole estimator is that it contributes nothing. Stalls beyond
+  `MaximumFloorSeconds` and acknowledgements preceding their send are refused and counted.
+
+  A consumer that never calls `WorldViewBinder.NoteInputSent` gets no floor and keeps the
+  `RoundTripMs * 0.5` fallback unchanged. When both exist the floor wins, because it times
+  the real path end to end while the heartbeat round trip sees neither the input drain nor
+  the server's staged snapshot write and is half the wrong quantity besides.
+
 ### Known
 
 - **A residual correction of ~1 base tick above the quantisation floor remains, and it is a
@@ -168,9 +194,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposed fix is a lower-envelope estimator over input-to-acknowledgement latency, which
   needs no new wire traffic — see PREDICTION.md. Not implemented here.
 
-  The correction budget stays at 1.5 steps and this measurement stays red until that lands.
-  Widening it to 2.5 would hide a one-to-two-tick lead error, which is the exact class of
-  defect this whole sequence of changes was about.
+  `AckLatencyEstimator` now measures it. **Whether it converges inside a ~9 s measurement is
+  not yet established**: modelled end to end over that window the floor read between 0.26 and
+  1.84 base ticks against true constants of 0 to 2, and was sometimes not offered at all,
+  because the sweep it depends on is driven by the drift between the send and snapshot
+  cadences and that drift is not faithfully modelled here. In isolation, against a synthetic
+  link whose cadences drift 3%, it converges to within a quarter of a snapshot interval. The
+  truncation above is what makes the uncertainty safe rather than dangerous.
+
+  The correction budget stays at 1.5 steps. Widening it to 2.5 would hide a one-to-two-tick
+  lead error, which is the exact class of defect this whole sequence of changes was about.
 
 ### Added
 
@@ -181,7 +214,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `clock rate correction`, and a `clock error` note that prints the droop the measured
   rate difference predicts next to the observed error — the two agreeing is what
   identifies droop and separates it from a clock that is genuinely lost.
-- `PredictionLatencyMeasurement`: `RoundTripMs`, `AckFloorTicks`.
+- `AckLatencyEstimator`, and `WorldViewBinder.AckLatency` / `NoteInputSent`.
+- `AckLatencyEstimatorTests`, including a phase-locked link that must offer NOTHING rather
+  than an inflated floor, and `WorldViewBinderLeadTests` cases for the lead landing on
+  age + floor, an inflated floor not over-leading, and an unchanged fallback.
+- `PredictionLatencyMeasurement`: `RoundTripMs`, `AckFloorTicks`, `AckFloorMeasuredTicks`,
+  `AckFloorOffered`, `AckFloorSwept`, `AckFloorRefused`.
 - `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
 - `PredictionLatencyMeasurement`: `CorrectionsAboveOneStep`, `ReconcileCorrections`,
   `StalenessFitted`, `StalenessTicks`, `TargetLeadTicks`, `SnapshotGapTicks`,

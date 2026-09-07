@@ -1,3 +1,4 @@
+using System;
 using NUnit.Framework;
 using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.View;
@@ -139,6 +140,139 @@ namespace Cuvara.Netcode.Tests.Editor
                 "a FITTED reading is evidence in both directions -- clamping it to the derived " +
                 "figure would throw away the measurement on exactly the slow route it is for. " +
                 "Only the provisional reading is one-sided.");
+        }
+
+        /// <summary>
+        /// Feed the binder's acknowledgement estimator a sweeping link with a known constant.
+        /// </summary>
+        private static void FeedAckFloor(WorldViewBinder binder, double constantSeconds, double seconds)
+        {
+            // The binder stamps sends from its own clock, so this drives the estimator directly
+            // with a synthetic one — the arithmetic under test is the LEAD, not the clock.
+            var arrivals = new System.Collections.Generic.Queue<(long Tick, double At)>();
+            double now = 0, nextSend = 0, nextSnap = SnapshotPeriod * 0.37;
+            double snapPeriod = SnapshotPeriod * 1.03;      // two independent clocks
+            long inputTick = 0, accepted = 0;
+
+            while (now < seconds)
+            {
+                now = Math.Min(nextSend, nextSnap);
+
+                if (now >= nextSend)
+                {
+                    nextSend = now + SendPeriod;
+                    inputTick++;
+                    binder.AckLatency.RecordSent(inputTick, now);
+                    arrivals.Enqueue((inputTick, now + constantSeconds));
+                }
+
+                if (now < nextSnap) continue;
+
+                nextSnap = now + snapPeriod;
+                while (arrivals.Count > 0 && arrivals.Peek().At <= now) accepted = arrivals.Dequeue().Tick;
+                if (accepted > 0) binder.AckLatency.RecordAck(accepted, now, BaseHz);
+            }
+        }
+
+        private const double SendPeriod = 1.0 / 15.0;
+        private const double SnapshotPeriod = SnapshotEvery / (double)BaseHz;
+
+        [Test]
+        public void TheLeadIsTheSnapshotAgePlusTheMeasuredPipelineConstant()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+            FeedCadence(binder, ref tick, ref now, 8);
+
+            Assert.That(binder.TargetLeadTicks(), Is.EqualTo(0),
+                "precondition: with no acknowledgement floor the lead is the age alone");
+
+            FeedAckFloor(binder, constantSeconds: 2.0 / BaseHz, seconds: 40.0);
+
+            Assert.That(binder.AckLatency.HasEstimate, Is.True, "precondition: a floor was measured");
+            Assert.That(binder.TargetLeadTicks(), Is.EqualTo(2).Within(1),
+                "the client applies an input at its OWN tick and the server applies it at the " +
+                "tick its packet is drained on, so the lead must cover uplink + snapshot age. " +
+                "The staleness fit reports only the age ABOVE its envelope floor and this " +
+                "reports the constant that envelope absorbed, so the two add without overlap.");
+        }
+
+        [Test]
+        public void WithNeitherReadingTheLeadIsExactlyWhatItWasBefore()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+
+            // Enough to give TickRateEstimator a window, since the round-trip term is
+            // expressed in ticks and needs a measured rate to convert into.
+            FeedCadence(binder, ref tick, ref now, 60);
+
+            Assert.That(binder.TickRate.HasEstimate, Is.True, "precondition: a rate is measured");
+            Assert.That(binder.AckLatency.HasEstimate, Is.False, "precondition: no floor offered");
+
+            // 100 ms round trip at 60 Hz is 6 ticks; the pre-existing arithmetic adds half.
+            binder.RoundTripMs = 100;
+
+            Assert.That(binder.TargetLeadTicks(), Is.EqualTo(3),
+                "a consumer that supplies a round trip and never calls NoteInputSent must get " +
+                "exactly the behaviour it had before this estimator existed — the fallback is " +
+                "not allowed to change under it.");
+        }
+
+        [Test]
+        public void AMeasuredFloorIsPreferredToTheRoundTripRatherThanAddedToIt()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+            FeedCadence(binder, ref tick, ref now, 8);
+
+            binder.RoundTripMs = 100;                       // would contribute 3 ticks
+            FeedAckFloor(binder, constantSeconds: 2.0 / BaseHz, seconds: 40.0);
+
+            Assert.That(binder.AckLatency.HasEstimate, Is.True, "precondition");
+            Assert.That(binder.TargetLeadTicks(), Is.EqualTo(2).Within(1),
+                "the two measure the same thing by different means, so adding them counts the " +
+                "pipeline twice. The floor wins because it times the real path end to end — " +
+                "the input drain, the server's staged snapshot write, the wire, the wait for a " +
+                "frame — while the round trip is a heartbeat through the socket that sees none " +
+                "of the staging and is half the wrong quantity besides.");
+        }
+
+        /// <summary>
+        /// An acknowledgement floor can only ever ADD lead in whole ticks it has evidence for.
+        /// </summary>
+        /// <remarks>
+        /// The floor is a minimum over <c>constant + wait</c> observations, so it sits above
+        /// the constant until the wait has swept its whole range — and a sweep that is real but
+        /// slow still leaves it high. An over-lead is the original defect arriving from the
+        /// other side; an under-lead just leaves residual. Truncating makes an inflated reading
+        /// cost accuracy and never correctness.
+        /// </remarks>
+        [Test]
+        public void AnInflatedFloorCannotOverLead()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+            FeedCadence(binder, ref tick, ref now, 8);
+
+            // True constant of one tick; the estimator will read it at one-point-something
+            // because the wait never quite reaches zero.
+            FeedAckFloor(binder, constantSeconds: 1.0 / BaseHz, seconds: 40.0);
+
+            Assert.That(binder.AckLatency.HasEstimate, Is.True, "precondition");
+            Assert.That(binder.AckLatency.FloorTicks, Is.GreaterThanOrEqualTo(1f),
+                "precondition: the reading is at or above the true constant, never below it");
+            Assert.That(binder.TargetLeadTicks(),
+                Is.LessThanOrEqualTo((int)Math.Floor(binder.AckLatency.FloorTicks) + 1),
+                "the lead must not exceed the whole ticks the floor has evidence for, plus " +
+                "whatever the snapshot age legitimately contributes.");
+            Assert.That(binder.TargetLeadTicks(), Is.LessThanOrEqualTo(2),
+                "a one-tick pipeline must not produce a lead of three because the estimator " +
+                "read 1.9 and something rounded up.");
         }
 
         private sealed class NullView : IEntityView

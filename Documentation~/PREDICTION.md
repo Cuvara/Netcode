@@ -182,12 +182,32 @@ that the heartbeat round trip measures the **socket**, not the server's staged s
 or the input drain quantisation, so it under-reports the constant: on localhost it is ~1 ms
 where the missing term measures ~17 ms.
 
-The measurement to prefer, not yet implemented, is a lower envelope over **input-to-
-acknowledgement** latency. The client knows when it sent input tick N and when it first saw a
-snapshot with `ack_tick >= N`; that interval is `uplink + wait for the next snapshot + age`,
-the wait is what varies, and its minimum over many samples converges on `uplink + age` — the
-exact quantity, with no new wire traffic, using the same minimum-filter argument the staleness
-estimator already makes. `PredictionLatencyMeasurement` reports that minimum as **ACK FLOOR**.
+`AckLatencyEstimator` measures the constant properly. The client knows when it sent input
+tick N and when it first saw a snapshot with `ack_tick >= N`; that interval is
+`uplink + wait for the next snapshot + age`, the wait is what varies, and its minimum
+converges on `uplink + age` — the exact quantity, no new wire traffic, the same minimum-filter
+argument the staleness estimator already makes. Call `WorldViewBinder.NoteInputSent(tick)`
+beside `LocalMovePredictor.RecordInput`, or the estimator only has one end of the interval and
+offers nothing.
+
+Three properties make it safe to steer a clock on, and they are worth keeping if this is ever
+reworked:
+
+- **No provisional reading.** This term *adds* lead, and an over-lead is the original defect
+  from the other side. Staleness can offer a provisional figure because it can be clamped
+  downward onto one already in use; there is no equivalent safe direction here.
+- **The sweep is verified, not assumed.** A client sending at the world rate sends at exactly
+  the snapshot rate. If the two stay in phase, every observation carries the same fixed wait
+  and the minimum reads high by up to a whole interval. A floor is offered only once the
+  observations span `MinimumSweepFraction` of a snapshot interval, that interval measured as
+  the smallest gap between acknowledgements.
+- **The contribution is truncated, not rounded.** A slow sweep leaves the reading high;
+  truncating means that costs accuracy, never correctness, and the estimator's worst case is
+  contributing nothing.
+
+When both a floor and `RoundTripMs` are available the floor wins: it times the real path end
+to end, while the heartbeat round trip sees neither the input drain nor the server's staged
+snapshot write, and half of it is not the quantity anyway.
 
 ### Reading a correction figure
 

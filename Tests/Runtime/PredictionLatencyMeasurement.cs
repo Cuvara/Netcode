@@ -377,6 +377,18 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Round trip the session reported, milliseconds.</summary>
             public long RoundTripMs;
 
+            /// <summary>The measured pipeline constant the lead now uses, in base ticks.</summary>
+            public float AckFloorMeasuredTicks;
+
+            /// <summary>Whether that floor was offered at all, and why not when it was not.</summary>
+            public bool AckFloorOffered;
+
+            /// <summary>Whether the wait term was seen to sweep, which is what makes a floor mean anything.</summary>
+            public bool AckFloorSwept;
+
+            /// <summary>Observations refused as implausible for a floor.</summary>
+            public int AckFloorRefused;
+
             /// <summary>
             /// Smallest input-to-acknowledgement time seen, in base ticks — an upper bound on
             /// the pipeline constant the steering target is still missing.
@@ -1449,6 +1461,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     tick++;
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
+                    binder.NoteInputSent(tick);
                     await PumpAsync(client, binder, localId, dt, ct, corrections);
                     lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
@@ -1477,6 +1490,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                 client.Session?.SendInput(sampleTick, forceDivergence ? 0f : 1f, 0f, "");
                 predictor?.RecordInput(sampleTick, 1f, 0f);
+
+                // The lead's pipeline term is measured from this pairing: the send stamped
+                // here, the acknowledgement seen by the binder. Without it the estimator has
+                // one end of the interval and offers nothing.
+                binder.NoteInputSent(sampleTick);
 
                 var sample = new Sample { VisibleTimedOut = true, AuthoritativeTimedOut = true };
                 bool sawVisible = false, sawAuthoritative = false;
@@ -1750,6 +1768,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
             run.SkewPpm = binder.Staleness.SkewPpm;
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
+            run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
+            run.AckFloorOffered = binder.AckLatency.HasEstimate;
+            run.AckFloorSwept = binder.AckLatency.SweptEnough;
+            run.AckFloorRefused = binder.AckLatency.Refused;
 
             var acked = run.Samples.Where(x => !x.AuthoritativeTimedOut)
                 .Select(x => x.InputToAuthoritativeMs).ToList();
@@ -1901,10 +1923,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     (run.RoundTripMs == 0
                         ? "<<< the session has reported none; the lead's round-trip term is 0"
                         : "(the lead adds half of this)") + "\n" +
-                $"  ACK FLOOR                {run.AckFloorTicks:F2} base ticks   " +
-                    "<<< upper bound on uplink + snapshot age, the term the\n" +
-                "                             lead is still missing. Residual correction should be\n" +
-                "                             ~1 step (clock quantisation) + this, less the lead.\n" +
+                $"  ACK FLOOR (harness)      {run.AckFloorTicks:F2} base ticks   " +
+                    "(smallest input->ack seen; upper bound on uplink + age)\n" +
+                $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
+                    (run.AckFloorOffered
+                        ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +
+                          "                             the staleness envelope absorbs"
+                        : run.AckFloorSwept
+                            ? "   <<< not offered yet: too few observations"
+                            : "   <<< NOT OFFERED: the wait never swept, so the\n" +
+                              "                             minimum is not evidence about the floor. The lead keeps\n" +
+                              "                             the round-trip fallback.") + "\n" +
+                $"  ack floor refused        {run.AckFloorRefused}   " +
+                    "(observations too long to be a floor — stalls, not routes)\n" +
                 $"  clock rate difference    {run.SkewPpm:F0} ppm" +
                     (Math.Abs(run.SkewPpm) > 10_000
                         ? "   <<< the two clocks run at materially different rates\n" +
