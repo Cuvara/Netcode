@@ -1104,7 +1104,7 @@ namespace DOTSSample
                 _client.Reconnected += () =>
                 {
                     _status = "In World (reconnected)";
-                    Debug.Log("[DOTSNet] Reconnected after server shutdown");
+                    Debug.Log("[DOTSNet] Reconnected after connection loss");
 
                     // The new session's counters restart at zero while these baselines
                     // keep the old session's totals, so the first health window printed
