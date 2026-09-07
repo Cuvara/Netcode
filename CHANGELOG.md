@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sample: Reconnect Policy Demo** (`Samples~/ReconnectPolicyDemo`). Builds `NetworkClient`
+  through `RegisterNetworking()` in a VContainer `LifetimeScope` — the DI path, not a hand-built
+  client — reads the same `-cuvara-*` / `CUVARA_*` backend flags as the DOTS sample,
+  authenticates with Nakama and joins. UI Toolkit buttons: **Kill transport** (closes the live
+  game-session transport → `PeerClosed`/`TransportError` → automatic reconnect), **Simulate
+  heartbeat timeout** (drops `PongTimeout` to 3 s and blackholes the session transport's reads →
+  `HeartbeatTimeout` → automatic reconnect), **User close** (`Disconnect()` — must not reconnect),
+  **Connect again** (a fresh operation after a user close). A live panel shows state, attempt
+  n/N, elapsed vs the 60 s budget, the operation generation, the last close cause and every
+  `ReconnectProgress`/`Reconnected`/`ReconnectFailed` event; the log carries the `[DOTSNet]`
+  markers the multi-client harness reads.
+- `NetworkClient.Generation` — read-only operation generation for diagnostics overlays (the
+  demo shows it). Pinned by `NetworkClientGenerationTests`.
+
+
 ## [0.31.1] - 2026-09-07
 
 ### Fixed

@@ -211,6 +211,16 @@ namespace Cuvara.Netcode.Client
         /// <summary>The map id the client is currently on, or was last on.</summary>
         public string CurrentMapId => _lastMapId;
 
+        /// <summary>
+        /// The operation generation: incremented by every public entry point that changes what
+        /// the client is connected to (<see cref="ConnectAsync(string, CancellationToken)"/>,
+        /// <see cref="TransferToMapAsync"/>, <see cref="Disconnect"/>, <see cref="Dispose"/>).
+        /// An in-flight flow whose captured generation no longer matches this value is stale and
+        /// may only dispose what it created. Read-only diagnostics — a reconnect overlay shows it
+        /// so a "state went back to InWorld" can be told apart from "a new session started".
+        /// </summary>
+        public int Generation => _generation;
+
         // ─────────────────────────── public operations ───────────────────────────
 
         /// <summary>
