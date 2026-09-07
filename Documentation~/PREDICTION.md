@@ -90,6 +90,147 @@ Clamped at +/-200,000 ppm. The development machine measured +110,000 ppm (host
 `CLOCK_REALTIME` running 11% fast against `CLOCK_MONOTONIC`), which silently disabled
 the fit until 0.23.0 added the clamp and the probe scene.
 
+### The warm-up window, and why the reading is offered in two strengths
+
+A rate is a slope, and a slope over a short baseline is mostly the noise of its two
+endpoints, so `IsUsable` — "a line has been fitted" — cannot turn true early and
+deliberately does not. Two consecutive `EpochSeconds` epochs cannot span the
+`MinimumBaselineSeconds` a fit needs, so against a 15 Hz snapshot stream **the first
+fit lands 8.2 s after join**.
+
+For those eight seconds `WorldViewBinder.TargetLeadTicks()` used to fall back to a
+derived figure of one snapshot interval. On localhost that is **4 base ticks against
+a real age of 0.06**. The lead is not a diagnostic — the clock is steered onto it — so
+a four-tick error there means a tick number stops naming the same moment on the two
+sides, and `LocalMovePredictor.Reconcile`'s history path, which indexes the client's
+own history by the *server's* tick number, reports the whole of it as a positional
+correction of **0.3333 world units (4.00 steps at speed 5 / 60 Hz)** at every start
+and every stop, for the first eight seconds of every session. A live measurement read
+162 reconciles, 36 corrections, max 4.00 steps, with both sides agreeing on 60 Hz and
+every other counter clean — which reads as a tick-rate mismatch and is not one.
+
+The **age**, unlike the rate, does not need a long baseline: over a few seconds the
+lower envelope's slope is one to within a few hundred ppm, which is 0.02 base ticks
+over ten seconds against the four it replaces. So `StalenessTicks` is also offered
+*provisionally*, from `MinimumProvisionalSamples` snapshots (~0.2 s) onward, as the
+height above a running unit-rate floor. `HasEstimate` is true for either strength;
+`IsUsable` still means only "fitted".
+
+**The provisional reading is trusted downwards only.** An unfitted rate drifts the
+residual upward — the 1.103 client/server clock ratio above would read as tens of
+ticks of "age" inside the warm-up — so the binder takes `min(provisional, derived)`.
+Below the derived figure the reading is evidence; above it, it is drift. That makes
+the warm-up lead never worse than the old fallback and, on the measured localhost
+case, four ticks better.
+
+**What this does not fix.** Two free-running 60 Hz clocks disagree about which tick a
+motion transition lands on by plus or minus one, so a start or a stop still costs a
+correction of up to one step (0.0833 units). That is quantisation, not disagreement,
+and no lead can remove it. A measurement that expects corrections to be rare across
+many start/stop transitions is measuring it.
+
+### The clock runs on the server's timebase
+
+`SteerToServerTick` corrects the base-tick clock's **phase**. It is proportional (gain 0.1,
+called once per snapshot) and has no integral term, so a constant **rate** difference is not
+something it can remove — it settles at a standing offset instead:
+
+```
+standing tick error  =  drift / (gain x snapshotHz)
+                     =  (clockRatio - 1) x baseHz / (0.1 x snapshotHz)
+```
+
+At 60/15 that is `drift / 1.5`, so a client clock 9% fast sits 3.6 base ticks ahead of the
+server forever. Because `Reconcile` compares at the snapshot's own tick *number*, an offset
+of n ticks makes the two sides label different moments with the same number and the whole of
+it is returned as position — a correction at every start and stop.
+
+So the rate is corrected separately, and by feed-forward rather than by an integrator:
+`SnapshotStalenessEstimator` already fits it (`SkewPpm`), and `WorldViewBinder` hands it to
+`LocalMovePredictor.SetClockRateScale` before each steer. Only when the line is **fitted** —
+the provisional warm-up reading carries no rate at all — and only within the reciprocals of
+the estimator's own skew bounds, outside which a value is refused rather than clamped and
+counted in `RefusedClockRateScales`.
+
+A ratio near 1.10 is not exotic: it is the Windows performance counter against the Linux
+clock the server ticks on, and it is what the development machine measures.
+
+### The lead must cover the pipeline, not just the snapshot's age
+
+The client applies an input at its **own** tick T. The server applies it at the tick its
+packet is drained on — `InputHandler` uses the stamped tick only for ordering and the ack,
+never to place the step in time. So the two label the same input with the same tick number
+only if the client's clock leads the server's by the uplink delay. Steering to
+`snapshotTick + lead` puts the client `lead - age` ticks ahead of the server, so:
+
+```
+required lead  =  uplink  +  snapshot age
+residual correction (steps)  =  1  +  (uplink + age - lead)
+```
+
+where the 1 is the ±1 base tick two free-running clocks cost at a transition.
+
+**Neither term is visible to `SnapshotStalenessEstimator`.** It fits a *lower envelope*, so
+it reports only the variable delay above the floor; the constant part is absorbed into the
+fitted offset along with the clocks' origins. `StalenessTicks` reads ~0.02 whether the
+pipeline constant is 0 or 2 ticks, and the steering error reads 0 throughout. That is why a
+residual here survives with every other counter clean.
+
+`TargetLeadTicks` therefore takes the constant from the caller, as `RoundTripMs * 0.5`. Set
+`binder.RoundTripMs` every frame — `DOTSNetworkBridge` does — or that term is zero. Be aware
+that the heartbeat round trip measures the **socket**, not the server's staged snapshot write
+or the input drain quantisation, so it under-reports the constant: on localhost it is ~1 ms
+where the missing term measures ~17 ms.
+
+The measurement to prefer is a lower envelope over **input-to-acknowledgement** latency. The
+client knows when it sent input tick N and when it first saw a snapshot with `ack_tick >= N`;
+that interval is `uplink + wait for the next snapshot + age`, the wait is what varies, and its
+minimum converges on `uplink + age` — the exact quantity, no new wire traffic, the same
+minimum-filter argument the staleness estimator already makes.
+`PredictionLatencyMeasurement` reports that minimum as **ACK FLOOR** (~0.7 base ticks on
+localhost).
+
+**This is not yet closed on `develop`.** An implementation lives on branch
+`feat/ack-latency-estimator`, with its tests and the three properties that make such an
+estimator safe to steer a clock on — no provisional reading, a *verified* rather than assumed
+phase sweep, and a truncated rather than rounded contribution. It is off the release path
+because it did not converge inside the measurement's ~9 s window (0.14 base ticks against an
+observed minimum of 0.68) and because it moved the clock error from −1 to −2. The residual it
+would close is ~1 base tick, which shows up as a correction of 2.00 steps against a floor of
+1.00 at every start and stop; `InputToVisibleMovement_WithAndWithoutPrediction` is `[Ignore]`d
+on exactly that term, with its assertions intact.
+
+### Reading a correction figure
+
+Size a correction by the tick rate **measured off the wire**, never by the one the client
+believes it is predicting at: a client on the wrong rate sizes its own yardstick by that
+same wrong rate, so four real ticks of error print as "1.00 steps" and look healthy.
+`PredictionLatencyMeasurement` exposes both as `ExpectedStepFromWire` and `ExpectedStep`
+and prints them on adjacent lines for exactly this reason.
+
+Then read the magnitude, not the count. `LocalMovePredictor.SmoothedCorrections`
+increments on *any* nonzero error, so on a stimulus of N start/stop transitions it lands
+near N however correct both sides are — it is a floor, not a fault. What separates the
+causes is how big each correction is:
+
+| Max correction | Meaning |
+|---|---|
+| ~1 step | the ±1 base tick two free-running clocks cost at a transition. The floor. |
+| ~`SnapshotTickGap` steps (4 at 60/15) | the prediction clock is steered to the wrong offset — compare `TARGET LEAD` against `SNAPSHOT AGE` |
+| ~1 + ACK FLOOR steps | the pipeline constant above — the lead is not covering uplink + age |
+| a ratio of the two rates | a genuine tick-rate mismatch; `TickRateEstimator.Disagrees` should be true as well |
+| `clock error` steps, with `clock rate difference` large | proportional droop against a clock-rate difference — check `clock rate correction` is not 1.0 |
+
+`replayed steps 0` is a **healthy** reading, not an open loop: the history path is the
+accurate one and replaying is its fallback, so a client whose clock tracks the server hits
+the history every time and replays nothing. Read `reconciles from history` for whether the
+loop closed.
+
+The `[Measure]` block prints `SNAPSHOT AGE measured`, `TARGET LEAD in use`, `snapshot gap
+measured` and `clock error (last steer)` for every run, prediction-OFF included, because
+the first three are properties of the binder and the link rather than of the predictor —
+so the two columns are comparable and a difference between them is itself a finding.
+
 ## PredictionSettings
 
 | Field | Default | Purpose |
