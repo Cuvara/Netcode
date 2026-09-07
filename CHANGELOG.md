@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`RegisterNetworking()` could not resolve `NetworkClient` from a scope.** It registered
+  `DefaultTransportFactory` by type, whose constructor takes `string transportKey = null`;
+  VContainer does not honour default parameter values, so the first scene component that
+  injected `NetworkClient` failed with `No such registration of type: System.String`
+  (IndieRPGMMOAdventure MainScene, 2026-09-07). Every sample built the client by hand, so the
+  registration had never been exercised. Now registered through a factory lambda, with a
+  bare-container resolution test gated on VContainer being present.
+
 > **Version bump note:** the next release is **0.31.0** (minor). Behaviour changes
 > without a compile break: reconnect now covers ordinary link loss, the backoff
 > schedule and its defaults changed, and `TeardownConnections` no longer emits a
