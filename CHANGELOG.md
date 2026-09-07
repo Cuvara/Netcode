@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-08
+
 ### Fixed
 
 - **The prediction clock no longer runs a whole snapshot interval past the server for the
