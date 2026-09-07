@@ -1,0 +1,27 @@
+{
+    "name": "ReconnectPolicyDemo",
+    "rootNamespace": "Cuvara.Netcode.Samples.ReconnectPolicyDemo",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "Cuvara.Netcode.DI",
+        "UniTask",
+        "VContainer"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "CUVARA_NETCODE_VCONTAINER"
+    ],
+    "versionDefines": [
+        {
+            "name": "jp.hadashikick.vcontainer",
+            "expression": "1.0.0",
+            "define": "CUVARA_NETCODE_VCONTAINER"
+        }
+    ],
+    "noEngineReferences": false
+}
