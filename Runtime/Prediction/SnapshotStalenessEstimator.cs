@@ -110,6 +110,17 @@ namespace Cuvara.Netcode.Prediction
         public const double MaximumBaselineSeconds = 120.0;
 
         /// <summary>
+        /// Snapshots that must have arrived before <see cref="StalenessTicks"/> is offered as
+        /// a PROVISIONAL reading, ahead of the fitted line.
+        /// </summary>
+        /// <remarks>
+        /// Four is two snapshot intervals at the default rates — enough that the running floor
+        /// is a floor rather than whichever sample happened to arrive first, and short enough
+        /// that the reading is available inside a fifth of a second.
+        /// </remarks>
+        public const int MinimumProvisionalSamples = 4;
+
+        /// <summary>
         /// Bounds on the fitted rate, as a ratio of client clock to server tick time.
         /// </summary>
         /// <remarks>
@@ -142,6 +153,12 @@ namespace Cuvara.Netcode.Prediction
         private double _skew = 1.0;
         private bool _haveFit;
 
+        // Lowest unit-rate residual seen since construction or Reset. Unlike _bestResidual
+        // this survives the epoch boundary: it is the floor the PROVISIONAL reading is taken
+        // above, and an epoch is far too short a memory for a floor.
+        private double _floorResidual;
+        private bool _haveFloor;
+
         // The older anchor: lowest sample of an earlier epoch, and the far end of the
         // baseline the rate is fitted over.
         private double _anchorX, _anchorY;
@@ -162,6 +179,47 @@ namespace Cuvara.Netcode.Prediction
 
         /// <summary>Whether a line has been fitted and <see cref="StalenessTicks"/> means anything.</summary>
         public bool IsUsable => _haveFit;
+
+        /// <summary>
+        /// Whether <see cref="StalenessTicks"/> carries a reading at all — fitted, or the
+        /// provisional one taken above the running floor before the fit lands.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a second, weaker signal exists.</b> <see cref="IsUsable"/> requires a fitted
+        /// RATE, and a rate is a slope that cannot honestly be fitted over a short baseline —
+        /// which is why <see cref="MinimumBaselineSeconds"/> is what it is, and why
+        /// <c>NothingIsOfferedUntilTheBaselineIsLongEnoughToFitARateOver</c> pins it. Measured
+        /// against a 15 Hz snapshot stream, the first fit lands <b>8.2 seconds</b> after join:
+        /// epoch one only sets an anchor, and two consecutive two-second epochs cannot span
+        /// the four seconds a fit needs, so the earliest fit is the third or fourth epoch.
+        /// </para>
+        /// <para>
+        /// For those eight seconds the caller had nothing and fell back to a derived guess of
+        /// one snapshot interval. That guess is not small: on localhost the true age is
+        /// <b>0.06 base ticks</b> and the guess is <b>4</b>, so the client's clock is steered
+        /// four base ticks past the server's, a tick number stops naming the same moment on
+        /// both sides, and the reconcile reports the difference as a correction of exactly one
+        /// input interval — the <b>0.3333-unit, 4.00-step</b> tug this class's remarks already
+        /// name — at every start and every stop, for the first eight seconds of every session.
+        /// </para>
+        /// <para>
+        /// The AGE does not need the rate. It is the height of a sample above the lower
+        /// envelope, and over a few seconds the envelope's slope is one to within a few
+        /// hundred ppm — 0.02 base ticks over ten seconds, which is nothing next to the four
+        /// ticks it replaces. The rate term earns its place over minutes, not over the warm-up.
+        /// </para>
+        /// <para>
+        /// <b>The provisional reading is deliberately only trusted downwards.</b> An unfitted
+        /// rate drifts the residual, and it drifts it UPWARD when the client's clock runs fast
+        /// — the 1.103 ratio in <see cref="MinimumSkew"/>'s remarks would read as tens of ticks
+        /// of "age" within the warm-up. So the caller must clamp the provisional reading by the
+        /// guess it replaces and take the smaller: below the guess the reading is evidence,
+        /// above it it is drift, and the clamp makes this strictly safer than the old fallback
+        /// in every direction. <see cref="WorldViewBinder"/> does exactly that.
+        /// </para>
+        /// </remarks>
+        public bool HasEstimate => _haveFit || Samples >= MinimumProvisionalSamples;
 
         /// <summary>
         /// The fitted rate difference between the two clocks, in parts per million, or 0
@@ -255,9 +313,29 @@ namespace Cuvara.Netcode.Prediction
                 _epochStartedAt = nowSeconds;
             }
 
+            // The unit-rate floor, kept across epochs. `residual` is y - x exactly while
+            // there is no fit, which is that same unit-rate line.
+            if (!_haveFit)
+            {
+                double unit = y - x;
+                if (!_haveFloor || unit < _floorResidual)
+                {
+                    _floorResidual = unit;
+                    _haveFloor = true;
+                }
+            }
+
             if (_haveFit)
             {
                 double above = y - (_offset + _skew * x);
+                if (above < 0) above = 0;
+                StalenessTicks = (float)(above * baseHz);
+            }
+            else if (Samples >= MinimumProvisionalSamples && _haveFloor)
+            {
+                // Provisional: height above the running floor, at unit rate. See HasEstimate
+                // for why this is offered and why the caller must clamp it from above.
+                double above = (y - x) - _floorResidual;
                 if (above < 0) above = 0;
                 StalenessTicks = (float)(above * baseHz);
             }
@@ -340,6 +418,8 @@ namespace Cuvara.Netcode.Prediction
             _haveAnchor = false;
             _bestX = _bestY = _bestResidual = 0;
             _haveBest = false;
+            _floorResidual = 0;
+            _haveFloor = false;
             _epochStartedAt = 0;
             Samples = 0;
             StalenessTicks = 0f;

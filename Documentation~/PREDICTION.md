@@ -90,6 +90,45 @@ Clamped at +/-200,000 ppm. The development machine measured +110,000 ppm (host
 `CLOCK_REALTIME` running 11% fast against `CLOCK_MONOTONIC`), which silently disabled
 the fit until 0.23.0 added the clamp and the probe scene.
 
+### The warm-up window, and why the reading is offered in two strengths
+
+A rate is a slope, and a slope over a short baseline is mostly the noise of its two
+endpoints, so `IsUsable` — "a line has been fitted" — cannot turn true early and
+deliberately does not. Two consecutive `EpochSeconds` epochs cannot span the
+`MinimumBaselineSeconds` a fit needs, so against a 15 Hz snapshot stream **the first
+fit lands 8.2 s after join**.
+
+For those eight seconds `WorldViewBinder.TargetLeadTicks()` used to fall back to a
+derived figure of one snapshot interval. On localhost that is **4 base ticks against
+a real age of 0.06**. The lead is not a diagnostic — the clock is steered onto it — so
+a four-tick error there means a tick number stops naming the same moment on the two
+sides, and `LocalMovePredictor.Reconcile`'s history path, which indexes the client's
+own history by the *server's* tick number, reports the whole of it as a positional
+correction of **0.3333 world units (4.00 steps at speed 5 / 60 Hz)** at every start
+and every stop, for the first eight seconds of every session. A live measurement read
+162 reconciles, 36 corrections, max 4.00 steps, with both sides agreeing on 60 Hz and
+every other counter clean — which reads as a tick-rate mismatch and is not one.
+
+The **age**, unlike the rate, does not need a long baseline: over a few seconds the
+lower envelope's slope is one to within a few hundred ppm, which is 0.02 base ticks
+over ten seconds against the four it replaces. So `StalenessTicks` is also offered
+*provisionally*, from `MinimumProvisionalSamples` snapshots (~0.2 s) onward, as the
+height above a running unit-rate floor. `HasEstimate` is true for either strength;
+`IsUsable` still means only "fitted".
+
+**The provisional reading is trusted downwards only.** An unfitted rate drifts the
+residual upward — the 1.103 client/server clock ratio above would read as tens of
+ticks of "age" inside the warm-up — so the binder takes `min(provisional, derived)`.
+Below the derived figure the reading is evidence; above it, it is drift. That makes
+the warm-up lead never worse than the old fallback and, on the measured localhost
+case, four ticks better.
+
+**What this does not fix.** Two free-running 60 Hz clocks disagree about which tick a
+motion transition lands on by plus or minus one, so a start or a stop still costs a
+correction of up to one step (0.0833 units). That is quantisation, not disagreement,
+and no lead can remove it. A measurement that expects corrections to be rare across
+many start/stop transitions is measuring it.
+
 ## PredictionSettings
 
 | Field | Default | Purpose |

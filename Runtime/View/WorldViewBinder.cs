@@ -335,15 +335,35 @@ namespace Cuvara.Netcode.View
         /// input interval, on every snapshot.
         /// </para>
         /// <para>
-        /// <b>Measured, with a derived fallback.</b> <see cref="Staleness"/> fits the server's
-        /// clock to the client's — offset and rate — and reports the height of the newest
-        /// snapshot above that line, which is its age beyond the best the route has shown.
-        /// Until it has a line, the old derived figure stands: one snapshot interval, because
-        /// the newest snapshot describes the tick it was produced on and the next is a whole
-        /// interval behind it. The derived figure is quantised to whole ticks while the real
-        /// age is fractional, which is what left an unlucky join phase with a constant
-        /// 0.3333-unit correction; it is a fallback for the first seconds of a session, not
-        /// the answer.
+        /// <b>Measured, with a derived fallback — and the fallback is now bounded by a
+        /// measurement too.</b> <see cref="Staleness"/> fits the server's clock to the
+        /// client's — offset and rate — and reports the height of the newest snapshot above
+        /// that line, which is its age beyond the best the route has shown. Until it has a
+        /// line, the derived figure is one snapshot interval, because the newest snapshot
+        /// describes the tick it was produced on and the next is a whole interval behind it.
+        /// </para>
+        /// <para>
+        /// <b>That derived figure alone was wrong for eight seconds of every session, and
+        /// wrong by the whole of the defect it was meant to cover.</b> A rate is a slope and
+        /// cannot honestly be fitted over a short baseline, so
+        /// <see cref="SnapshotStalenessEstimator.IsUsable"/> only turns true once two anchors
+        /// sit <see cref="SnapshotStalenessEstimator.MinimumBaselineSeconds"/> apart —
+        /// measured against a 15 Hz snapshot stream, <b>8.2 s after join</b>. Over those eight
+        /// seconds the real age on localhost is <b>0.06 base ticks</b> and the derived figure
+        /// is <b>4</b>, so the clock is steered four base ticks past the server's and the
+        /// reconcile reports exactly that as a correction — <b>0.3333 world units, 4.00
+        /// steps</b> — at every start and every stop. Live, that is 36 corrections in 162
+        /// reconciles with the tick rate agreeing on both sides and every other counter clean,
+        /// which reads as a rate mismatch and is not one.
+        /// </para>
+        /// <para>
+        /// So the age is taken from the estimator as soon as it has a reading at all
+        /// (<see cref="SnapshotStalenessEstimator.HasEstimate"/>), fitted or provisional, and
+        /// the derived figure becomes a CEILING on it rather than a substitute for it. The
+        /// asymmetry is the point and it is not a heuristic: an unfitted rate can only drift
+        /// the provisional reading UPWARD, so below the derived figure the reading is evidence
+        /// and above it it is drift. Taking the smaller is therefore never worse than the old
+        /// fallback and is four ticks better on the measured case.
         /// </para>
         /// <para>
         /// Either way the half round trip is added on top: the one-way delay sits inside the
@@ -359,11 +379,31 @@ namespace Cuvara.Netcode.View
         /// past anything a healthy link produces and far short of a runaway.
         /// </para>
         /// </remarks>
-        private int TargetLeadTicks()
+        /// <remarks>
+        /// <b>internal, not private:</b> this number steers a clock, and the defect it last
+        /// carried was invisible from outside — a four-tick lead against a real age of 0.06
+        /// reads on every other counter as a healthy client. It is asserted directly by
+        /// <c>WorldViewBinderLeadTests</c> rather than inferred from a downstream symptom.
+        /// </remarks>
+        internal int TargetLeadTicks()
         {
             int gap = TickRate.SnapshotTickGap > 0 ? TickRate.SnapshotTickGap : 1;
 
-            float lead = Staleness.IsUsable ? Staleness.StalenessTicks : gap;
+            float lead;
+            if (Staleness.IsUsable)
+            {
+                // A fitted line. Believe it; the ceiling below is the only guard it needs.
+                lead = Staleness.StalenessTicks;
+            }
+            else if (Staleness.HasEstimate)
+            {
+                // Provisional, so trusted only downwards. See the remarks.
+                lead = Math.Min(Staleness.StalenessTicks, gap);
+            }
+            else
+            {
+                lead = gap;
+            }
 
             int rttTicks = 0;
             if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)

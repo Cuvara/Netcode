@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The prediction clock no longer runs a whole snapshot interval past the server for
+  the first eight seconds of every session.** `WorldViewBinder.TargetLeadTicks()` took
+  the snapshot's age from `SnapshotStalenessEstimator` and, until that estimator had
+  fitted a rate, fell back to a derived figure of one snapshot interval. A rate is a
+  slope and cannot honestly be fitted over a short baseline, so `IsUsable` cannot turn
+  true early; measured against a 15 Hz snapshot stream the first fit lands **8.2 s after
+  join** — epoch one only sets an anchor, and two consecutive two-second epochs cannot
+  span the four seconds a fit needs.
+
+  On localhost the derived fallback is **4 base ticks against a real age of 0.06**. The
+  lead steers a clock rather than reporting one, so that four-tick error makes a tick
+  number stop naming the same moment on the two sides, and `LocalMovePredictor.Reconcile`'s
+  history path — which indexes the client's own history by the *server's* tick number —
+  reports the whole of it as a positional correction of **0.3333 world units, 4.00 steps**
+  at every start and every stop. A live measurement against the dev stack read 162
+  reconciles, 36 corrections and a max correction of 4.00 steps with both sides agreeing
+  on 60 Hz, `TickRateDisagrees` false and every other counter clean — the signature of a
+  4x tick-rate mismatch, produced by no rate mismatch at all.
+
+  `SnapshotStalenessEstimator` now offers the age *provisionally* from
+  `MinimumProvisionalSamples` snapshots (~0.2 s) onward, as the height above a running
+  unit-rate floor, flagged by the new `HasEstimate` alongside the unchanged `IsUsable`.
+  The age does not need the rate: over a few seconds the envelope's slope is one to within
+  a few hundred ppm, 0.02 base ticks over ten seconds against the four it replaces. The
+  rate fit, its baseline requirement and the test that pins it are untouched.
+
+  The binder takes `min(provisional, derived)` while the line is unfitted, and believes a
+  fitted reading outright. The asymmetry is not a heuristic: an unfitted rate can only
+  drift the reading upward — the 1.103 clock ratio in `MinimumSkew`'s remarks would read
+  as tens of ticks of "age" inside the warm-up — so below the derived figure the reading
+  is evidence and above it it is drift. Taking the smaller is therefore never worse than
+  the fallback it replaces.
+
+  Reproduced and measured in a wall-clock model of the loop driving the real predictor,
+  the real estimator and the real lead arithmetic against a model server running the same
+  `Shared.GameLogic`: **161 reconciles, 34-47 corrections, max 0.4167 units (5.00 steps)**
+  before; **9-19 corrections, max 0.0833 units (1.00 step)** after.
+
+  Note for anyone reading a correction count: the residual one-step corrections are
+  irreducible. Two free-running 60 Hz clocks disagree about which tick a motion transition
+  lands on by plus or minus one, and `SmoothedCorrections` counts *any* nonzero error, so
+  a stimulus of N isolated start/stop impulses costs on the order of N corrections however
+  correct both sides are.
+
+### Added
+
+- `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
+- `WorldViewBinderLeadTests`, pinning the steering target directly rather than through a
+  downstream symptom — the defect above was invisible on every other counter.
+- `SnapshotStalenessEstimatorTests.TheAgeIsReadableBeforeTheRateFitLands` and
+  `AnUnfittedRateDriftsTheProvisionalReadingUpwardOnly`.
+
+### Changed
+
+- `WorldViewBinder.TargetLeadTicks()` is `internal` rather than `private`, so the number
+  that steers the clock is asserted directly.
+
 ## [0.32.0] - 2026-09-07
 
 ### Fixed

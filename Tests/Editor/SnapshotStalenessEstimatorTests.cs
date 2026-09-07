@@ -80,6 +80,110 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
+        /// A reading is available long before the RATE fit lands, and it is the real age.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The gap this closes, measured.</b> A rate is a slope and cannot be fitted over a
+        /// short baseline, so <see cref="SnapshotStalenessEstimator.IsUsable"/> cannot turn
+        /// true early — the test above pins that deliberately. But epoch one only sets an
+        /// anchor and two consecutive two-second epochs cannot span the four seconds a fit
+        /// needs, so against a 15 Hz snapshot stream the first fit lands <b>8.2 s after
+        /// join</b>, and for those eight seconds the caller had no reading at all and fell
+        /// back to a derived one snapshot interval.
+        /// </para>
+        /// <para>
+        /// On localhost that fallback is <b>4 base ticks against a real age of 0.06</b>, and
+        /// a four-tick error in the steering target is a four-tick error in what a tick number
+        /// means on the two sides — which the reconcile reports as the <b>0.3333-unit,
+        /// 4.00-step</b> correction this fixture's own remarks describe, at every start and
+        /// every stop, for the first eight seconds of every session. Live, 36 corrections in
+        /// 162 reconciles with both sides agreeing on 60 Hz and every other counter clean.
+        /// </para>
+        /// <para>
+        /// The age does not need the rate: over a few seconds the envelope's slope is one to
+        /// within a few hundred ppm, which is 0.02 base ticks over ten seconds against the
+        /// four ticks it replaces. So the reading is offered from
+        /// <see cref="SnapshotStalenessEstimator.MinimumProvisionalSamples"/> onward, flagged
+        /// as provisional rather than fitted.
+        /// </para>
+        /// </remarks>
+        [TestCase(0.0)]
+        [TestCase(1.0)]
+        [TestCase(3.0)]
+        public void TheAgeIsReadableBeforeTheRateFitLands(double extraTicks)
+        {
+            var e = new SnapshotStalenessEstimator();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+
+            // A steady route, so the floor is established after a couple of samples.
+            for (var i = 0; i < SnapshotStalenessEstimator.MinimumProvisionalSamples; i++)
+            {
+                e.Sample(tick, now, BaseHz);
+                tick += SnapshotEvery;
+                now += Interval;
+            }
+
+            Assert.That(e.HasEstimate, Is.True,
+                "a reading must be available within a fifth of a second of joining, or the " +
+                "caller spends the whole warm-up steering on a derived number.");
+            Assert.That(e.IsUsable, Is.False,
+                "and it must NOT claim to be a fitted line: a rate over this baseline would " +
+                "be noise, which is what the test above exists to keep true.");
+
+            // Hold one snapshot for a known extra span. That span IS the age.
+            e.Sample(tick, now + extraTicks / BaseHz, BaseHz);
+
+            Assert.That(e.StalenessTicks, Is.EqualTo((float)extraTicks).Within(0.05f),
+                "the provisional reading is the height above the running floor, so a snapshot " +
+                "held for n ticks must read as n ticks.");
+        }
+
+        /// <summary>
+        /// The provisional reading may drift upward when the two clocks' rates differ, and
+        /// never downward — which is what makes clamping it from above safe.
+        /// </summary>
+        /// <remarks>
+        /// This is the property <see cref="WorldViewBinderLeadTests"/> relies on: the caller
+        /// takes <c>min(provisional, derived)</c>, so below the derived figure the reading is
+        /// evidence and above it it is drift. The 1.103 ratio here is the real one from
+        /// <see cref="SnapshotStalenessEstimator.MinimumSkew"/>'s remarks, where an unfitted
+        /// rate is at its most dangerous.
+        /// </remarks>
+        [Test]
+        public void AnUnfittedRateDriftsTheProvisionalReadingUpwardOnly()
+        {
+            var e = new SnapshotStalenessEstimator();
+            long tick = 1000;
+            double t0 = ClockOffset + tick / (double)BaseHz;
+            const double skew = 1.103;
+
+            float lowest = float.MaxValue;
+            float highest = 0f;
+
+            // Stay inside the warm-up: no fit may land, or this measures the fitted line.
+            for (var i = 0; i < 20; i++)
+            {
+                double now = t0 + skew * (i * Interval);
+                e.Sample(tick, now, BaseHz);
+                tick += SnapshotEvery;
+
+                if (!e.HasEstimate) continue;
+                if (e.StalenessTicks < lowest) lowest = e.StalenessTicks;
+                if (e.StalenessTicks > highest) highest = e.StalenessTicks;
+            }
+
+            Assert.That(e.IsUsable, Is.False, "precondition: still inside the warm-up");
+            Assert.That(lowest, Is.GreaterThanOrEqualTo(0f),
+                "a snapshot cannot be read before it was produced");
+            Assert.That(highest, Is.GreaterThan(1f),
+                "a 10% rate difference must show as a growing reading rather than be absorbed " +
+                "silently -- if it did not, clamping from above would be pointless and the " +
+                "caller could simply believe the provisional number.");
+        }
+
+        /// <summary>
         /// A link whose delay never varies reads as no staleness above its own floor —
         /// whatever that delay is, and whatever the two clocks' origins are.
         /// </summary>
