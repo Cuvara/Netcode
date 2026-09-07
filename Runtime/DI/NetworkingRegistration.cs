@@ -36,7 +36,13 @@ namespace Cuvara.Netcode.DI
             builder.RegisterInstance(settings ?? new NetworkSettings());
 
             builder.Register<UnityNetLog>(Lifetime.Singleton).As<INetLog>();
-            builder.Register<DefaultTransportFactory>(Lifetime.Singleton).As<ITransportFactory>();
+            // A factory lambda, not Register<DefaultTransportFactory>: its constructor
+            // takes `string transportKey = null`, and VContainer does not honour C#
+            // default values — it tried to resolve a `string` and failed with
+            // "No such registration of type: System.String" the first time a scope
+            // resolved NetworkClient through this registration (MainScene,
+            // 2026-09-07). Every sample built the client by hand, so it never showed.
+            builder.Register<ITransportFactory>(_ => new DefaultTransportFactory(), Lifetime.Singleton);
 
             switch (encoding)
             {
