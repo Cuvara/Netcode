@@ -236,6 +236,85 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     : 0f;
             public int Snaps;
             public int SmoothedCorrections;
+
+            /// <summary>
+            /// Reconciles whose correction exceeded one wire-sized step — the ones that are
+            /// a disagreement rather than clock quantisation.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>Why this is not <see cref="SmoothedCorrections"/> with a threshold bolted
+            /// on.</b> That counter increments on ANY nonzero error, and on this stimulus a
+            /// nonzero error is the normal case, not the exceptional one: 20 impulses are 40
+            /// start/stop transitions, and two free-running clocks at the same rate disagree
+            /// by plus or minus one base tick about which tick a transition lands on. One
+            /// step is therefore the FLOOR, reached by correct code, and a run total against
+            /// a per-transition reality is what made <c>corrections &lt;= Samples / 4</c>
+            /// read as "36 of 20 samples" — a comparison of two incommensurable numbers that
+            /// misled this investigation twice.
+            /// </para>
+            /// <para>
+            /// The 1.05 margin is float and frame-straddle headroom on a floor of exactly
+            /// 1.00, not a tolerance for disagreement: the two defects this measurement has
+            /// actually produced were 4.00 and 16 steps.
+            /// </para>
+            /// </remarks>
+            public int CorrectionsAboveOneStep =>
+                ExpectedStepFromWire > 0f
+                    ? ReconcileCorrections.Count(c => c > 1.05f * ExpectedStepFromWire)
+                    : 0;
+
+            /// <summary>Every nonzero correction, one per reconcile, in world units.</summary>
+            /// <remarks>
+            /// Raw rather than pre-classified, because the step they are sized by is measured
+            /// off the wire and is not known until the run ends. See
+            /// <see cref="CorrectionsAboveOneStep"/>.
+            /// </remarks>
+            public readonly List<float> ReconcileCorrections = new List<float>();
+
+            /// <summary>Whether the staleness estimator had fitted a line by the end of the run.</summary>
+            /// <remarks>
+            /// <para>
+            /// <b>These four fields are here because their absence cost two investigations.</b>
+            /// The run that produced them read <c>corrections smoothed 36</c> with the tick
+            /// rate agreeing on both sides, <see cref="TickRateDisagrees"/> false, and every
+            /// other counter in this report clean — and the cause was that the prediction
+            /// clock was steered four base ticks past the server's, which no line in the
+            /// report named. A number that steers a clock must be printed next to the
+            /// symptoms it produces.
+            /// </para>
+            /// <para>
+            /// <c>SnapshotStalenessEstimator</c> cannot fit a rate quickly — a slope over a
+            /// short baseline is mostly the noise of its two endpoints — so against a 15 Hz
+            /// snapshot stream the first fit lands ~8.2 s after join. A run shorter than that
+            /// spends its whole length on the warm-up path, and this field is how a reader
+            /// sees which path was in force.
+            /// </para>
+            /// </remarks>
+            public bool StalenessFitted;
+
+            /// <summary>Measured age of the newest snapshot when it was used, in base ticks.</summary>
+            /// <inheritdoc cref="StalenessFitted"/>
+            public float StalenessTicks;
+
+            /// <summary>Base ticks the prediction clock was told to run ahead of the newest snapshot.</summary>
+            /// <inheritdoc cref="StalenessFitted"/>
+            public int TargetLeadTicks;
+
+            /// <summary>Base ticks between consecutive snapshots, measured off the wire.</summary>
+            /// <remarks>
+            /// Measured, not <c>LiveBackendConfig.TickRate</c>. That constant is the harness's
+            /// SEND cadence and its own fallback, and this file already carries the lesson
+            /// about printing a configured constant in a slot where a measurement belongs —
+            /// see the <c>effective speed</c> line. The two happen to coincide at 60/15 and
+            /// would silently stop coinciding the moment the server's world rate changed.
+            /// </remarks>
+            public int SnapshotGapTicks;
+
+            /// <summary>Client base tick minus the steering target, as of the last steer.</summary>
+            /// <inheritdoc cref="StalenessFitted"/>
+            public long TickErrorTicks;
+
             public float MaxCorrection;
             public float EffectiveSpeed;
             public bool Predicting;
@@ -917,14 +996,69 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "a snap in ordinary localhost play means the client and server disagreed by " +
                 "more than half a step, which nothing in a healthy configuration should do.");
 
-            int correctionBudget = Samples / 4;
-            Assert.That(withPrediction.SmoothedCorrections, Is.LessThanOrEqualTo(correctionBudget),
-                $"{withPrediction.SmoothedCorrections} of {Samples} samples needed a " +
-                "correction. On localhost with matched rates and the same shared logic on " +
-                "both sides, agreement should be the rule and a correction the exception — " +
-                "a correction on nearly every input means a systematic disagreement, and " +
-                "the last time this fired it was a 4x tick-rate mismatch that no other " +
-                "counter showed.");
+            // BOUND THE MAGNITUDE, NOT THE COUNT.
+            //
+            // This replaced `SmoothedCorrections <= Samples / 4`, and the replacement is not
+            // a loosening. That assertion compared a run TOTAL — SmoothedCorrections
+            // increments on any nonzero error, over every reconcile in the run, ~162 of them
+            // — against a budget worded per sample, and printed the mismatch as "36 of 20
+            // samples", which is not a sentence about anything. Worse, it was unreachable by
+            // correct code: this stimulus is 20 isolated impulses, so 40 start/stop
+            // transitions, and two free-running clocks at the SAME rate disagree by plus or
+            // minus one base tick about which tick a transition lands on. A correction of one
+            // step at each is the floor, not a fault, so the budget could only ever be met by
+            // a run that failed to move.
+            //
+            // It also misdirected twice. Both times the count was high and every rate counter
+            // was clean, and both times the reading taken from it was "4x tick-rate mismatch"
+            // — once correctly, and once when the rates agreed at 60 Hz on both sides and the
+            // real cause was the prediction clock being steered four base ticks past the
+            // server's during the staleness estimator's warm-up. A count cannot tell those
+            // apart. The magnitude can: quantisation is one step and a clock offset is as many
+            // steps as the offset is ticks.
+            //
+            // SIZED BY THE TICK RATE MEASURED OFF THE WIRE, deliberately — see
+            // ExpectedStepFromWire. A client predicting at the wrong rate sizes its own
+            // yardstick by that same wrong rate, so a correction of four real ticks prints as
+            // "1.00 steps" and this assertion would pass on exactly the defect it is for.
+            //
+            // 1.5 is half a step of headroom over a floor of exactly 1.00 — float noise and a
+            // transition straddling a frame — and nowhere near enough to hide anything this
+            // measurement has actually produced: the warm-up lead defect was 4.00 steps and
+            // the pre-existing snap defect is 16.
+            const float CorrectionBudgetSteps = 1.5f;
+
+            float wireStep = withPrediction.ExpectedStepFromWire;
+            Assert.That(wireStep, Is.GreaterThan(0f),
+                "the wire's tick rate was never estimated, so a correction cannot be sized " +
+                "by anything except the rate the client believes — which is the one number " +
+                "this assertion must not trust. Treat as no result, not as a pass.");
+
+            Assert.That(withPrediction.MaxCorrection / wireStep,
+                Is.LessThanOrEqualTo(CorrectionBudgetSteps),
+                $"max correction {withPrediction.MaxCorrection:F4} units = " +
+                $"{withPrediction.MaxCorrection / wireStep:F2} steps of the tick rate " +
+                "MEASURED off the wire. Two free-running clocks at the same rate disagree by " +
+                "at most one base tick about which tick a transition lands on, so one step is " +
+                "the floor and anything past it is a real disagreement — a whole snapshot " +
+                $"interval ({withPrediction.SnapshotGapTicks} steps here) means the " +
+                "prediction clock is steered to the wrong offset, not " +
+                "that the rates differ. Read TARGET LEAD and SNAPSHOT AGE in the report above: " +
+                $"the lead was {withPrediction.TargetLeadTicks} base ticks against a measured " +
+                $"age of {withPrediction.StalenessTicks:F2}, staleness " +
+                $"{(withPrediction.StalenessFitted ? "fitted" : "NOT fitted — the warm-up path")}.");
+
+            // The wider net, per transition rather than per run. One step is the floor, so
+            // this counts only the reconciles that are a disagreement; 2 leaves room for a
+            // scheduling hitch at a transition without leaving room for a systematic offset,
+            // which produces one of these at EVERY transition (~40 on this stimulus).
+            Assert.That(withPrediction.CorrectionsAboveOneStep, Is.LessThanOrEqualTo(2),
+                $"{withPrediction.CorrectionsAboveOneStep} of " +
+                $"{withPrediction.ReconcileCorrections.Count} nonzero corrections were larger " +
+                "than one wire-sized step, so they are disagreements rather than the plus or " +
+                "minus one base tick two free-running clocks cost at a motion transition. A " +
+                "systematic offset produces one at every transition; a healthy run produces " +
+                "none, and the budget of 2 is for a scheduling hitch, not for a trend.");
 
             var predictedMedian = Median(withPrediction.Samples.Where(s => !s.VisibleTimedOut)
                 .Select(s => s.InputToVisibleMs));
@@ -1091,6 +1225,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             long tick = 0;
             var lastSendAt = 0.0;
+
+            // Last value of predictor.Reconciles that CorrectionsAboveOneStep has already
+            // judged. See the counting site for why an edge is required.
+            var lastCountedReconcile = -1;
 
             // double, not float, and deliberately.
             //
@@ -1308,6 +1446,26 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     {
                         run.PendingPeak = Math.Max(run.PendingPeak, predictor.PendingCount);
                         run.MaxCorrection = Math.Max(run.MaxCorrection, predictor.LastCorrection);
+
+                        // Edge-triggered on the reconcile, not level-triggered on the frame:
+                        // LastCorrection persists until the next Reconcile, and this loop
+                        // runs at ~900 fps, so sampling it per frame would count one
+                        // correction hundreds of times. Reconciles is the edge.
+                        if (predictor.Reconciles != lastCountedReconcile)
+                        {
+                            lastCountedReconcile = predictor.Reconciles;
+
+                            if (predictor.LastCorrection > 0f)
+                            {
+                                // Recorded raw and sized afterwards: ExpectedStepFromWire
+                                // needs the wire's tick-rate estimate, which is still warming
+                                // up while the first samples run. Sizing here would judge the
+                                // early corrections against a yardstick that does not exist
+                                // yet and silently skip them — the early ones being exactly
+                                // the ones the warm-up defect produced.
+                                run.ReconcileCorrections.Add(predictor.LastCorrection);
+                            }
+                        }
                     }
 
                     // The sampling loop is a frame loop too, and it is the one whose
@@ -1445,6 +1603,16 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.MeasuredTickRate = binder.TickRate.HasEstimate ? binder.TickRate.EstimatedHz : 0f;
             run.TickRateDisagrees = binder.TickRate.Disagrees(run.TickRateInUse);
 
+            // Read for EVERY run, prediction off included: the staleness measurement and the
+            // steering target are properties of the binder and the link, not of the
+            // predictor, so the two columns are comparable and a difference between them is
+            // itself a finding.
+            run.StalenessFitted = binder.Staleness.IsUsable;
+            run.StalenessTicks = binder.Staleness.StalenessTicks;
+            run.TargetLeadTicks = binder.TargetLeadTicks();
+            run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
+            run.TickErrorTicks = predictor?.TickError ?? 0;
+
             if (predictor != null)
             {
                 run.ReplayedSteps = predictor.ReplayedSteps;
@@ -1516,7 +1684,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  pending peak             {run.PendingPeak}\n" +
                 $"  reconciles               {run.Reconciles}\n" +
                 $"  replayed steps           {run.ReplayedSteps}   (zero is normal when nothing was pending)\n" +
-                $"  corrections smoothed     {run.SmoothedCorrections}\n" +
+                $"  corrections smoothed     {run.SmoothedCorrections}" +
+                    "   (ANY nonzero error, over every reconcile — a floor, not a fault:\n" +
+                "                             ~2 per sample is what two free-running clocks cost\n" +
+                "                             at a start and a stop. Read the next line instead.)\n" +
+                $"  corrections > ONE STEP   {run.CorrectionsAboveOneStep} of " +
+                    $"{run.ReconcileCorrections.Count}   <<< THE ASSERTED COUNT — these are " +
+                    "disagreements,\n" +
+                "                             not the plus-or-minus one base tick of clock quantisation\n" +
                 $"  corrections snapped      {run.Snaps}\n" +
                 $"  max correction           {run.MaxCorrection:F4} world units\n" +
                 $"  max correction in steps  {(run.ExpectedStep > 0f ? (run.MaxCorrection / run.ExpectedStep).ToString("F2") : "n/a")}" +
@@ -1545,6 +1720,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
                     (run.TickRateDisagrees ? "   <<< DISAGREES with the rate in use" : "   (agrees)") + "\n" +
+                // ── THE CLOCK OFFSET ────────────────────────────────────────────────────
+                //
+                // Printed because its absence cost two investigations. A run reading
+                // `corrections smoothed 36` with the rates agreeing on both sides and every
+                // other counter clean was diagnosed as a tick-rate mismatch twice; the cause
+                // was TARGET LEAD sitting at one whole snapshot interval against a measured
+                // SNAPSHOT AGE near zero, which no line in this report named. The lead steers
+                // the prediction clock, so an error in it is an error in what a tick NUMBER
+                // means on the two sides, and the reconcile reports the whole of it as
+                // position. Every one of these is a binder/link property, so they are printed
+                // for the prediction-OFF run too and the two columns compare.
+                $"  SNAPSHOT AGE measured    {run.StalenessTicks:F2} base ticks" +
+                    (run.StalenessFitted
+                        ? "   (fitted)"
+                        : "   <<< NOT FITTED — provisional; a rate needs ~8 s of\n" +
+                          "                             snapshots and a short run never gets one") + "\n" +
+                $"  TARGET LEAD in use       {run.TargetLeadTicks} base ticks" +
+                    LeadNote(run) + "\n" +
+                $"  snapshot gap measured    {run.SnapshotGapTicks} base ticks   " +
+                    "(a lead equal to this is the warm-up fallback, not a measurement)\n" +
+                $"  clock error (last steer) {run.TickErrorTicks} base ticks" +
+                    (Math.Abs(run.TickErrorTicks) > 2
+                        ? "   <<< the clock is not tracking the steering target"
+                        : "   (client base tick minus the target; 0 is in step)") + "\n" +
                 $"  --- smoothness (per render frame, while moving) ---\n" +
                 $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
                     "high means the avatar teleports once per input and is frozen between\n" +
@@ -1805,6 +2004,38 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// through every tick. Every other assertion in this file is blind to it.
         /// </para>
         /// </remarks>
+        /// <summary>
+        /// Names what the steering target is, when it is not the measured age.
+        /// </summary>
+        /// <remarks>
+        /// The lead is the clock offset between the two sides expressed as a number, and a
+        /// wrong one is reported by the reconcile as position rather than as a clock fault —
+        /// which is why it needs a note and not just a figure. The warm-up case is called out
+        /// by name because it is time-limited and therefore invisible in a long session and
+        /// dominant in a short one: <c>SnapshotStalenessEstimator</c> needs ~8 s of snapshots
+        /// before it can fit a rate, and a 20-sample run is ~10 s end to end.
+        /// </remarks>
+        private static string LeadNote(Run run)
+        {
+            if (run.StalenessFitted)
+            {
+                return "   (from the fitted line)";
+            }
+
+            float measured = run.StalenessTicks;
+            if (run.TargetLeadTicks - measured > 1.5f)
+            {
+                return "   <<< ABOVE the measured age by " +
+                       (run.TargetLeadTicks - measured).ToString("F1") +
+                       " ticks. The clock is steered\n" +
+                       "                             past the server by that much, and every step of it " +
+                       "comes\n" +
+                       "                             back as a correction at each start and stop.";
+            }
+
+            return "   (provisional, clamped by the snapshot gap)";
+        }
+
         private static string HoldWindowNote(Run run)
         {
             if (run.HoldTicksInUse <= 0)

@@ -53,9 +53,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a stimulus of N isolated start/stop impulses costs on the order of N corrections however
   correct both sides are.
 
+- **`PredictionLatencyMeasurement` now bounds the correction MAGNITUDE instead of counting
+  corrections.** `SmoothedCorrections <= Samples / 4` was replaced by
+  `MaxCorrection / ExpectedStepFromWire <= 1.5` steps, plus a new
+  `CorrectionsAboveOneStep <= 2`.
+
+  The old assertion was unreachable by correct code and it misdirected twice. It compared a
+  run TOTAL — `SmoothedCorrections` increments on any nonzero error, over all ~162
+  reconciles — against a budget worded per sample, and printed the mismatch as "36 of 20
+  samples". The stimulus is 20 isolated impulses, so 40 start/stop transitions, and two
+  free-running clocks at the *same* rate disagree by ±1 base tick about which tick a
+  transition lands on: one step of correction at each is the floor, not a fault. Both times
+  the count went high with every rate counter clean, the reading taken from it was "4x
+  tick-rate mismatch" — once correctly, and once when the rates agreed at 60 Hz on both
+  sides and the cause was the warm-up lead above. A count cannot separate those; a magnitude
+  can, because quantisation is one step and a clock offset is as many steps as it is ticks.
+
+  Sized by `ExpectedStepFromWire`, not `ExpectedStep`: a client predicting at the wrong rate
+  sizes its own yardstick by that rate and a four-tick error prints as "1.00 steps". The
+  budget of 1.5 is half a step of headroom over a floor of exactly 1.00 — the two defects
+  this measurement has produced were 4.00 and 16 steps. Both divergence guards
+  (`diverging.Reconciles > 0`, `diverging.MaxCorrection > 0`) are lower bounds on a different
+  run and are unaffected; `withPrediction.Snaps == 0` is unaffected because
+  `SmoothingThreshold` is 0.5 units and neither 0.3333 nor 0.0833 reaches it.
+
+- **The `[Measure]` report now prints the clock offset**, for every run including
+  prediction-OFF, so the two columns compare: `SNAPSHOT AGE measured` (with whether the
+  staleness line is fitted or provisional), `TARGET LEAD in use`, `snapshot gap measured`,
+  and `clock error (last steer)`. A lead sitting at the measured snapshot gap is flagged as
+  the warm-up fallback rather than a measurement. The run that prompted this work showed
+  every symptom of a wrong clock offset while the report named no clock offset at all, which
+  is why the same defect was diagnosed as a tick-rate mismatch twice. `corrections smoothed`
+  is kept but re-labelled as the floor it is, with the asserted count printed beneath it.
+
 ### Added
 
 - `SnapshotStalenessEstimator.HasEstimate` and `MinimumProvisionalSamples`.
+- `PredictionLatencyMeasurement`: `CorrectionsAboveOneStep`, `ReconcileCorrections`,
+  `StalenessFitted`, `StalenessTicks`, `TargetLeadTicks`, `SnapshotGapTicks`,
+  `TickErrorTicks`, and the `LeadNote` reader.
+- `InternalsVisibleTo("Cuvara.Netcode.Tests.PlayMode")`, so the measurement can report
+  `WorldViewBinder.TargetLeadTicks()`. Diagnostic only — the PlayMode suite asserts on
+  observable behaviour, not on the internal.
 - `WorldViewBinderLeadTests`, pinning the steering target directly rather than through a
   downstream symptom — the defect above was invisible on every other counter.
 - `SnapshotStalenessEstimatorTests.TheAgeIsReadableBeforeTheRateFitLands` and

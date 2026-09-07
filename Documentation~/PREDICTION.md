@@ -129,6 +129,30 @@ correction of up to one step (0.0833 units). That is quantisation, not disagreem
 and no lead can remove it. A measurement that expects corrections to be rare across
 many start/stop transitions is measuring it.
 
+### Reading a correction figure
+
+Size a correction by the tick rate **measured off the wire**, never by the one the client
+believes it is predicting at: a client on the wrong rate sizes its own yardstick by that
+same wrong rate, so four real ticks of error print as "1.00 steps" and look healthy.
+`PredictionLatencyMeasurement` exposes both as `ExpectedStepFromWire` and `ExpectedStep`
+and prints them on adjacent lines for exactly this reason.
+
+Then read the magnitude, not the count. `LocalMovePredictor.SmoothedCorrections`
+increments on *any* nonzero error, so on a stimulus of N start/stop transitions it lands
+near N however correct both sides are — it is a floor, not a fault. What separates the
+causes is how big each correction is:
+
+| Max correction | Meaning |
+|---|---|
+| ~1 step | the ±1 base tick two free-running clocks cost at a transition. The floor. |
+| ~`SnapshotTickGap` steps (4 at 60/15) | the prediction clock is steered to the wrong offset — compare `TARGET LEAD` against `SNAPSHOT AGE` |
+| a ratio of the two rates | a genuine tick-rate mismatch; `TickRateEstimator.Disagrees` should be true as well |
+
+The `[Measure]` block prints `SNAPSHOT AGE measured`, `TARGET LEAD in use`, `snapshot gap
+measured` and `clock error (last steer)` for every run, prediction-OFF included, because
+the first three are properties of the binder and the link rather than of the predictor —
+so the two columns are comparable and a difference between them is itself a finding.
+
 ## PredictionSettings
 
 | Field | Default | Purpose |
