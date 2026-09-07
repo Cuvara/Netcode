@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **Version bump note:** the next release is **0.31.0** (minor). Behaviour changes
+> without a compile break: reconnect now covers ordinary link loss, the backoff
+> schedule and its defaults changed, and `TeardownConnections` no longer emits a
+> spurious `Disconnected` transition. One new enum member
+> (`NetworkClientState.Reconnecting = 7`) — exhaustive `switch`es gain a case.
+
+### Added
+
+- **Reconnect policy by disconnect cause** (`ReconnectPolicy`, audit F08). `PeerClosed`,
+  `HeartbeatTimeout` and `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend — now
+  reconnect automatically, immediately and then with exponential backoff + jitter, inside a
+  total budget sized to the game server's 30 s entity hold. `server_shutdown` keeps its
+  delay-first round (storm spreading). A user close, a `kick` (any reason), an unpaired
+  `disconnect` with any reason but `server_shutdown`, and a protocol error never reconnect.
+  A gateway `kick` marks the client evicted so the session drop that follows is terminal.
+  Every round re-authenticates through `IAuthProvider` (the old join token was consumed).
+  Rounds stop early on permanent server answers — `invalid token`, `invalid auth request`,
+  `map is not available`, or a provider that cannot produce a credential — and surface the
+  real error. Full cause → action → budget table in `Documentation~/NETCODE.md`
+  ("Reconnect policy"); `ReconnectPolicyTests` pins it.
+- `NetworkSettings.ReconnectOnConnectionLoss` (default on), `ReconnectMaxDelay` (8 s),
+  `ReconnectBudget` (25 s), `HeartbeatScheduler`, `MonotonicClock`.
+- `NetworkClient.ReconnectProgress` event carrying the existing `ReconnectionProgress`
+  struct (attempt, cap, pause), `NetworkClient.IsReconnecting`,
+  `NetworkClientState.Reconnecting`, `ReconnectExhaustedException` (`Attempts`, `Elapsed`,
+  `Permanent`, last failure as inner) delivered through `ReconnectFailed` when the loop
+  gives up. `GameSessionClient.CloseInfo`.
+- **Operation generation** (audit F09, netcode half). `ConnectAsync`, `TransferToMapAsync`,
+  `Disconnect()`, `Dispose()` and each reconnect round start a new generation; every async
+  step re-checks its token and generation after each await, and a superseded flow completes
+  with `OperationCanceledException` without touching state. The gateway and session are
+  locals owned by the flow until the join lands; a `finally` disposes both on any failure,
+  cancel or supersede, so `State` always matches what is connected. Auth (including the
+  `IAuthProvider` call) moved inside that ownership — a cancel during auth used to leave the
+  gateway socket open and `State == Authenticating`. `NetworkClientRecoveryTests` covers
+  cancel-during-auth, stale completion after `Disconnect()`, a newer connect superseding an
+  older one, and disconnect during a backoff pause.
+- **Monotonic clock for elapsed time.** `WireConnection` measured heartbeat age and RTT with
+  `DateTimeOffset.UtcNow`; an NTP step of +1 h between two pings read as 3600 s of silence
+  and killed a healthy link. Heartbeat age, RTT and the reconnect budget now read
+  `NetworkSettings.MonotonicClock` (a process `Stopwatch`). The `ping.timestamp` protocol
+  field stays wall-clock and is used only as an echo match token; RTT is the monotonic
+  delta to the matched ping. `WireConnectionClockTests` stages ±1 h steps.
+
+### Changed
+
+- `NetworkSettings.ReconnectDelay` default 2 s → **1 s** and the schedule is exponential
+  (1, 2, 4, 8, 8 …, capped by `ReconnectMaxDelay`) instead of linear (2, 4, 6 …);
+  `ReconnectAttempts` default 5 → 8 (the budget, not the count, normally ends the loop).
+- `ConnectAsync(jwt, mapId, ct)` rejects an empty `jwt` with `ArgumentException` locally
+  instead of sending it to the gateway.
+- `TransferToMapAsync` closes the gateway politely as well as the session before redialing.
+- The heartbeat loop logs (rather than silently dies on) an unexpected exception.
+- `NetworkBootstrap` logs the new `Reconnecting` state.
+
+### Documentation
+
+- `Documentation~/NETCODE.md`: new "Reconnect policy" section (cause → action → budget
+  table, permanent-error table, why the gateway link is not retried in place, "One
+  operation at a time"); heartbeat section documents the monotonic clock; map-transfer
+  flow updated. `README.md` feature bullets updated.
+
 ## [0.30.0] - 2026-09-06
 
 ### Added

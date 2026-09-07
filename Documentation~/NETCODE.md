@@ -223,7 +223,18 @@ lives inside the package so the package remains importable on its own, and
 Both hops ping every **10 s** and drop a peer after **30 s** without a pong, so
 `WireConnection` implements it once and both use it. Ours replies to a `ping`
 regardless of session state, exactly as both servers do, and the delay is
-`DelayType.Realtime` so a paused or slowed game is not dropped at 30 s.
+`DelayType.Realtime` (`NetworkSettings.HeartbeatScheduler`) so a paused or slowed
+game is not dropped at 30 s.
+
+**Elapsed time is monotonic.** Heartbeat age, RTT and the reconnect budget read
+`NetworkSettings.MonotonicClock` — a process `Stopwatch` by default — never
+`DateTime.UtcNow`. A phone that NTP-syncs mid-session, or a laptop that corrects
+its clock on resume, steps the wall clock by minutes or hours; on a wall-clock
+implementation that step *was* the pong age, and the link was declared dead on
+the next tick (0.30.0 and earlier). The wall clock still fills the protocol's
+`timestamp` fields — the server echoes ours back in `pong`, and it is matched to
+the ping in flight by equality only, then the RTT is taken on the monotonic
+clock. `WireConnectionClockTests` stages a ±1 h step and shows nothing happens.
 
 The gateway pings from the moment it accepts the socket, so a heartbeat can land
 in the middle of the handshake, before the loops start. `GatewayClient` answers
@@ -256,6 +267,102 @@ pinned to one server. A retry must call `enter_world` again for a **fresh**
 token; replaying one is rejected with `Token already used`, which would turn a
 transient failure into a permanent one. `NetworkClient` retries that way, up to
 `NetworkSettings.JoinAttempts`.
+
+## Reconnect policy
+
+The game server holds a disconnected player's entity for **30 s** (API.md,
+"Heartbeat"), so a client that comes back inside that window lands in its own
+body. `ReconnectPolicy` decides, from how the gameplay socket ended, whether to
+use that window. The table is the contract; `ReconnectPolicyTests` pins it.
+
+| Session close (`DisconnectCause` / reason) | Action | First try | Budget |
+|---|---|---|---|
+| `LocalClose` — `Disconnect()`, `Dispose()`, a transfer, a superseded operation | **Never** | — | — |
+| `Kicked` — `kick`+`disconnect`, any reason (`duplicate_login` today) | **Never**: the account is playing elsewhere; coming back would evict *that* login | — | — |
+| `ServerDisconnect` with `server_shutdown` | **Reconnect after a pause**: a drain hits every client at once, an immediate retry is a storm at a gateway still allocating the replacement | after 1 s + jitter | 25 s |
+| `ServerDisconnect` with any other reason (`duplicate_login` from a pre-`kick` build, unknown) | **Never**: the server chose to end it | — | — |
+| `PeerClosed`, `HeartbeatTimeout`, `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend, dead socket | **Reconnect at once**, then back off | immediately | 25 s |
+| `ProtocolError` — an undecodable frame | **Never**: the same build sends the same frame | — | — |
+| **Gateway** close, `Kicked` | Session untouched (ADR-3); `_evicted` set, so the game server's kick that follows (ADR-20) is terminal | — | — |
+| **Gateway** close, any other cause | Session untouched; **not retried in place** — see below | — | — |
+
+Toggles: `ReconnectOnServerShutdown` (row 3) and `ReconnectOnConnectionLoss`
+(row 5), both on by default. Both require an `IAuthProvider`; without one there
+is no credential to come back with and the policy is never consulted.
+
+**Schedule.** Round pause = `min(ReconnectDelay × 2^(round−1), ReconnectMaxDelay)`
++ `[0, RetryJitter)`; defaults 1 s, 8 s, 500 ms → 1, 2, 4, 8, 8 … A round whose
+pause would end past `ReconnectBudget` (25 s from the close) is not started, and
+`ReconnectAttempts` (8) caps the count regardless. A round in flight when the
+budget expires is allowed to finish — `ConnectTimeout` and `EnterWorldTimeout`
+bound it. The 25 s leaves the last round's own dial + join inside the 30 s hold.
+Note that a client-side `HeartbeatTimeout` is itself detected 30 s after the last
+pong; the server times out at about the same moment and *its* hold starts then,
+so the budget still applies from the client's close — but if the server saw a
+RST long before the client noticed silence, the hold may already be spent and
+the rejoin creates a body from persisted state.
+
+**Every round re-authenticates.** The join token that got us in was consumed by
+that join, and the gateway destroyed its session record when our socket died, so
+each round runs the full two-hop flow through `IAuthProvider.GetJwtAsync` — a
+provider with a cached, still-valid JWT answers without traffic; a cold re-auth
+is the provider's business. `NakamaAuthProvider` mints a fresh gateway token per
+call.
+
+**Stopping early.** A round that fails with one of the servers' *permanent*
+answers ends the loop at once, so the real error surfaces instead of 25 s of
+identical refusals (`ReconnectPolicy.IsPermanentFailure`):
+
+| Server error string | Source | Meaning |
+|---|---|---|
+| `invalid token` | gateway `auth_resp` | the provider's JWT is refused; a new round gets the same answer — re-login |
+| `invalid auth request` | gateway `auth_resp` | malformed auth frame: a client bug |
+| `map is not available` | gateway `enter_world_resp` | no fleet hosts the map |
+| any `InvalidOperationException` from the provider | `IAuthProvider` | no credential could be produced (Nakama refused, RPC returned no token) |
+
+Everything else — `session expired`, `rate limited`, `not authenticated`,
+`server is starting, retry shortly`, `no server available for map`,
+`Server is full`, `Token already used`, unknown strings — is retried until the
+budget ends. The server's error set is the server's to extend; wrongly retrying
+a terminal error costs the budget, wrongly aborting a transient one costs the
+player their body.
+
+**After the budget.** `State` is `Ended`, `ReconnectFailed` fires with a
+`ReconnectExhaustedException` (`Attempts`, `Elapsed`, `Permanent`, the last
+failure as `InnerException`), and nothing more happens. The caller shows a
+"connection lost" screen with a retry; a later `ConnectAsync` is a fresh login
+and, if the hold has expired, joins a body rebuilt from persisted state.
+
+**Progress.** `ReconnectProgress(ReconnectionProgress)` fires when a round is
+scheduled (attempt, cap, pause in seconds), `ReconnectAttemptStarted(int)` when
+its pause ends, `Reconnected` on landing. `State` is `Reconnecting` during the
+pauses and walks `Authenticating → Assigning → Joining` during each round;
+`IsReconnecting` is true for the whole loop.
+
+**Why the gateway link is not retried in place.** Losing the gateway socket
+while the game session is up costs only eviction notices. Re-authenticating
+would create a *new* gateway session for the same user — and if the gateway has
+not yet noticed our old socket die (client-side heartbeat timeout, asymmetric
+partition), `handleAuth` finds the old session, publishes `session_superseded`
+for its join-token `jti` (ADR-20), and the game server kicks **our own live
+session**. So a gateway drop raises `GatewayClosed` and nothing else; the link
+comes back with the next connect, reconnect or transfer, all of which redo both
+hops anyway.
+
+### One operation at a time
+
+Every `ConnectAsync`, `TransferToMapAsync`, `Disconnect()`, `Dispose()` and
+reconnect round starts a new *operation generation*. Each async flow captures
+its generation and re-checks it (and its `CancellationToken`) after every await;
+a flow that resumes superseded — the user cancelled and logged in again, a
+reconnect round was overtaken by a transfer — throws `OperationCanceledException`
+and touches no shared state. Connections are owned by the flow that dialed them
+until the join lands: the gateway and session objects are locals, committed to
+the client only at `InWorld`, and a `finally` disposes both on any exit before
+that point. So a cancel during auth, a refused assignment, a timed-out join and a
+provider that throws all leave `State == Disconnected` with both sockets closed,
+and a stale completion can never flip state or leak a socket
+(`NetworkClientRecoveryTests`).
 
 ## Snapshots and entity-handle interning
 
@@ -1121,10 +1228,10 @@ gateway is already a redirector (ADR-3) and `enter_world` accepts any map id on 
 authenticated connection, so a map transfer needs no new wire message.
 
 The flow:
-1. `State = Transferring` (for UI loading screens)
-2. Cancel any in-progress automatic reconnect
-3. `session.Leave()` — polite disconnect from the current game server
-4. `ConnectAsync(mapId)` — full two-hop: new gateway auth + `enter_world` + game server join
+1. A new operation generation: any in-progress connect or automatic reconnect is superseded
+2. `session.Leave()` + `gateway.Close()` — polite disconnects, so the old server releases the entity now
+3. `State = Transferring` (for UI loading screens)
+4. The full two-hop flow: new gateway auth + `enter_world` + game server join
 5. `State = InWorld`, `CurrentMapId = mapId`
 
 The `IAuthProvider` supplies a cached JWT in the common case, so a transfer costs zero auth

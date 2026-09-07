@@ -75,19 +75,63 @@ namespace Cuvara.Netcode.Client
         /// <remarks>
         /// The server holds the entity for 30 s after a disconnect precisely so a
         /// client can come back into its own body; until this flag existed nothing
-        /// in the package consumed that window (#54).
+        /// in the package consumed that window (#54). The first round waits a full
+        /// backoff pause: a drain reaches every client at once, and an immediate
+        /// retry is a synchronized storm.
         /// </remarks>
         public bool ReconnectOnServerShutdown { get; set; } = true;
 
-        /// <summary>Reconnect rounds before giving up and surfacing the failure.</summary>
-        public int ReconnectAttempts { get; set; } = 5;
+        /// <summary>
+        /// Reconnect automatically when the gameplay socket dies without anyone
+        /// choosing it: <see cref="Connection.DisconnectCause.PeerClosed"/>,
+        /// <see cref="Connection.DisconnectCause.HeartbeatTimeout"/> and
+        /// <see cref="Connection.DisconnectCause.TransportError"/> — the ordinary
+        /// mobile disconnections (NAT expiry, Wi-Fi hand-off, app suspend). The
+        /// first round is immediate; backoff starts from the second. Requires an
+        /// <c>IAuthProvider</c>. Never applies to a user-initiated close, an
+        /// eviction, or a protocol fault — see <see cref="ReconnectPolicy"/>.
+        /// </summary>
+        public bool ReconnectOnConnectionLoss { get; set; } = true;
 
         /// <summary>
-        /// Base pause before each reconnect round, before jitter. Grows linearly
-        /// with the round number (2 s, 4 s, 6 s…), so five rounds span ~30 s —
-        /// the entity-hold window.
+        /// Upper bound on reconnect rounds. <see cref="ReconnectBudget"/> is the
+        /// bound that normally ends the loop; this one exists so a budget set very
+        /// large cannot turn into an unbounded retry.
         /// </summary>
-        public TimeSpan ReconnectDelay { get; set; } = TimeSpan.FromSeconds(2);
+        public int ReconnectAttempts { get; set; } = 8;
+
+        /// <summary>
+        /// Base pause of the reconnect backoff, before jitter. Doubles every
+        /// round (1 s, 2 s, 4 s, 8 s…) up to <see cref="ReconnectMaxDelay"/>.
+        /// </summary>
+        /// <remarks>
+        /// Was 2 s and linear (2, 4, 6…) before 0.31.0. Exponential with a 1 s base
+        /// gets a client whose Wi-Fi blipped back in world in ~1 s instead of ~2 s,
+        /// and still spreads a restart storm: the pauses of five rounds sum to 23 s
+        /// plus jitter, inside the entity hold.
+        /// </remarks>
+        public TimeSpan ReconnectDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+        /// <summary>Cap on a single backoff pause, before jitter.</summary>
+        public TimeSpan ReconnectMaxDelay { get; set; } = TimeSpan.FromSeconds(8);
+
+        /// <summary>
+        /// Total time the automatic reconnect may keep trying, measured from the
+        /// close. A round whose pause would end past the budget is not started;
+        /// <see cref="NetworkClient.ReconnectFailed"/> fires with a
+        /// <see cref="ReconnectExhaustedException"/> instead.
+        /// </summary>
+        /// <remarks>
+        /// 25 s: inside the game server's 30 s entity hold with room for the last
+        /// round's own dial + join. A round that is in flight when the budget
+        /// expires is allowed to finish — its timeouts (<see cref="ConnectTimeout"/>,
+        /// <see cref="EnterWorldTimeout"/>) bound it, not this. After the budget the
+        /// session stays <see cref="NetworkClientState.Ended"/>; a later
+        /// <see cref="NetworkClient.ConnectAsync(string, System.Threading.CancellationToken)"/>
+        /// joins as a fresh login and, if the hold has expired, into a body rebuilt
+        /// from persisted state.
+        /// </remarks>
+        public TimeSpan ReconnectBudget { get; set; } = TimeSpan.FromSeconds(25);
 
         /// <summary>
         /// Keep the gateway connection open for the whole session.
@@ -113,6 +157,26 @@ namespace Cuvara.Netcode.Client
         /// </summary>
         public Func<TimeSpan, CancellationToken, UniTask> DelayScheduler { get; set; } =
             (delay, ct) => UniTask.Delay(delay, DelayType.Realtime, PlayerLoopTiming.Update, ct);
+
+        /// <summary>
+        /// How a connection waits between heartbeat pings. Separate from
+        /// <see cref="DelayScheduler"/> on purpose: tests make that one complete
+        /// synchronously, and a heartbeat loop on a synchronous delay would spin.
+        /// A test drives the heartbeat by handing back a task it completes itself.
+        /// The default is realtime, so a paused or slowed game still answers the
+        /// server's liveness check instead of being dropped at 30 s.
+        /// </summary>
+        public Func<TimeSpan, CancellationToken, UniTask> HeartbeatScheduler { get; set; } =
+            (delay, ct) => UniTask.Delay(delay, DelayType.Realtime, PlayerLoopTiming.Update, ct);
+
+        /// <summary>
+        /// Monotonic milliseconds for every elapsed-time decision the package makes:
+        /// heartbeat age, round-trip time, reconnect budget. Never wall-clock — a
+        /// phone that syncs its clock, or a machine that suspends and corrects on
+        /// resume, must not look like 30 s of silence. Wall-clock (UTC) is still used
+        /// where the protocol carries a timestamp, and only there.
+        /// </summary>
+        public Func<long> MonotonicClock { get; set; } = MonotonicClockDefault.NowMs;
 
         /// <summary>
         /// Outbound send queue depth per connection, matching the game server's

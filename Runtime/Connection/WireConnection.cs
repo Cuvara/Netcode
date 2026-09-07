@@ -56,8 +56,17 @@ namespace Cuvara.Netcode.Connection
         private int _started;
         private int _closeSignalled;
         private int _disposed;
-        private long _lastPongMs;
+        // Monotonic milliseconds (NetworkSettings.MonotonicClock), never wall
+        // clock: heartbeat age and RTT are elapsed-time questions, and a wall
+        // clock that steps — NTP sync, suspend/resume — must not read as silence.
+        private long _lastPongMono;
         private long _lastRoundTripMs;
+
+        // The ping in flight: the wall-clock timestamp it carried (the protocol
+        // field the server echoes back, used purely as a match token) and the
+        // monotonic instant it left, which is what the RTT is measured from.
+        private long _pingSentWall;
+        private long _pingSentMono;
 
         /// <summary>
         /// Set when a <c>kick</c> has been seen, so the <c>disconnect</c> the server
@@ -88,7 +97,7 @@ namespace Cuvara.Netcode.Connection
                 ? outboundCodec
                 : new ProtobufWireCodec();
 
-            _lastPongMs = NowMs();
+            _lastPongMono = MonoMs();
         }
 
         /// <summary>
@@ -149,7 +158,7 @@ namespace Cuvara.Netcode.Connection
                 throw new InvalidOperationException($"{_name}: connection already started");
             }
 
-            _lastPongMs = NowMs();
+            _lastPongMono = MonoMs();
 
             ReadLoopAsync().Forget();
             WriteLoopAsync().Forget();
@@ -316,25 +325,53 @@ namespace Cuvara.Netcode.Connection
             {
                 while (!token.IsCancellationRequested)
                 {
-                    // Realtime, so a paused or slowed game still answers the server's
-                    // liveness check instead of being dropped at 30 s.
-                    await UniTask.Delay(_settings.PingInterval, DelayType.Realtime, PlayerLoopTiming.Update, token);
+                    // Realtime by default (NetworkSettings.HeartbeatScheduler), so a
+                    // paused or slowed game still answers the server's liveness
+                    // check instead of being dropped at 30 s.
+                    await _settings.HeartbeatScheduler(_settings.PingInterval, token);
 
-                    var silentMs = NowMs() - Interlocked.Read(ref _lastPongMs);
-                    if (silentMs > (long)_settings.PongTimeout.TotalMilliseconds)
+                    if (!TickHeartbeat())
                     {
-                        _log.Warn($"{_name}: no pong for {silentMs} ms, declaring the link dead");
-                        SignalClose(new DisconnectInfo(DisconnectCause.HeartbeatTimeout));
                         return;
                     }
-
-                    Send(MsgType.Ping, new PingMessage { Timestamp = NowMs() });
                 }
             }
             catch (OperationCanceledException)
             {
                 // Expected.
             }
+            catch (Exception ex)
+            {
+                // A heartbeat loop that dies quietly leaves the connection to be
+                // dropped by the server 30 s later with no client-side record of
+                // why. Say so.
+                _log.Error($"{_name}: heartbeat loop faulted", ex);
+            }
+        }
+
+        /// <summary>
+        /// One heartbeat round: declare the link dead if the last pong is older
+        /// than <see cref="NetworkSettings.PongTimeout"/> on the monotonic clock,
+        /// otherwise send a ping. Returns false once the link has been declared dead.
+        /// </summary>
+        private bool TickHeartbeat()
+        {
+            var now = MonoMs();
+            var silentMs = now - Interlocked.Read(ref _lastPongMono);
+            if (silentMs > (long)_settings.PongTimeout.TotalMilliseconds)
+            {
+                _log.Warn($"{_name}: no pong for {silentMs} ms, declaring the link dead");
+                SignalClose(new DisconnectInfo(DisconnectCause.HeartbeatTimeout));
+                return false;
+            }
+
+            // The timestamp is a protocol field and stays wall-clock; it is only
+            // ever compared for equality with the echo, never subtracted from.
+            var wall = WallMs();
+            Interlocked.Exchange(ref _pingSentWall, wall);
+            Interlocked.Exchange(ref _pingSentMono, now);
+            Send(MsgType.Ping, new PingMessage { Timestamp = wall });
+            return true;
         }
 
         // ─────────────────────────── frame handling ───────────────────────────
@@ -383,16 +420,21 @@ namespace Cuvara.Netcode.Connection
                     Send(MsgType.Pong, new PongMessage
                     {
                         Timestamp = ping?.Timestamp ?? 0L,
-                        ServerTime = NowMs()
+                        ServerTime = WallMs()
                     });
                     return;
 
                 case MsgType.Pong:
-                    var now = NowMs();
-                    Interlocked.Exchange(ref _lastPongMs, now);
-                    if (frame.Payload is PongMessage pong && pong.Timestamp > 0L)
+                    var now = MonoMs();
+                    Interlocked.Exchange(ref _lastPongMono, now);
+                    if (frame.Payload is PongMessage pong
+                        && pong.Timestamp > 0L
+                        && pong.Timestamp == Interlocked.Read(ref _pingSentWall))
                     {
-                        Interlocked.Exchange(ref _lastRoundTripMs, now - pong.Timestamp);
+                        // Matched to the ping in flight by its echoed timestamp, then
+                        // measured on the monotonic clock — a wall-clock step between
+                        // ping and pong changes neither the match nor the result.
+                        Interlocked.Exchange(ref _lastRoundTripMs, now - Interlocked.Read(ref _pingSentMono));
                     }
 
                     return;
@@ -488,6 +530,15 @@ namespace Cuvara.Netcode.Connection
             }
         }
 
-        private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        /// <summary>
+        /// Wall clock, for protocol timestamp fields only. Overridable by tests so
+        /// a clock step can be staged and shown not to matter.
+        /// </summary>
+        internal Func<long> WallClock { get; set; } = () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        private long WallMs() => WallClock();
+
+        /// <summary>Monotonic clock, for every elapsed-time comparison.</summary>
+        private long MonoMs() => _settings.MonotonicClock();
     }
 }
