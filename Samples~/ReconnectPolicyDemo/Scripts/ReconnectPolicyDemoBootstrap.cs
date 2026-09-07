@@ -90,14 +90,27 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         private CancellationTokenSource _cts;
         private readonly List<string> _eventLog = new List<string>();
 
-        private DateTime _reconnectStartedUtc = DateTime.MinValue;
-        private DateTime _userClosedUtc = DateTime.MinValue;
+        // Monotonic milliseconds from NetworkSettings.MonotonicClock — the same clock the
+        // client times its own reconnect budget with, so the panel and the policy cannot
+        // disagree, and an NTP step mid-reconnect cannot produce a negative elapsed the way
+        // DateTime.UtcNow could. -1 means "not running".
+        private const long NotRunning = -1;
+        private long _reconnectStartedMs = NotRunning;
+        private long _userClosedMs = NotRunning;
         private int _attempt;
         private int _maxAttempts;
         private float _nextDelaySeconds;
         private string _lastCause = "—";
         private bool _connecting;
         private bool _chaosActive;
+
+        /// <summary>
+        /// Set once "Simulate heartbeat timeout" has been pressed. The override is sticky by
+        /// design — the shortened PongTimeout/PingInterval stay in force for every later
+        /// reconnect, so the header says so instead of letting the changed numbers look
+        /// like a glitch.
+        /// </summary>
+        private bool _heartbeatOverridden;
 
         private void Awake()
         {
@@ -271,12 +284,18 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
             _stateLine.text = $"state {_client.State}  user {(string.IsNullOrEmpty(_client.UserId) ? "—" : _client.UserId)}  " +
                               $"rtt {(_client.Session != null ? _client.Session.RoundTripMs : 0)} ms  reconnecting {_client.IsReconnecting}";
-            _generationLine.text = $"operation generation {_client.Generation}   PongTimeout {_settings.PongTimeout.TotalSeconds:0.#} s   PingInterval {_settings.PingInterval.TotalSeconds:0.#} s";
+            // Read from the live NetworkSettings instance the scope registered every frame,
+            // which is the same object the heartbeat button mutates: press it and these two
+            // numbers change on the next frame.
+            _generationLine.text =
+                $"operation generation {_client.Generation}   PongTimeout {_settings.PongTimeout.TotalSeconds:0.#} s   " +
+                $"PingInterval {_settings.PingInterval.TotalSeconds:0.#} s" +
+                (_heartbeatOverridden ? "   (heartbeat override, sticky)" : "");
 
             var budget = (float)_settings.ReconnectBudget.TotalSeconds;
-            if (_reconnectStartedUtc != DateTime.MinValue)
+            if (_reconnectStartedMs != NotRunning)
             {
-                var elapsed = (float)(DateTime.UtcNow - _reconnectStartedUtc).TotalSeconds;
+                var elapsed = (float)ElapsedSecondsSince(_reconnectStartedMs);
                 var fraction = budget > 0f ? Mathf.Clamp01(elapsed / budget) : 0f;
                 _budgetFill.style.width = Length.Percent(fraction * 100f);
                 _budgetLine.text = $"elapsed {elapsed:0.0} s of the {budget:0} s budget";
@@ -316,9 +335,10 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
             if (_chaos == null || _settings == null) return;
             _settings.PongTimeout = TimeSpan.FromSeconds(Mathf.Max(0.5f, simulatedPongTimeoutSeconds));
             _settings.PingInterval = TimeSpan.FromSeconds(1);
+            _heartbeatOverridden = true;
             var blackholed = _chaos.BlackholeNewest();
             Note(blackholed
-                ? $"HEARTBEAT: PongTimeout={_settings.PongTimeout.TotalSeconds:0.#} s, reads blackholed — expect HeartbeatTimeout within ~{_settings.PongTimeout.TotalSeconds + pingIntervalSeconds:0} s, then a reconnect"
+                ? $"HEARTBEAT: PongTimeout={_settings.PongTimeout.TotalSeconds:0.#} s (sticky), reads blackholed — expect HeartbeatTimeout within ~{_settings.PongTimeout.TotalSeconds + pingIntervalSeconds:0} s, then a reconnect"
                 : "heartbeat: nothing connected");
             Debug.Log($"{Tag} chaos: heartbeat starved={blackholed} pongTimeout={_settings.PongTimeout.TotalSeconds:0.#}s");
         }
@@ -326,8 +346,8 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         private void UserClose()
         {
             if (_client == null) return;
-            _userClosedUtc = DateTime.UtcNow;
-            _reconnectStartedUtc = DateTime.MinValue;
+            _userClosedMs = NowMs();
+            _reconnectStartedMs = NotRunning;
             _attempt = 0;
             _maxAttempts = 0;
             _client.Disconnect();
@@ -339,8 +359,8 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         private void ConnectAgain()
         {
             if (_client == null || _cts == null) return;
-            _userClosedUtc = DateTime.MinValue;
-            _reconnectStartedUtc = DateTime.MinValue;
+            _userClosedMs = NotRunning;
+            _reconnectStartedMs = NotRunning;
             _attempt = 0;
             _maxAttempts = 0;
             _lastCause = "—";
@@ -355,10 +375,11 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
             Debug.Log($"{Tag} State -> {state}");
             Note($"state -> {state} (generation {_client.Generation})");
 
-            if (state == NetworkClientState.InWorld && _reconnectStartedUtc != DateTime.MinValue)
-            {
-                _reconnectStartedUtc = DateTime.MinValue;
-            }
+            // Deliberately does NOT stop the reconnect clock on InWorld. StateChanged(InWorld)
+            // fires *before* Reconnected, so clearing it here made OnReconnected measure from
+            // a cleared start and report "Reconnected in 0.0 s" for a reconnect that in fact
+            // took ~40 s over five attempts (live run, docker pause of the game server, 45 s).
+            // OnReconnected and OnReconnectFailed are the only two places that stop it.
         }
 
         private void OnSessionClosed(DisconnectInfo info)
@@ -370,11 +391,13 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
             if (decision == ReconnectDecision.Reconnect)
             {
-                _reconnectStartedUtc = DateTime.UtcNow;
+                // The close is the origin of both the elapsed and the budget bar: the client's
+                // 60 s budget runs from here, not from the attempt that eventually succeeds.
+                _reconnectStartedMs = NowMs();
                 _attempt = 0;
                 _maxAttempts = _settings.ReconnectAttempts;
             }
-            else if (_userClosedUtc != DateTime.MinValue)
+            else if (_userClosedMs != NotRunning)
             {
                 SetVerdict("User close: policy said Never. Correct.", ok: true);
             }
@@ -383,7 +406,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         private void OnReconnectAttemptStarted(int attempt)
         {
             _attempt = attempt;
-            if (_userClosedUtc != DateTime.MinValue && (DateTime.UtcNow - _userClosedUtc).TotalSeconds < 5)
+            if (_userClosedMs != NotRunning && ElapsedSecondsSince(_userClosedMs) < 5)
             {
                 SetVerdict("A reconnect attempt started after a user close — policy violation.", ok: false);
                 Debug.LogError($"{Tag} reconnect attempt {attempt} after user close");
@@ -403,8 +426,8 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void OnReconnected()
         {
-            var elapsed = _reconnectStartedUtc == DateTime.MinValue ? 0.0 : (DateTime.UtcNow - _reconnectStartedUtc).TotalSeconds;
-            _reconnectStartedUtc = DateTime.MinValue;
+            var elapsed = _reconnectStartedMs == NotRunning ? 0.0 : ElapsedSecondsSince(_reconnectStartedMs);
+            _reconnectStartedMs = NotRunning;
             _maxAttempts = 0;
             Note($"RECONNECTED as {_client.UserId} after {elapsed:0.0} s (generation {_client.Generation})");
             Debug.Log($"{Tag} Reconnected as {_client.UserId} after {elapsed:0.0}s");
@@ -414,7 +437,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void OnReconnectFailed(Exception exception)
         {
-            _reconnectStartedUtc = DateTime.MinValue;
+            _reconnectStartedMs = NotRunning;
             var exhausted = exception as ReconnectExhaustedException;
             var detail = exhausted != null
                 ? $"gave up after {exhausted.Attempts} attempt(s), {exhausted.Elapsed.TotalSeconds:0.0} s{(exhausted.Permanent ? ", permanent" : "")}"
@@ -425,6 +448,15 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         }
 
         // ---- plumbing ----
+
+        /// <summary>
+        /// Monotonic "now" in milliseconds, from the same source the client uses. Falls back
+        /// to the package default before <see cref="Boot"/> has made the settings.
+        /// </summary>
+        private long NowMs() =>
+            _settings != null ? _settings.MonotonicClock() : MonotonicClockDefault.NowMs();
+
+        private double ElapsedSecondsSince(long startedMs) => (NowMs() - startedMs) / 1000.0;
 
         private void Note(string line)
         {

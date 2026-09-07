@@ -26,13 +26,20 @@ carries the harness markers: `[DOTSNet] Auth OK, user_id=<id>` and `[DOTSNet] IN
 | Button | Mechanism | Disconnect cause | Policy | What you should see |
 |---|---|---|---|---|
 | **Kill transport** | `ChaosTransportFactory.KillNewest()` closes the live game-session transport | `PeerClosed` (or `TransportError`) | Reconnect | `Session closed → Reconnect`, `attempt 1/N` immediately, then backoff; `RECONNECTED after x s`; generation +1 |
-| **Simulate heartbeat timeout** | `PongTimeout` → 3 s, `PingInterval` → 1 s, the session transport's reads are blackholed (writes still go, nothing comes back) | `HeartbeatTimeout` | Reconnect | `no pong for … ms` in the log within ~4 s, then the same reconnect sequence |
+| **Simulate heartbeat timeout** | `PongTimeout` → 3 s, `PingInterval` → 1 s (**sticky** — see below), the session transport's reads are blackholed (writes still go, nothing comes back) | `HeartbeatTimeout` | Reconnect | the header's `PongTimeout`/`PingInterval` change to `3 s`/`1 s` on the next frame and the line gains `(heartbeat override, sticky)`; `no pong for … ms` in the log within ~4 s, then the same reconnect sequence |
 | **User close** | `NetworkClient.Disconnect()` | `LocalClose` | **Never** | state `Ended`, no attempt starts; the verdict turns red if one does within 5 s |
 | **Connect again** | a fresh `ConnectAsync(mapId)` through the registered `IAuthProvider` | — | — | a new generation; the cached gateway JWT is reused, so no Nakama traffic |
 
-The **elapsed vs 60 s budget** bar runs from the close the policy decided to reconnect on
-(`NetworkSettings.ReconnectBudget`); `attempt n/N` and `next in x s` come from
+The **elapsed vs 60 s budget** bar and the `Reconnected in x s` verdict both run from the
+close the policy decided to reconnect on — not from the attempt that eventually succeeded —
+and are measured on `NetworkSettings.MonotonicClock`, the same clock the client budgets with
+(`NetworkSettings.ReconnectBudget`). `attempt n/N` and `next in x s` come from
 `ReconnectProgress`; `operation generation` is `NetworkClient.Generation`.
+
+The header's `PongTimeout` and `PingInterval` are re-read from the live `NetworkSettings`
+instance every frame, so the heartbeat button's override shows up immediately. It is
+**sticky**: the demo never restores the defaults, because the shortened values are what make
+a *later* starved heartbeat detectable in seconds too. Press Play again for 30 s / 2 s.
 
 ## Why the heartbeat button starves reads rather than "stops answering pings"
 

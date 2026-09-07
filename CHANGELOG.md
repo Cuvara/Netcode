@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Reconnect Policy Demo reported `Reconnected in 0.0 s` for a ~40 s, five-attempt
+  reconnect**, and drove the budget bar from the same wrong origin. `StateChanged(InWorld)`
+  fires before `Reconnected`, and the sample cleared its start timestamp there, so the
+  elapsed was measured from the successful attempt rather than from the close the policy
+  decided to reconnect on. Seen live against a game server frozen 45 s with `docker pause`.
+  Now started at the close, stopped only by `Reconnected`/`ReconnectFailed`, and measured on
+  `NetworkSettings.MonotonicClock` — the same monotonic source the client budgets with —
+  instead of `DateTime.UtcNow`. The header also marks the heartbeat button's
+  `PongTimeout`/`PingInterval` override as sticky, which it always was.
+
 - **A consumer could not supply its own `ITransportFactory` at all (regression in 0.31.1).**
   0.31.1 moved the default transport factory to a factory lambda; a caller that registered
   `ITransportFactory` after `RegisterNetworking()` — the documented way to substitute one until
