@@ -49,14 +49,37 @@ effect on the next heartbeat tick with no API added to the runtime.
 ```csharp
 _scope = LifetimeScope.Create(builder =>
 {
-    builder.RegisterNetworking(settings);                       // the package's registration
-    builder.Register<ITransportFactory>(_ => chaos, Lifetime.Singleton);   // the demo's wrapper
+    // The chaos factory goes IN to RegisterNetworking, not next to it.
+    builder.RegisterNetworking(settings, transports: chaos);
     builder.Register<IAuthProvider>(_ => new DelegateAuthProvider(ct => auth.GetGatewayTokenAsync(device, ct)), Lifetime.Singleton);
 });
 _client = _scope.Container.Resolve<NetworkClient>();
 ```
 
-`IAuthProvider` is required: `NetworkClient` takes it by constructor and VContainer does not
-honour C# default parameter values, and `ConnectAsync(mapId)` plus every automatic reconnect
-go through it. The panel prints which `ITransportFactory` the container resolved; if it is not
-the demo's wrapper, the break buttons are disabled rather than silently doing nothing.
+**Do not register `ITransportFactory` again after `RegisterNetworking()`.** It is not an
+override and it does not lose quietly — it takes the whole container down at
+`LifetimeScope.Awake()`:
+
+```
+VContainerException: Conflict implementation type : Registration ITransportFactory
+  ContractTypes=[] Singleton VContainer.Internal.FuncInstanceProvider
+```
+
+Since 0.31.1 the package registers the default factory through a factory lambda (VContainer
+does not honour `DefaultTransportFactory`'s `string transportKey = null` default), and two
+lambda registrations of one interface share the implementation type `FuncInstanceProvider`,
+which is what VContainer's duplicate check rejects. This is exactly how this scene died in a
+player against the live backend on 2026-09-07. The `transports:` parameter (and the matching
+`codec:` / `log:` ones) is the supported substitution point, and it keeps exactly one
+registration of the interface in the scope.
+
+`IAuthProvider` is a different case and is registered separately on purpose: the package
+registers none, and `NetworkClient`'s `IAuthProvider auth = null` constructor default is not
+honoured by VContainer, while `ConnectAsync(mapId)` and every automatic reconnect need one.
+A single registration of an interface the package never registers is safe.
+
+The panel prints which `ITransportFactory` the container resolved; if it is not the demo's
+wrapper, the break buttons are disabled rather than silently doing nothing. If the scope fails
+to build at all, `Start()` catches it, logs `[DOTSNet] FATAL: the demo scope failed to start: …`
+and leaves the panel showing the error with every button dead — rather than a
+`NullReferenceException` per frame out of `Update()`.

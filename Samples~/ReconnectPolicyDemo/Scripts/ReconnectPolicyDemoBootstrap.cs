@@ -29,12 +29,18 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
     /// and the client is <c>Resolve</c>d, never <c>new</c>ed.
     /// </para>
     /// <para>
-    /// <b>Two registrations are the demo's own.</b> An <c>IAuthProvider</c> over the Nakama
-    /// device-auth + <c>gateway_token</c> helper, because <c>ConnectAsync(mapId)</c> and every
-    /// automatic reconnect need one; and an <c>ITransportFactory</c> wrapping the default one
-    /// (<see cref="ChaosTransportFactory"/>) so the buttons can break a live transport. Both are
-    /// registered <i>after</i> <c>RegisterNetworking()</c>, and the panel says which factory the
-    /// client actually got.
+    /// <b>The demo supplies two dependencies, by two different routes.</b> The
+    /// <see cref="ChaosTransportFactory"/> that lets the buttons break a live transport goes in
+    /// through <c>RegisterNetworking(transports: …)</c> — the supported route, and the only one
+    /// that works: registering <c>ITransportFactory</c> a second time after
+    /// <c>RegisterNetworking()</c> makes VContainer fail the <i>whole container build</i> with
+    /// <c>Conflict implementation type … FuncInstanceProvider</c>, which is exactly how this
+    /// scene died in a player against the live backend on 2026-09-07. The <c>IAuthProvider</c>
+    /// is registered separately, after, because <c>RegisterNetworking()</c> does not register
+    /// one at all — <c>NetworkClient</c>'s <c>IAuthProvider auth = null</c> constructor default
+    /// is not honoured by VContainer, so <c>ConnectAsync(mapId)</c> and every automatic
+    /// reconnect need the scope to carry one. A single registration of an interface the package
+    /// never registers is safe; a second registration of one it does is not.
     /// </para>
     /// <para>
     /// Log markers are the same the multi-client harness reads from the DOTS sample:
@@ -118,6 +124,26 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void Start()
         {
+            try
+            {
+                Boot();
+            }
+            catch (Exception ex)
+            {
+                // A scope that does not build leaves _client null and every later frame
+                // throwing NullReferenceException out of Update(), which buries the real
+                // cause. Say it once, loudly, in the log and on the panel, and stop.
+                Debug.LogError($"{Tag} FATAL: the demo scope failed to start: {ex}");
+                Fail(ex);
+            }
+        }
+
+        /// <summary>
+        /// Everything <see cref="Start"/> does, so a failure anywhere in it lands in one
+        /// catch rather than half-initialising the scene.
+        /// </summary>
+        private void Boot()
+        {
             _backend = BackendCommandLine.Resolve(gatewayHost, gatewayPort, mapId, "http://127.0.0.1:9101/status");
             _deviceId = BackendCommandLine.ResolveDeviceId(_backend, $"reconnect-{(Application.isEditor ? "editor" : "player")}");
             _auth = new SampleNakamaAuth(_backend.NakamaScheme, _backend.NakamaHost, _backend.NakamaPort, _backend.NakamaServerKey);
@@ -131,17 +157,18 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
             _chaos = new ChaosTransportFactory(new DefaultTransportFactory());
 
             // The scope. RegisterNetworking registers NetworkSettings, the log, the codec, the
-            // default transport factory and NetworkClient; the two registrations after it are
-            // the demo's own. A later registration of the same interface is what the container
-            // resolves for single-instance injection.
+            // transport factory and NetworkClient — exactly one registration of each, which is
+            // why the chaos factory is handed to it as a parameter instead of being registered
+            // again afterwards (a second ITransportFactory registration does not override it,
+            // it fails the container build). IAuthProvider is the demo's own because the package
+            // registers none.
             var device = _deviceId;
             var auth = _auth;
             var chaos = _chaos;
             var settings = _settings;
             _scope = LifetimeScope.Create(builder =>
             {
-                builder.RegisterNetworking(settings);
-                builder.Register<ITransportFactory>(_ => chaos, Lifetime.Singleton);
+                builder.RegisterNetworking(settings, transports: chaos);
                 builder.Register<IAuthProvider>(
                     _ => new DelegateAuthProvider(ct => auth.GetGatewayTokenAsync(device, ct)),
                     Lifetime.Singleton);
@@ -172,6 +199,36 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
             _cts = new CancellationTokenSource();
             ConnectAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// Leaves the panel showing why the demo did not start, with every button dead.
+        /// </summary>
+        private void Fail(Exception ex)
+        {
+            _chaosActive = false;
+            _client = null;
+
+            // A half-built scope owns whatever it did create; drop it rather than leave it
+            // alive behind a dead panel. OnDestroy tolerates the null.
+            if (_scope != null)
+            {
+                _scope.Dispose();
+                _scope = null;
+            }
+
+            if (_backendLine != null)
+            {
+                _backendLine.text = "the demo scope did not build — see the log";
+            }
+
+            Note($"FATAL: {ex.GetType().Name}: {ex.Message}");
+            SetVerdict($"Demo failed to start: {ex.Message}", ok: false);
+
+            _kill?.SetEnabled(false);
+            _heartbeat?.SetEnabled(false);
+            _userClose?.SetEnabled(false);
+            _connect?.SetEnabled(false);
         }
 
         private async UniTaskVoid ConnectAsync(CancellationToken ct)
@@ -246,6 +303,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void KillTransport()
         {
+            if (_chaos == null) return;
             var killed = _chaos.KillNewest();
             Note(killed
                 ? $"KILL: closed the {_chaos.Newest?.Kind} transport under the client — expect PeerClosed/TransportError, then a reconnect"
@@ -255,6 +313,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void SimulateHeartbeatTimeout()
         {
+            if (_chaos == null || _settings == null) return;
             _settings.PongTimeout = TimeSpan.FromSeconds(Mathf.Max(0.5f, simulatedPongTimeoutSeconds));
             _settings.PingInterval = TimeSpan.FromSeconds(1);
             var blackholed = _chaos.BlackholeNewest();
@@ -266,6 +325,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void UserClose()
         {
+            if (_client == null) return;
             _userClosedUtc = DateTime.UtcNow;
             _reconnectStartedUtc = DateTime.MinValue;
             _attempt = 0;
@@ -278,6 +338,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
 
         private void ConnectAgain()
         {
+            if (_client == null || _cts == null) return;
             _userClosedUtc = DateTime.MinValue;
             _reconnectStartedUtc = DateTime.MinValue;
             _attempt = 0;
@@ -369,11 +430,13 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         {
             _eventLog.Add($"{DateTime.UtcNow:HH:mm:ss.f}  {line}");
             while (_eventLog.Count > EventLines) _eventLog.RemoveAt(0);
-            _events.text = string.Join("\n", _eventLog);
+            // Null when Awake itself failed to bind the UXML: the log still gets the line.
+            if (_events != null) _events.text = string.Join("\n", _eventLog);
         }
 
         private void SetVerdict(string text, bool ok)
         {
+            if (_verdict == null) return;
             _verdict.text = text;
             _verdict.EnableInClassList("cuvara-probe__verdict--ok", ok);
             _verdict.EnableInClassList("cuvara-probe__verdict--bad", !ok);

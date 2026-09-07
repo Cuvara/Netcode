@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A consumer could not supply its own `ITransportFactory` at all (regression in 0.31.1).**
+  0.31.1 moved the default transport factory to a factory lambda; a caller that registered
+  `ITransportFactory` after `RegisterNetworking()` — the documented way to substitute one until
+  now — no longer overrode it but made the *whole container fail to build*, because two lambda
+  registrations of one interface share the implementation type
+  `VContainer.Internal.FuncInstanceProvider` and VContainer rejects the duplicate:
+  `VContainerException: Conflict implementation type : Registration ITransportFactory
+  ContractTypes=[] Singleton VContainer.Internal.FuncInstanceProvider` at
+  `LifetimeScope.Awake()`, followed by a `NullReferenceException` from the scene component whose
+  client never resolved. Seen in a Reconnect Policy Demo player against the live backend,
+  2026-09-07. Fixed by the `transports` parameter below; the Reconnect Policy Demo now uses it.
+
 ### Added
+
+- **`RegisterNetworking()` takes the dependencies it registers**, so exactly one registration of
+  each interface exists and substitution needs no second registration:
+  `RegisterNetworking(this IContainerBuilder builder, NetworkSettings settings = null,
+  WireEncoding encoding = WireEncoding.Json, ITransportFactory transports = null,
+  IWireCodec codec = null, INetLog log = null)`. Null keeps the previous default for each
+  (`DefaultTransportFactory`, the codec `encoding` names, `UnityNetLog`); a non-null value is
+  registered as an instance, and `codec` wins over `encoding`. Source-compatible — existing
+  call sites are unchanged. The XML docs state why registering these interfaces yourself
+  afterwards cannot work.
 
 - **Sample: Reconnect Policy Demo** (`Samples~/ReconnectPolicyDemo`). Builds `NetworkClient`
   through `RegisterNetworking()` in a VContainer `LifetimeScope` — the DI path, not a hand-built
