@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The binder's rate gate now has a test of its own** (`WorldViewBinderRateGateTests`). The
+  estimator's tests pin `RateCorroborated`; they cannot pin that `WorldViewBinder` *reads* it,
+  and nothing did — deleting the second half of `Staleness.IsUsable && Staleness.RateCorroborated`
+  left all 126 other tests green while restoring the defect in full. Verified: with the gate
+  removed, two clocks that genuinely agree plus a 300 ms delay-floor step drive the client to
+  apply a **0.9923x** rate scale, and the test fails; with it, the scale stays at 1. It drives a
+  real `LocalMovePredictor` and `WorldState` through `binder.Tick` on an injected `IViewClock`,
+  so it needs no sleeping and reads `ClockRateScale` directly. The companion case pins that a
+  corroborated half-percent rate *does* still reach the clock, so the gate cannot pass by
+  refusing to correct at all.
+
 - **The measurement prints the fit's baseline and fit counts beside the ppm, and stops calling
   an 8% wire-rate gap "(agrees)".** Two instruments that should have caught the rate artefact and
   did not. A delay-floor step of *d* seconds fakes a slope of `d / baseline`, so the same ppm
