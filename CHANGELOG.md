@@ -66,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > a remembered retraction does not, because it is where they are looking. It is the same move as
 > the run precondition gate: put the check where the reader is, not where the knowledge is.
 >
+> **An argument that does not depend on a rate outlives one that does.** Three arguments were made
+> for the same conclusion in this work and two of them fell. The percentile's *bimodal-under-load*
+> defence fell when a load run produced no bimodality; the *guard-porosity* defence weakened when
+> the one nameable left-tail cause turned out to be discarded before it reaches the statistic.
+> Both were quantitative claims about **how often** something happens, and both were refuted by
+> measuring how often it happens. What stands is a claim about **direction**: the raw tenth
+> percentile is biased in the over-lead direction on *every clean run*, which is true whatever the
+> frequency of anything. Prefer the argument whose truth does not turn on a number nobody has
+> measured yet — not because rates do not matter, but because an argument resting on one is
+> hostage to a measurement that has not been taken, and this work took four such measurements
+> before finding that the load-bearing claim never needed them.
+>
 > **Prefer operations that cannot be partially wrong; where you cannot have that, build the check
 > the measurement lacks.** Five times in one day an operation touched more than it was aimed at.
 > Four were silent — a server unregistered in Redis so the gateway routed elsewhere, a stale test
@@ -246,6 +258,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tested prediction against the server.
 
 ### Fixed
+
+- **The acknowledgement floor is converted to base ticks with the measured wire rate, not the
+  advertised one.** `WorldViewBinder` converted the same kind of quantity two ways: the
+  round-trip term at `TargetLeadTicks` used `TickRate.EstimatedHz`, the rate measured off the
+  wire, while `RecordAck` was handed `_predictor.TickRateHz`, the rate the server announced at
+  join. When the two disagree by `e` the floor comes out `(1+e)` too large, and the steering
+  lead — compared against the server's own tick **numbers** — over-leads by `e × floor`. Bounded
+  at `0.02 × floor` on any run the validity gate admits, and measured at 0.068 base ticks on a
+  refused arm: small, real, and in the direction this estimator exists to avoid.
+
+  **The measured rate is the correct factor here, not merely the safer one.** `EstimatedHz` is
+  *server ticks per client second*, which is exactly what a duration measured on the client's
+  clock needs. And it does not matter whether the disagreement is a fast client or a slow server:
+  both produce an error of `advertised/measured − 1` and both take this same correction, so the
+  fix does not depend on attributing it — which is fortunate, because nothing in the package can.
+
+  **This is not a revert of the comment beside it, and the two lines no longer share one.**
+  `SnapshotStalenessEstimator.Sample` must keep the advertised rate, and there is a measured
+  failure behind that: it converts a tick **number** to a time (`snapshotTick / baseHz`), so a
+  rate error accumulates against a growing counter — 613 ticks and climbing inside a minute, on a
+  57.7 Hz reading of a 60 Hz server. `AckLatencyEstimator` never does that. It uses `baseHz` for
+  one thing, `FloorSeconds * baseHz`, where there is no counter to accumulate against and the
+  quantity is tens of milliseconds. One comment was covering two conversions with opposite
+  requirements.
+
+  The fallback to the advertised rate — unavoidable before the estimator has a measurement — is
+  **guarded on `HasEstimate`, exposed as `AckFloorRateIsFallback`, counted as
+  `AckFloorRateFallbacks`, and printed by the measurement harness with the rate actually used**.
+  A fallback is another claim about the same quantity, not the absence of one, and every fallback
+  in this area that went wrong went wrong by being invisible.
+
+  `AckFloorConversionRateTests` drives the real binder through a session whose wire rate differs
+  from its advertised one and asserts the floor was converted with the rate the binder reports
+  using. Verified discriminating by reverting the fix: it fails on exactly that assertion and
+  passes again when restored. Its first form could not discriminate — the two candidate
+  conversions differ by 0.135 base ticks, closer than any tolerance loose enough to absorb the
+  estimator's own measurement error — and **the test's own self-check caught that**, which is why
+  the claim is now split into which rate is in use and whether the floor used it.
 
 
 - **The client no longer sends input at the snapshot rate, so the `uplink + snapshot age` term is

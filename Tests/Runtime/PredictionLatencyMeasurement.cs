@@ -534,6 +534,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="AckObservations"/>
             public float AckObservationMedian;
 
+            /// <summary>The rate the floor's seconds-to-ticks conversion actually used.</summary>
+            public float AckFloorConversionHz;
+
+            /// <summary>Acknowledgements converted with the advertised rate for want of a measured one.</summary>
+            public int AckFloorRateFallbacks;
+
             /// <summary>
             /// The quantiles <see cref="AckObservationLadderQuantiles"/> of the estimator's own
             /// observation ring, in base ticks — read as a LINE, not as a set of candidates.
@@ -2214,6 +2220,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckObservations = binder.AckLatency.Samples;
             run.AckObservationP10 = binder.AckLatency.ObservationQuantileTicks(0.10);
             run.AckObservationMedian = binder.AckLatency.ObservationQuantileTicks(0.50);
+            run.AckFloorConversionHz = binder.AckFloorConversionHz;
+            run.AckFloorRateFallbacks = binder.AckFloorRateFallbacks;
 
             // The whole ladder off the SAME ring, in one pass, so the six points describe one
             // distribution rather than six moments of a moving one.
@@ -2614,6 +2622,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "                             harness floor below is 20 samples at a different phase and is\n" +
                 "                             not a reference for it)\n" +
                 DescribeAckLadder(run) +
+                // WHICH RATE THE FLOOR WAS CONVERTED WITH, AND HOW OFTEN THAT WAS A FALLBACK.
+                //
+                // The floor is a duration in client seconds; turning it into base ticks needs
+                // server-ticks-per-client-second, which is the MEASURED rate. The advertised
+                // rate stands in until the estimator has a measurement, and that substitution
+                // is printed rather than left silent -- every fallback in this area that went
+                // wrong went wrong by being invisible. A handful at the start of a session is
+                // normal; a count that keeps climbing means no measured rate ever arrived and
+                // every floor on this run was converted with a rate nobody measured.
+                $"  ack floor converted at   {run.AckFloorConversionHz:F2} Hz   " +
+                    (run.AckFloorRateFallbacks > 0
+                        ? $"({run.AckFloorRateFallbacks} acknowledgement(s) used the ADVERTISED\n" +
+                          "                             rate because no measured one was available yet)\n"
+                        : "(the measured wire rate throughout; no fallback)\n") +
                 $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
                     (run.AckFloorOffered
                         ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +
