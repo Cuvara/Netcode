@@ -218,6 +218,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was first wired in: the floor was never steering anything, the round trip had stopped steering
   anything, and a truncated floor put nothing back.
 
+- **`Clock Sync Probe` gains an `.asmdef`, because importing it twice was a hard compile error.**
+  Unity's sample importer writes to `Assets/Samples/<package>/<version>/<sample>/`, so a project
+  that imported an earlier version and committed it has two copies on disk after an update.
+  Without an assembly definition both compile into the project's default assembly and collide
+  with `CS0101` and `CS0229` — the whole assembly fails, the Editor is dead until one is deleted
+  by hand, and because the copies sit in different version folders **it lands on the first person
+  to update, never on the person who imported.** Found by hitting it while importing this
+  release's own headline sample.
+
+  **Six other samples have the same defect and are deliberately left alone in this release**:
+  `ContentPipeline`, `DemoBootstrap`, `E2ECertification`, `InterpolationProbe`, `KcpProbe` and
+  `WorldView` all ship without an assembly definition, and only `DOTSSample` and
+  `ReconnectPolicyDemo` have one. Fixing all seven blind would mean writing six sets of assembly
+  references that cannot be compiled from the package, on the eve of a release; the one that
+  demonstrates this release's fix is fixed, and the rest are named so they are a known list
+  rather than six future surprises.
+
 - **The sweep guard measures its span between the tenth and ninetieth percentiles, not between
   the extremes — and the floor goes back to the minimum as a result.** `SweptEnough` is what
   decides whether a minimum is evidence about the pipeline constant, and its span was

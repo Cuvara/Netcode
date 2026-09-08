@@ -81,3 +81,24 @@ Windows-Editor/Linux-container pair measures **220 ppm** idle — and the six-fi
 appear under load, which is this button's mechanism. The default is kept because the clamp must
 still admit such a ratio and the refusal boundary is worth being able to see, but it is a
 synthetic stress case now, not a machine's fingerprint.
+
+## Importing this twice
+
+The sample carries its own `ClockSyncProbe.asmdef`, and it needs one. Unity's sample importer
+writes each import to `Assets/Samples/<package>/<version>/<sample>/`, so a project that imported
+an earlier version and **committed** it ends up with two copies on disk after an update. Without
+an assembly definition both compile into the project's default assembly and collide:
+
+```
+error CS0101: the namespace 'Cuvara.Netcode.Samples.ClockSyncProbe' already contains
+              a definition for 'ClockSyncProbe'
+error CS0229: Ambiguity between 'ClockSyncProbe.SnapshotEvery' and 'ClockSyncProbe.SnapshotEvery'
+```
+
+The whole assembly fails, so the Editor is dead until one copy is deleted by hand — and because
+the two copies sit in different version folders, it happens on the first update after an import,
+never to the person who did the import. With the asmdef each copy is its own assembly and the
+duplicate is inert.
+
+Delete the older folder anyway; two copies of a probe is not useful. But it should not be a
+compile error, and it should not be discovered by the first person to update.
