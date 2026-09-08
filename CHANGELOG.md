@@ -83,6 +83,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > difference are then sorted correctly without anyone having to be right about which is
 > happening.
 >
+> **The conclusion, which is not about any of the individual defects.** Nine fixes came out of
+> this work and not one of them was found by reasoning about the code. Every advance came from a
+> measurement: a counter printed beside another counter, a band printed instead of a sample, a
+> distribution printed instead of a single figure, a server metric read from outside the client, a
+> test that failed at its own precondition. Both people working on it were confidently wrong
+> repeatedly, in both directions, and each time the correction came from an instrument rather than
+> from an argument. **The code was not fixed by understanding it better. It was instrumented until
+> it could not hide.** Where this release's guards disagree with a future reader's intuition, the
+> guards were measured and the intuition was not.
+>
 > **The commit sequence is left unsquashed on purpose.** A tenth-percentile floor was introduced,
 > the sweep guard above it was then fixed, and the p10's own justifying test failed *at its
 > precondition* — the distribution it was built around is refused outright once the guard works.

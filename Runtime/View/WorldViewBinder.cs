@@ -451,6 +451,14 @@ namespace Cuvara.Netcode.View
                 // against an age under a tenth of a tick, and the report labelled it, one line
                 // below: "a lead equal to this is the warm-up fallback, not a measurement".
                 //
+                // THE PRINCIPLE, because it generalises past this function: AN UNTRUSTWORTHY
+                // TIMEBASE MUST PRODUCE AN UNDER-LEAD, NOT THE LARGEST LEAD AVAILABLE. And the
+                // corollary a future reader needs on seeing the Math.Min this replaced: A CLAMP
+                // ON AN UNTRUSTED QUANTITY IS NOT A GUARD, IT IS A DEFAULT -- and defaults get
+                // delivered. A clamp only guards while the quantity it bounds is roughly right;
+                // once the quantity saturates it, the clamp value IS the output, on every call,
+                // and whatever that value happens to be is what the system now does.
+                //
                 // So saturation is treated as EVIDENCE OF AN UNUSABLE READING rather than as a
                 // number to clamp. A provisional age above one snapshot interval is not a
                 // plausible age for a healthy route; a route genuinely that slow produces a fit
