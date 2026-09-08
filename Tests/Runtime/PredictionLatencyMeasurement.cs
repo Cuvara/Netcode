@@ -501,6 +501,44 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="StalenessFits"/>
             public int StalenessFitsRefused;
 
+            /// <summary>
+            /// Every snapshot-age reading taken during the sampled window, in base ticks.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>The single printed age cannot distinguish the two things it might be.</b> The
+            /// age is the height of the newest snapshot above a fitted envelope, and the
+            /// envelope's intercept is anchored to ONE sample — so a displacement between the
+            /// anchors shifts the height exactly as it tilts the slope. A reading of 5.24 base
+            /// ticks is therefore either a client genuinely acting on 87 ms-old data, or a fit
+            /// whose anchor was laid before that displacement arrived.
+            /// </para>
+            /// <para>
+            /// The two have different shapes over a run and that is what separates them. A
+            /// backlog that is growing shows a rising TREND; a contaminated fit shows a STEP at
+            /// the refit and is flat either side of it. Hence the band and the two half-means.
+            /// </para>
+            /// </remarks>
+            public readonly List<float> SnapshotAges = new List<float>();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeMin =>
+                SnapshotAges.Count == 0 ? float.NaN : SnapshotAges.Min();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeMax =>
+                SnapshotAges.Count == 0 ? float.NaN : SnapshotAges.Max();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeFirstHalf =>
+                SnapshotAges.Count < 4 ? float.NaN
+                    : SnapshotAges.Take(SnapshotAges.Count / 2).Average();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeSecondHalf =>
+                SnapshotAges.Count < 4 ? float.NaN
+                    : SnapshotAges.Skip(SnapshotAges.Count / 2).Average();
+
             /// <summary>Rate correction the predictor's base-tick clock is running with.</summary>
             /// <remarks>1.0 means none is applied — the pre-fix behaviour.</remarks>
             public float ClockRateScale;
@@ -1782,6 +1820,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     {
                         run.PendingPeak = Math.Max(run.PendingPeak, predictor.PendingCount);
 
+                        // The age over the whole window, not just its last value. See
+                        // Run.SnapshotAges: one reading cannot tell a growing backlog from a
+                        // fit anchored before a displacement.
+                        if (binder.Staleness.IsUsable)
+                        {
+                            run.SnapshotAges.Add(binder.Staleness.StalenessTicks);
+                        }
+
                         // The band, not just the last value. See Run.TickErrorMin.
                         if (predictor.IsEnabled)
                         {
@@ -2097,6 +2143,18 @@ namespace Cuvara.Netcode.Tests.PlayMode
                           "                             snapshots and a short run never gets one") + "\n" +
                 $"  TARGET LEAD in use       {run.TargetLeadTicks} base ticks" +
                     LeadNote(run) + "\n" +
+                $"  snapshot age band        " +
+                    (run.SnapshotAges.Count >= 4
+                        ? $"{run.SnapshotAgeMin:F2} .. {run.SnapshotAgeMax:F2}, " +
+                          $"first half {run.SnapshotAgeFirstHalf:F2} -> second half {run.SnapshotAgeSecondHalf:F2}" +
+                          (run.SnapshotAgeSecondHalf > run.SnapshotAgeFirstHalf * 1.5f
+                              ? "\n                             <<< RISING: the client is falling further behind the\n" +
+                                "                             stream as the run goes on, so the age is real and growing"
+                              : run.SnapshotAgeMax > run.SnapshotAgeMin * 4f
+                                  ? "\n                             <<< a STEP rather than a trend, which is what a fit\n" +
+                                    "                             anchored before a displacement looks like"
+                                  : "   (flat: the age is a stable property of the route)")
+                        : "not sampled") + "\n" +
                 $"  snapshot gap measured    {run.SnapshotGapTicks} base ticks   " +
                     "(a lead equal to this is the warm-up fallback, not a measurement)\n" +
                 $"  round trip reported      {run.RoundTripMs} ms   " +
@@ -2527,11 +2585,18 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             if (Math.Abs(droop) >= 1.0 && Math.Sign(droop) == Math.Sign(run.TickErrorTicks))
             {
-                return $"   <<< PROPORTIONAL DROOP, not a lost clock: a {run.SkewPpm:F0} ppm\n" +
-                       $"                             rate difference drifts {drift:F1} ticks/s and " +
-                       $"steering at gain 0.1\n" +
-                       $"                             x {snapshotHz:F0} Hz settles at {droop:F1}. " +
-                       "Feed the fitted rate to the clock.";
+                // NOT "feed the fitted rate to the clock" any more. That advice predates the
+                // corroboration gate and now recommends precisely what the gate exists to
+                // prevent: the large ppm this branch fires on is usually an uncorroborated fit,
+                // and feeding it is how a client ends up running its clock several percent wrong
+                // on purpose. Read `rate corroborated` before believing the ppm at all.
+                return $"   <<< the droop this SIZE implies: a {run.SkewPpm:F0} ppm rate\n" +
+                       $"                             difference drifts {drift:F1} ticks/s and steering at gain 0.1\n" +
+                       $"                             x {snapshotHz:F0} Hz settles at {droop:F1}. But check `rate " +
+                       "corroborated`\n" +
+                       "                             first — if it reads NO, that ppm is a displacement over a\n" +
+                       "                             baseline and this arithmetic is describing a rate that does\n" +
+                       "                             not exist.";
             }
 
             // NOT "the clock is not tracking". This branch used to say that, and on this

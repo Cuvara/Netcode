@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The measurement prints the snapshot age as a band with a trend, and stops recommending the
+  thing the rate gate exists to prevent.** The age is the height of the newest snapshot above a
+  fitted envelope, and that envelope's intercept is anchored to a *single* sample
+  (`_offset = _anchorY - _skew * _anchorX`) — so a delay displacement between the anchors shifts
+  the height exactly as it tilts the slope. One printed number cannot tell a client genuinely
+  acting on 87 ms-old data from a fit whose anchor was laid before the displacement arrived. The
+  two differ in shape over a run — a growing backlog shows a rising **trend**, a contaminated fit
+  shows a **step** — so `snapshot age band` now prints min..max with first-half and second-half
+  means and names which shape it sees. Separately, `ClockErrorNote`'s droop branch used to end
+  "Feed the fitted rate to the clock"; that advice predates the corroboration gate and now
+  recommends exactly what the gate prevents, since the large ppm it fires on is usually an
+  uncorroborated fit. It now says to read `rate corroborated` first, and that the droop
+  arithmetic describes a rate that does not exist when it reads NO.
+
 - **The binder's rate gate now has a test of its own** (`WorldViewBinderRateGateTests`). The
   estimator's tests pin `RateCorroborated`; they cannot pin that `WorldViewBinder` *reads* it,
   and nothing did — deleting the second half of `Staleness.IsUsable && Staleness.RateCorroborated`
