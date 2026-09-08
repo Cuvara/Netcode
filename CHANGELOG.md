@@ -22,6 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > review that checks the constant. This is the same shape as 0.34.0's release theme — reasoning
 > about one property and gating on another — arriving one layer down, in a value rather than in a
 > guard, and found by reading rather than by a live run.
+>
+> **A fifth sibling for 0.34.0's list of failure modes, distinct from the four already there: a
+> simulation whose idealisation removed the very quantisation the defect is made of.** The first
+> model of this fix used an ideal timer. It produced 12 Hz reading `UnsweptSeconds` 16.67 ms and a
+> lead of 0.48 against 13 Hz's 5.13 ms and 1.17 — a clean argument for coprimality, and a
+> description of a client that does not exist. It had already reached this changelog before it was
+> re-measured with acknowledgements read on render frames, where **11, 12, 13 and 14 Hz are
+> indistinguishable at 60 fps** because the frame period is coarser than any of their phase
+> spacings. The model was of the right system and the wrong machine.
+>
+> This is not the "fixture written from the code's model of the wire" failure — that one shares the
+> code's assumption. Nor is it a reading believed for the wrong property. **An idealised model is
+> wrong in the direction of the thing being idealised away**, and here the quantisation removed for
+> tractability *was* the mechanism: the same frame grid that hides the coprime advantage is what
+> made the cadence unreachable in the first place. Defence: when the defect is made of
+> quantisation, a model without it cannot be evidence about the fix — and the conclusion has to be
+> stated for the regime it was measured in. **Coprimality is chosen for the regime where it can
+> matter and costs nothing where it cannot, not because it improves the reading on the machine this
+> shipped from.**
+>
+> **And one no-op in the opposite direction.** A cadence change alone greps clean, reads as a fix
+> in the diff, and does nothing at all on the target machine, because the defect lives in the loop
+> shape rather than in the constant. It was caught only because the recommendation was run against
+> the real estimator before it was proposed. **Verify a recommendation the way a defect is
+> verified.**
 
 ### Fixed
 
@@ -156,6 +181,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
   so the disagreement with the default does not read as an oversight to be tidied away.
 
+### Limitations
+
+- **The acknowledgement floor requires at least three frames per snapshot, and below that no send
+  cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
+  only to a frame period: with `k = fps / snapshotHz`, at most `k` phases can be **told apart**,
+  independently of how many the cadence **visits**. The occupancy test needs
+  `MinimumOccupiedBuckets` = 3 of them, so the floor is unavailable below `3 × snapshotHz` — **45
+  fps** against the default 15 Hz snapshot rate. Measured at 30 fps against the real estimator, 11,
+  12, 13 and 14 Hz are **all** refused; at 45 fps and above, 13 Hz sweeps.
+
+  **This package ships to Android with IL2CPP, where 30 fps is not a hypothetical — it is the
+  target class.** So on a substantial share of real devices the pipeline constant is not
+  measurable, the estimator correctly offers nothing, and the prediction lead falls back to the
+  round trip. The refusal is right: the evidence genuinely is not there, and this is a limit of
+  the *measurement*, not of the cadence. It is named here rather than left to be rediscovered on
+  device, because the symptom — "13 Hz still offers no floor" — points at the cadence, and the
+  cause is the frame rate. `BelowThreeFramesPerSnapshotNoCadenceCanSweep` pins it, and
+  `ClockSyncProbe` reports which of the two constraints is binding rather than showing one
+  undifferentiated REFUSED: **two refusals that look identical and mean different things is the
+  defect this release is named after.**
+
 ### Notes
 
 - **The recommendation was simulated against the real estimator before it was proposed, and the
@@ -183,16 +229,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both the cadence and the pinned schedule alter which phases get sampled. Stated here rather than
   discovered later. What the run *can* establish is the qualitative step — a floor offered at all
   where none was before — because the previous state was a refusal, not a different number.
-- **The fix has a floor of its own: below three frames per snapshot, no cadence sweeps.**
-  Acknowledgements are read on a render frame, so the wait resolves only to a frame period and
-  `k = fps / snapshotHz` bounds how many phases can be *told apart*, independently of how many the
-  cadence *visits*. At 30 fps against 15 Hz, `k = 2` against an occupancy test needing 3, and 11,
-  12, 13 and 14 Hz are **all** refused — correctly, because the evidence genuinely is not there.
-  The first frame rate that works is 45 fps. **A 30 fps client cannot measure its own pipeline
-  constant**, which on an Android target is not hypothetical. Pinned in
-  `BelowThreeFramesPerSnapshotNoCadenceCanSweep` so that "13 Hz still offers no floor" on a slow
-  device sends the next reader to the frame rate rather than to the cadence.
-
 - **`AckLatencyEstimator`'s sweep guard is weakest on its first verdict, and this is arithmetic
   rather than a suspicion.** `Quantile` computes `index = (int)(q * _obsCount)`. At
   `_obsCount == 8` — exactly `MinimumSamples` — the tenth percentile is index 0 and the ninetieth
