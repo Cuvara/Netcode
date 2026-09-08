@@ -322,6 +322,38 @@ namespace Cuvara.Netcode.View
         public SnapshotStalenessEstimator Staleness { get; } = new SnapshotStalenessEstimator();
 
         /// <summary>
+        /// Measures the pipeline constant the staleness fit absorbs. See
+        /// <see cref="Prediction.AckLatencyEstimator"/>.
+        /// </summary>
+        /// <remarks>
+        /// Fed from two places: <see cref="NoteInputSent"/>, which the consumer must call, and
+        /// this binder's own snapshot handling, which already sees every acknowledgement. A
+        /// consumer that never calls <see cref="NoteInputSent"/> simply never gets a floor and
+        /// keeps the round-trip fallback — no worse off than before this existed.
+        /// </remarks>
+        public AckLatencyEstimator AckLatency { get; } = new AckLatencyEstimator();
+
+        /// <summary>
+        /// Tells the binder an input has just been sent, so its acknowledgement can be timed.
+        /// </summary>
+        /// <param name="inputTick">The tick stamped on the input, as handed to <c>SendInput</c>.</param>
+        /// <remarks>
+        /// <para>
+        /// Call it beside <see cref="LocalMovePredictor.RecordInput"/>, with the same tick.
+        /// The binder stamps the time from its own clock rather than taking one, so the two
+        /// ends of the measurement cannot come from different clocks.
+        /// </para>
+        /// <para>
+        /// <b>What it buys.</b> Without it the steering target is missing the constant part of
+        /// <c>uplink + snapshot age</c>, which no other measurement in the package can see, and
+        /// the reconcile returns one step of correction per base tick of it at every start and
+        /// stop. Measured live at 2.00 steps against an acknowledgement floor of 1.28 ticks.
+        /// </para>
+        /// </remarks>
+        public void NoteInputSent(long inputTick) =>
+            AckLatency.RecordSent(inputTick, _clock.NowMs / 1000.0);
+
+        /// <summary>
         /// Base ticks the client's clock should sit ahead of the newest snapshot's tick: how
         /// old that snapshot already is when it is acted on.
         /// </summary>
@@ -390,32 +422,155 @@ namespace Cuvara.Netcode.View
             int gap = TickRate.SnapshotTickGap > 0 ? TickRate.SnapshotTickGap : 1;
 
             float lead;
-            if (Staleness.IsUsable)
+            if (Staleness.AgeIsFitted)
             {
-                // A fitted line. Believe it; the ceiling below is the only guard it needs.
+                // A fitted line WHOSE SLOPE HAS REPRODUCED. Believe it; the ceiling below is
+                // the only guard it then needs.
+                //
+                // This used to read `Staleness.IsUsable`, with the comment "A fitted line.
+                // Believe it." That was true while the only thing that could go wrong with a
+                // fit was noise. It is not true now that a fit can be a displacement divided by
+                // a baseline: the age is the height above THAT line, so an uncorroborated slope
+                // reached the lead through the residual even after the clock stopped listening
+                // to it. Live, with the rate correctly refused, a 51 225 ppm fit still drove the
+                // age to 5.24 base ticks against a true idle 0.06, and the lead to 6.
                 lead = Staleness.StalenessTicks;
             }
             else if (Staleness.HasEstimate)
             {
-                // Provisional, so trusted only downwards. See the remarks.
-                lead = Math.Min(Staleness.StalenessTicks, gap);
+                // Provisional, so trusted only downwards -- but a reading that SATURATES that
+                // clamp is not a reading at all, and treating it as one delivers the defect.
+                //
+                // Math.Min(.., gap) was written as a ceiling on a provisional figure expected to
+                // be roughly right and occasionally high. A provisional reading has no slope
+                // term, so when the timebase is untrustworthy it accumulates at the apparent
+                // skew: measured at 45.56 base ticks against a true age of 0.09, on a run whose
+                // apparent skew was 81 351 ppm. Clamped, that returns `gap` on every call -- and
+                // a saturated clamp is a constant, which is precisely the warm-up fallback this
+                // work exists to remove. All three arms of that run steered on a lead of 4
+                // against an age under a tenth of a tick, and the report labelled it, one line
+                // below: "a lead equal to this is the warm-up fallback, not a measurement".
+                //
+                // THE PRINCIPLE, because it generalises past this function: AN UNTRUSTWORTHY
+                // TIMEBASE MUST PRODUCE AN UNDER-LEAD, NOT THE LARGEST LEAD AVAILABLE. And the
+                // corollary a future reader needs on seeing the Math.Min this replaced: A CLAMP
+                // ON AN UNTRUSTED QUANTITY IS NOT A GUARD, IT IS A DEFAULT -- and defaults get
+                // delivered. A clamp only guards while the quantity it bounds is roughly right;
+                // once the quantity saturates it, the clamp value IS the output, on every call,
+                // and whatever that value happens to be is what the system now does.
+                //
+                // So saturation is treated as EVIDENCE OF AN UNUSABLE READING rather than as a
+                // number to clamp. A provisional age above one snapshot interval is not a
+                // plausible age for a healthy route; a route genuinely that slow produces a fit
+                // whose slope REPRODUCES, and takes the branch above. Down here it means the
+                // timebase cannot be trusted, and an untrustworthy timebase must produce an
+                // UNDER-lead, not the largest one available -- the uplink is still covered by the
+                // acknowledgement floor, which is measured independently of this.
+                float provisional = Staleness.StalenessTicks;
+                lead = provisional > gap ? 0f : provisional;
             }
             else
             {
                 lead = gap;
             }
 
+            // THE PIPELINE CONSTANT. The staleness reading above is the age ABOVE its own
+            // envelope floor; this is the constant that envelope absorbed, plus the uplink,
+            // which no arrival-time measurement can recover at all. Their sum is the whole of
+            // uplink + age and neither counts anything twice.
+            //
+            // THE ROUND TRIP IS COMPUTED WHETHER OR NOT THERE IS A FLOOR, AND THAT IS A FIX.
+            //
+            // It used to sit in an `else if` behind AckLatency.HasEstimate, which made HAVING
+            // a floor and USING a floor the same condition. They are not the same condition,
+            // because the floor was truncated to whole base ticks: on a localhost link, where
+            // uplink + age is a fraction of a tick, it contributed exactly ZERO while still
+            // taking the branch. Turning the estimator on therefore did nothing at all except
+            // DELETE the half-round-trip term from the lead and its whole-tick term from the
+            // ceiling below.
+            //
+            // That is the coupling behind the second open question on this work — the measured
+            // clock error moving from -1 to -2/-4 when the estimator was wired in, from a
+            // change that argued it was safe by construction. It was not the floor steering
+            // anything. It was the round trip no longer steering anything. An estimator whose
+            // safety argument is "the worst case is that it contributes nothing" must not be
+            // able to make the lead SMALLER than it was without it, and behind an `else` it
+            // could, by exactly rttTicks * 0.5.
+            //
+            // So both terms are computed and the LARGER is used. AckLatency times the real
+            // path end to end -- the input drain, the server's staged snapshot write, the
+            // wire, the wait for a client frame -- which is the quantity the reconcile needs,
+            // and it is the better number wherever it is the bigger one. RoundTripMs is a
+            // heartbeat ping through the socket: it sees none of the staging, and half of it
+            // is not the quantity either. Taking the maximum keeps the floor's contribution
+            // where it is real, and keeps the fallback bit-for-bit as it was for a consumer
+            // that supplies a round trip and never calls NoteInputSent.
             int rttTicks = 0;
+            float rttLead = 0f;
             if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
             {
                 rttTicks = (int)Math.Round(RoundTripMs * TickRate.EstimatedHz / 1000.0);
-                lead += rttTicks * 0.5f;
+                rttLead = rttTicks * 0.5f;
             }
 
+            // FRACTIONAL, AND BIASED LOW BY ITS OWN UNCERTAINTY RATHER THAN BY TRUNCATION.
+            //
+            // The bias is not optional -- an over-lead steers the client past the server, the
+            // original defect arriving from the other side -- but truncating the floor to
+            // whole base ticks is a guard that fires as a total loss. Live it read 0.14 and
+            // 0.68 base ticks and Math.Floor returned zero both times. Combined with the
+            // displacement below, that is the whole story of why wiring this in changed
+            // nothing except to make the clock error worse: the floor contributed zero while
+            // still taking the branch that removed the round trip.
+            //
+            // And a sub-tick deficit is not a sub-tick problem. The tick LABEL is an integer:
+            // a client leading 0.68 ticks short carries the wrong tick number for 68% of every
+            // tick, and the reconcile returns a WHOLE step of correction for it. That is the
+            // second step of the live 2.00 against a floor of 1.00 -- so truncation did not
+            // merely cost accuracy here, it was the reason the term stayed open.
+            //
+            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it in the
+            // units that are actually uncertain: the part of the wait's range never swept,
+            // measured rather than assumed. The reading still cannot exceed the evidence held,
+            // and it now goes to zero only when nothing swept, instead of whenever the link is
+            // fast enough that the constant is under one base tick.
+            float ackLead = AckLatency.HasEstimate ? AckLatency.ConservativeFloorTicks : 0f;
+
+            // THE FLOOR DISPLACES THE ROUND TRIP RATHER THAN ADDING TO IT, BECAUSE THEY
+            // MEASURE THE SAME THING. Adding them counts the pipeline twice. The floor wins
+            // because it times the real path end to end -- the input drain, the server's
+            // staged snapshot write, the wire, the wait for a client frame -- while
+            // RoundTripMs is a heartbeat through the socket that sees none of the staging, and
+            // half of it is not the quantity anyway.
+            //
+            // BUT THE DISPLACEMENT IS THE ONE PATH BY WHICH THIS ESTIMATOR CAN TOUCH THE
+            // STEER, and it is worth naming because it went unnoticed once. A floor that
+            // appears removes rttLead from the lead, so a small floor against a large round
+            // trip makes the lead SMALLER -- which is the coupling behind the clock error
+            // moving from -1 to -2/-4 when this was first wired in, from a change that argued
+            // it was safe by construction. It was never the floor steering anything; it was
+            // the round trip no longer steering anything, while a truncated floor put nothing
+            // back. With the truncation gone the displacement is a measurement decision rather
+            // than a silent deletion, which is what makes it defensible; it is still a real
+            // coupling and a live run that moves the clock error should look here first.
+            lead += AckLatency.HasEstimate ? ackLead : rttLead;
             int ticks = (int)Math.Round(lead);
             if (ticks < 0) ticks = 0;
 
-            int ceiling = gap * 2 + rttTicks;
+            // The ceiling bounds a RUNAWAY, not a measurement. The acknowledgement floor is a
+            // measured constant with its own refusal band, and on a slow link it legitimately
+            // exceeds two snapshot intervals -- clamping it there would reintroduce the
+            // under-lead this estimator exists to remove, on exactly the connections that
+            // suffer most from it. So it raises the ceiling with it rather than being cut by
+            // it, while the derived terms stay bounded as before.
+            //
+            // rttTicks is in the ceiling UNCONDITIONALLY, and that is a fix. It used to be
+            // computed only on the branch the floor did not take, so the arrival of a floor
+            // silently lowered the ceiling by rttTicks as well as lowering the lead -- a
+            // clamp tightening for a reason that has nothing to do with a runaway. A ceiling
+            // that shrinks the moment a measurement appears is not a bound, it is a second,
+            // accidental steer.
+            int ceiling = gap * 2 + rttTicks + (int)Math.Ceiling(ackLead);
             return ticks > ceiling ? ceiling : ticks;
         }
 
@@ -574,6 +729,7 @@ namespace Cuvara.Netcode.View
                         // this from a stable figure to 613 ticks and climbing in under a
                         // minute, dragging the steering with it.
                         Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
+                        AckLatency.RecordAck(world.AckTick, nowSeconds, _predictor.TickRateHz);
 
                         // RATE FIRST, THEN PHASE. The steering below is proportional and
                         // has no integral term, so any rate difference it is left to absorb
@@ -588,7 +744,23 @@ namespace Cuvara.Netcode.View
                         // carries no rate at all, and a rate wired into this clock from a
                         // short baseline is the failure SnapshotStalenessEstimator's remarks
                         // record twice, once reaching 613 ticks.
-                        if (Staleness.IsUsable)
+                        //
+                        // AND GATED ON RateCorroborated, WHICH IS THE FIX FOR A THIRD.
+                        //
+                        // The envelope fit is only a rate if the minimum achievable delay was
+                        // the same at both anchors. That assumption was documented and never
+                        // tested, and the fit resting on it was handed straight to a clock. A
+                        // starved frame loop raises the delay floor, the later anchor sits
+                        // above the true line, and the slope absorbs the rise AS RATE: one
+                        // machine minutes apart read 220 ppm idle and 90 636 ppm inside a
+                        // loaded suite, and the client obediently ran its clock 8.3% slow and
+                        // sat at a three-tick standing error.
+                        //
+                        // IsUsable is the right gate for the AGE and the wrong one for the
+                        // RATE. A wrong slope perturbs a residual slightly, once per snapshot;
+                        // it perturbs a clock rate every second, forever. Different evidence
+                        // requirements, and they used to share one gate.
+                        if (Staleness.IsUsable && Staleness.RateCorroborated)
                         {
                             _predictor.SetClockRateScale(
                                 (float)(1.0 / (1.0 + Staleness.SkewPpm / 1e6)));
