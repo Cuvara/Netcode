@@ -1,0 +1,18 @@
+{
+    "name": "WorldView",
+    "rootNamespace": "Samples.WorldView",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "Shared.GameLogic",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
