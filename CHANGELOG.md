@@ -109,23 +109,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > difference are then sorted correctly without anyone having to be right about which is
 > happening.
 >
-> **How each fix in this release was validated, because they are not equal.** One was confirmed on
-> the run it was written for, by a check that needed no judgement. The rest are *mechanism-
-> supported*: the defect reproduces in isolation, a test discriminates against the pre-fix code,
-> and the arithmetic accounts for the measured numbers — which is real evidence and is **not** the
-> same as "measured to work". A reader hunting a regression should distrust them in this order,
-> weakest first.
+> **How each fix in this release was validated, because they are not equal — and because the
+> strongest available evidence for most of them is not a live run.** Every fix here guards against
+> an **untrustworthy timebase**. In a context where the timebase is trustworthy the fit
+> corroborates, the rate gate passes through without refusing, the age stays fitted, and the
+> saturation refusal cannot fire at all. **A guard against an abnormal condition cannot be
+> validated in a context that does not produce the condition** — and the context in which this
+> package reads clean is the same one in which v0.33.0 read clean while carrying the defect that
+> started this work.
+>
+> That is a genuine bind: the guards are exercised only where the measurement is currently
+> unmeasurable, and measurable only where they are not exercised. A third context resolves it. The
+> EditMode suite **injects each abnormal condition synthetically** — a 300 ms delay-floor step, a
+> phase-locked distribution with one outlier, an acknowledgement from a session that never existed,
+> a provisional reading that saturates its clamp — and each one reproduces on demand and **fails
+> without its fix**. So for a guard against a condition nobody can produce on demand in a live run,
+> a discriminating synthetic test is not a weaker grade of the same evidence: **it is the only kind
+> of evidence available.**
+>
+> The ledger is therefore **one fix confirmed live across three environments, eight confirmed
+> against synthetic conditions that reproduce and discriminate, and a live in-suite context that is
+> unmeasurable rather than failing.** Ordered weakest first, so a reader hunting a regression has a
+> map of where to look rather than a reassurance.
 >
 > | Fix | Validation |
 > |---|---|
 > | Saturated provisional age refused | **Confirmed.** Falsifier stated in advance — large skew *and* `TARGET LEAD 4` would mean failure. Measured: 90 833 ppm, lead **0**. |
 > | Age gated on corroboration (`AgeIsFitted`) | **Confirmed on one run.** `reconciles from history` 39 hit/120 missed → 147/15, age 45.56 → 0.09. Single run, and a single run is now known to be worth little. |
-> | Rate gated on corroboration (`RateCorroborated`) | Mechanism. Delay-floor step reproduces the artefact in a test; live readings of 220 ppm idle against 90 636 loaded on one machine. |
-> | Sweep guard: span between quantiles + bucket occupancy | Mechanism. Two tests fail against the extremes-based span. First *observed* discriminating in run 2 (p10–median spread 3.09 offered, 0.28 refused) — after the fix, not as validation of it. |
-> | Acknowledgement floor carried as a fraction | Mechanism. `Math.Floor` demonstrably returned 0 for both live readings (0.14, 0.68). |
-> | Acknowledgements from a previous session discarded | Mechanism. Reproduces in a test; **never observed live** — `ack floor ack-ahead` has read 0 on every run since it was added. |
-> | Newest-retired input timed, superseded counted | Mechanism. The min-over-a-group identity is arithmetic; the sweep-span corruption reproduces in a test. |
-> | Round trip computed unconditionally | Mechanism. Structural; its live magnitude on loopback is **zero**, so it has never been exercised. |
+> | Rate gated on corroboration (`RateCorroborated`) | **Synthetic, discriminating.** Delay-floor step reproduces the artefact in a test; live readings of 220 ppm idle against 90 636 loaded on one machine. |
+> | Sweep guard: span between quantiles + bucket occupancy | **Synthetic, discriminating.** Two tests fail against the extremes-based span. First *observed* discriminating in run 2 (p10–median spread 3.09 offered, 0.28 refused) — after the fix, not as validation of it. |
+> | Acknowledgement floor carried as a fraction | **Synthetic, discriminating.** `Math.Floor` demonstrably returned 0 for both live readings (0.14, 0.68). |
+> | Acknowledgements from a previous session discarded | **Synthetic, discriminating.** Reproduces in a test; **never observed live** — `ack floor ack-ahead` has read 0 on every run since it was added. |
+> | Newest-retired input timed, superseded counted | **Synthetic, discriminating.** The min-over-a-group identity is arithmetic; the sweep-span corruption reproduces in a test. |
+> | Round trip computed unconditionally | **Structural only** — no synthetic test. Structural; its live magnitude on loopback is **zero**, so it has never been exercised. |
 > | Tenth-percentile floor | **Weakest.** Introduced on one loaded run, its justifying test now fails at its own precondition once the sweep guard works, and it is retained only because reverting it in the same commit would have made the sweep fix unattributable. |
 >
 > **And the set has never been measured as a set — which is the risk, not the count.** Nine fixes
