@@ -391,6 +391,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Inputs an acknowledgement drained without timing. See AckLatencyEstimator.</summary>
             public int AckFloorSuperseded;
 
+            /// <summary>
+            /// Inputs discarded because an acknowledgement named a tick this client never sent.
+            /// </summary>
+            /// <remarks>
+            /// Nonzero means the server was still holding a previous session's
+            /// <c>LastInputTick</c> for this user when this run's numbering restarted at 1 —
+            /// so every early input read as acknowledged the moment it was sent. It is the
+            /// reason this measurement once passed alone and failed inside the suite: run it on
+            /// its own and the previous session has been reaped, run it after other tests and
+            /// it has not.
+            /// </remarks>
+            public int AckFloorAhead;
+
             /// <summary>Whether that floor was offered at all, and why not when it was not.</summary>
             public bool AckFloorOffered;
 
@@ -1881,6 +1894,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
             run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
             run.AckFloorSuperseded = binder.AckLatency.Superseded;
+            run.AckFloorAhead = binder.AckLatency.AckAheadOfSend;
             run.AckFloorOffered = binder.AckLatency.HasEstimate;
             run.AckFloorSwept = binder.AckLatency.SweptEnough;
             run.AckFloorRefused = binder.AckLatency.Refused;
@@ -2052,6 +2066,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "                             this to whole ticks is what left the term open.)\n" +
                 $"  ack floor refused        {run.AckFloorRefused}   " +
                     "(observations too long to be a floor — stalls, not routes)\n" +
+                $"  ack floor ack-ahead      {run.AckFloorAhead}" +
+                    (run.AckFloorAhead > 0
+                        ? "   <<< THE SERVER ACKED A TICK THIS RUN NEVER SENT —\n" +
+                          "                             a previous session's LastInputTick, not yet reaped. Those\n" +
+                          "                             inputs are discarded; unguarded they pin the floor near zero.\n"
+                        : "   (no acknowledgement named an unsent tick)\n") +
                 $"  ack floor superseded     {run.AckFloorSuperseded}   " +
                     "(inputs an ack drained without timing — a later input had\n" +
                 "                             already earned that ack, so the interval is not this pipeline)\n" +

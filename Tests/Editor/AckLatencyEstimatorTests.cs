@@ -337,5 +337,100 @@ namespace Cuvara.Netcode.Tests.Editor
                 "and it must not exceed the true constant by more than the residual "
                 + "uncertainty, or it is over-leading on evidence it does not have.");
         }
+
+        /// <summary>
+        /// An acknowledgement naming a tick this client has never sent belongs to a previous
+        /// session, and must not be allowed to set the floor.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is the defect that made the estimator read a fifth of the observed minimum in a
+        /// full suite while passing when run alone, and it is a real client condition rather
+        /// than a test artefact: a reconnect onto a server that has not yet reaped the previous
+        /// player keeps that player's <c>LastInputTick</c>, so the fresh session — numbering
+        /// from 1 — has every input satisfy <c>tick &lt;= ackTick</c> the moment it is sent.
+        /// Each is then retired by the very next snapshot and timed at the wait for one client
+        /// frame, and the minimum filter holds that for its whole epoch memory.
+        /// </para>
+        /// <para>
+        /// Live, that produced a floor of 0.17 base ticks against an input-to-acknowledgement
+        /// distribution whose MINIMUM was 1.39 — a reading below anything the route ever did,
+        /// which is the opposite of the inflation the sweep guard was built for.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AnAcknowledgementFromAPreviousSessionCannotSetTheFloor()
+        {
+            var e = new AckLatencyEstimator();
+            double now = ClockOffset;
+
+            // The server still holds the old session's newest input tick.
+            const long stale = 5000;
+            const double realConstant = 0.0250;
+
+            for (var i = 0; i < 300; i++)
+            {
+                long tick = i + 1;                      // the fresh session numbers from 1
+                e.RecordSent(tick, now);
+                now += SendPeriod;
+
+                // A client frame later the next snapshot lands, carrying an acknowledgement
+                // from the session before this one, jittered over a realistic frame wait.
+                // Unguarded these are 1-9 ms observations against a real pipeline of 25.
+                //
+                // The assertion that discriminates below is Samples, not HasEstimate. In this
+                // synthetic shape the sweep guard happens to refuse the floor as well, because
+                // a frame wait does not span half a snapshot interval — but that is an
+                // accident of the shape and it did NOT hold live, where a floor of 0.17 base
+                // ticks was offered against an observed minimum of 1.39. The invariant worth
+                // pinning is that these are not observations at all.
+                e.RecordAck(stale, now + 0.0010 + (i % 9) * 0.0010, BaseHz);
+            }
+
+            Assert.That(e.HasEstimate, Is.False,
+                "not one of these intervals is an input-to-acknowledgement time — the "
+                + "acknowledgement was already past the tick before it was stamped — so there "
+                + "is nothing here to offer a floor from.");
+
+            Assert.That(e.Samples, Is.Zero,
+                "and none of them may be counted as an observation either, or the sample "
+                + "threshold is satisfied by evidence about a connection that ended.");
+
+            Assert.That(e.AckAheadOfSend, Is.GreaterThan(0),
+                "and the condition is counted rather than silently swallowed: a client seeing "
+                + "this past its first seconds is talking to a server that thinks it is "
+                + "someone else, which is worth a counter.");
+
+            // Once the client's own numbering catches up, the estimator works normally.
+            long t = stale;
+            var arrivals = new System.Collections.Generic.Queue<(long Tick, double At)>();
+            double nextSend = now, nextSnap = now + SnapshotPeriod * 0.37;
+            double snapPeriod = SnapshotPeriod * 1.03;
+            long accepted = 0;
+            double end = now + 60.0;
+
+            while (now < end)
+            {
+                now = Math.Min(nextSend, nextSnap);
+                if (now >= nextSend)
+                {
+                    nextSend = now + SendPeriod;
+                    t++;
+                    e.RecordSent(t, now);
+                    arrivals.Enqueue((t, now + realConstant));
+                }
+
+                if (now < nextSnap) continue;
+                nextSnap = now + snapPeriod;
+                while (arrivals.Count > 0 && arrivals.Peek().At <= now) accepted = arrivals.Dequeue().Tick;
+                if (accepted > 0) e.RecordAck(accepted, now, BaseHz);
+            }
+
+            Assert.That(e.HasEstimate, Is.True,
+                "the guard must drop the stale acknowledgements, not the connection");
+            Assert.That(e.FloorSeconds, Is.EqualTo(realConstant).Within(SnapshotPeriod * 0.5),
+                "and the floor that follows must be the real constant, not the 1 ms the stale "
+                + "acknowledgements would have pinned it to for the rest of the epoch.");
+        }
     }
 }

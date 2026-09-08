@@ -131,6 +131,10 @@ namespace Cuvara.Netcode.Prediction
         private double _lastAckAt;
         private long _lastAckTick;
 
+        // The newest input tick this client has ever stamped. An acknowledgement past it did
+        // not come from this client's numbering. See AckAheadOfSend.
+        private long _maxSentTick;
+
         /// <summary>Acknowledged observations folded in since construction or <see cref="Reset"/>.</summary>
         public int Samples { get; private set; }
 
@@ -149,6 +153,39 @@ namespace Cuvara.Netcode.Prediction
 
         /// <summary>Observations refused as implausible for a floor. See <see cref="MaximumFloorSeconds"/>.</summary>
         public int Refused { get; private set; }
+
+        /// <summary>
+        /// Acknowledgements naming an input tick this client has never sent, and the inputs
+        /// discarded because of them.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This is a wire invariant, and breaking it produces a floor far BELOW anything the
+        /// route can do.</b> <c>ack_tick</c> is defined as this client's newest accepted input
+        /// tick, so an acknowledgement greater than the newest tick this client has stamped
+        /// cannot be about this client's inputs. It is the server still holding the previous
+        /// session's <c>LastInputTick</c> for the same user while a fresh connection restarts
+        /// its numbering at 1 — a reconnect onto a server that has not yet reaped the old
+        /// player, and in a test suite, simply the previous run.
+        /// </para>
+        /// <para>
+        /// Left unguarded it is not a small error. Every input the new session sends satisfies
+        /// <c>tick &lt;= ackTick</c> the instant it is sent, so it is retired by the very next
+        /// snapshot and timed at the wait for one client frame: single-digit milliseconds
+        /// against a real pipeline of twenty-five. A minimum filter then holds that for the
+        /// whole of its epoch memory, and the floor reads a fifth of the truth — which is the
+        /// under-read this estimator was twice suspected of and never actually had. Measured:
+        /// an estimator floor of 0.17 base ticks on a run whose input-to-acknowledgement
+        /// distribution had a MINIMUM of 1.39 and a p90 of 1.95.
+        /// </para>
+        /// <para>
+        /// So an acknowledgement past <c>_maxSentTick</c> discards the pending ring rather than
+        /// timing it, and is counted here. Counted and not silent, because the condition means
+        /// something real about the connection: a client that sees this after its first seconds
+        /// is talking to a server that thinks it is someone else.
+        /// </para>
+        /// </remarks>
+        public int AckAheadOfSend { get; private set; }
 
         /// <summary>
         /// Whether <see cref="FloorSeconds"/> and <see cref="FloorTicks"/> mean anything: enough
@@ -291,6 +328,8 @@ namespace Cuvara.Netcode.Prediction
                 _count--;
             }
 
+            if (inputTick > _maxSentTick) _maxSentTick = inputTick;
+
             int slot = (_head + _count) % PendingCapacity;
             _pendingTick[slot] = inputTick;
             _pendingSentAt[slot] = nowSeconds;
@@ -307,6 +346,21 @@ namespace Cuvara.Netcode.Prediction
         {
             if (ackTick <= 0 || baseHz <= 0f || double.IsNaN(nowSeconds) || double.IsInfinity(nowSeconds))
             {
+                return;
+            }
+
+            // AN ACKNOWLEDGEMENT CANNOT NAME AN INPUT THIS CLIENT HAS NEVER SENT.
+            //
+            // When it does, it belongs to a previous session the server has not reaped, and
+            // every pending input satisfies `tick <= ackTick` on arrival — so they would all be
+            // timed at the wait for one client frame and set a floor an order of magnitude
+            // below the route. Discard them; there is no interval here to measure. See
+            // AckAheadOfSend for the measurements this cost.
+            if (ackTick > _maxSentTick)
+            {
+                AckAheadOfSend += _count;
+                _head = 0;
+                _count = 0;
                 return;
             }
 
@@ -422,9 +476,11 @@ namespace Cuvara.Netcode.Prediction
             _ackIntervalMin = double.MaxValue;
             _lastAckAt = 0;
             _lastAckTick = 0;
+            _maxSentTick = 0;
             Samples = 0;
             Refused = 0;
             Superseded = 0;
+            AckAheadOfSend = 0;
             FloorTicks = 0f;
             ConservativeFloorTicks = 0f;
         }

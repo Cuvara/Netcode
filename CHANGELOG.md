@@ -54,6 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was first wired in: the floor was never steering anything, the round trip had stopped steering
   anything, and a truncated floor put nothing back.
 
+- **An acknowledgement naming a tick the client never sent is discarded rather than timed.**
+  `ack_tick` is defined as *this client's* newest accepted input tick, so one greater than the
+  newest tick this client has stamped cannot be about this client's inputs — it is a server
+  still holding the previous session's `LastInputTick` for the same user while a fresh
+  connection restarts its numbering at 1. Left unguarded every early input satisfies
+  `tick <= ackTick` the instant it is sent, is retired by the very next snapshot, and is timed
+  at the wait for one client frame: single-digit milliseconds against a real pipeline of
+  twenty-five, which a minimum filter then holds for its whole epoch memory. Measured live: a
+  floor of **0.17 base ticks on a run whose input-to-acknowledgement minimum was 1.39 and p90
+  1.95**, leaving the lead at 0 and the correction at 3.67 wire-sized steps. This is why
+  `InputToVisibleMovement_WithAndWithoutPrediction` passed when filtered to itself and failed
+  inside the full PlayMode suite — run alone, the previous session has been reaped; run after
+  other tests, it has not. Counted as `AckAheadOfSend` and printed as `ack floor ack-ahead`,
+  because a client seeing it past its first seconds is talking to a server that thinks it is
+  someone else.
+
 - **The measurement reports the clock error as a band, and stops asserting a cause it cannot
   support.** `clock error (last steer)` is one instantaneous integer sample of a quantity that
   quantises, so a clock sitting steadily between two ticks reports one value or the next
