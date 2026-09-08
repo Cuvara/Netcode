@@ -473,6 +473,21 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 $"samples {_ackLatency.Samples} | superseded {_ackLatency.Superseded} | " +
                 $"schedule resyncs {_sendSchedule.Resyncs} | " +
                 $"unswept {_ackLatency.UnsweptSeconds * 1000.0:F1} ms (diagnostic only) | " +
+                // The cadence every requirement on this line is scaled by, and how much
+                // evidence it rests on. A window of 1 is the estimator saying it could not
+                // form one and fell back to the single smallest gap, which reads the cadence
+                // about a quarter LOW -- so the buckets above are that much narrower and the
+                // sweep that much easier to satisfy. Shown here because this panel is the
+                // screen a human looks at, and a fallback reported only in a batch-mode test
+                // report is the invisible-fallback shape twice over.
+                $"cadence {_ackLatency.AckIntervalSeconds * 1000.0:F1} ms " +
+                (_ackLatency.AckIntervalWindow >= 2
+                    ? $"(over {_ackLatency.AckIntervalWindow} gaps" +
+                      (_ackLatency.AckIntervalFallbacks > 0
+                          ? $", {_ackLatency.AckIntervalFallbacks} earlier ack(s) fell back)"
+                          : ")")
+                    : $"← FELL BACK to the smallest gap ×{_ackLatency.AckIntervalFallbacks}: " +
+                      "no two snapshots in a row, so this reads ~25% LOW") + " | " +
                 $"floor {_ackLatency.FloorTicks:F2} t − bias {_ackLatency.FloorBiasTicks:F2} t " +
                 $"→ lead {_ackLatency.ConservativeFloorTicks:F2} t" +
                 (_ackLatency.FloorCorrectionApplied

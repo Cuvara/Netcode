@@ -750,6 +750,21 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int AckIntervalWindow { get; private set; }
 
+        /// <summary>
+        /// Acknowledgements folded in while <see cref="AckIntervalSeconds"/> was the bare ring
+        /// minimum because no window could be formed.
+        /// </summary>
+        /// <remarks>
+        /// <b><see cref="AckIntervalWindow"/> is instantaneous state and this is its history.</b>
+        /// A session that spent thirty seconds on the fallback and then recovered leaves the
+        /// window reading 8 and no other trace — which is the shape of a guard nobody has
+        /// watched act. A handful at the start of a session is normal, because a window cannot
+        /// be formed before there are gaps to form it from; a count that keeps climbing means
+        /// the link is not delivering two snapshots in a row and every requirement scaled by
+        /// this reading is about a quarter weaker than it says it is.
+        /// </remarks>
+        public int AckIntervalFallbacks { get; private set; }
+
         /// <summary>Appends one inter-arrival gap and recomputes <see cref="AckIntervalSeconds"/>.</summary>
         private void AppendGap(double gap)
         {
@@ -807,6 +822,7 @@ namespace Cuvara.Netcode.Prediction
                 // ring, so there is no window to telescope and the reading is the old minimum.
                 _ackIntervalSeconds = min;
                 AckIntervalWindow = 1;
+                AckIntervalFallbacks++;
                 return;
             }
 
@@ -1211,6 +1227,7 @@ namespace Cuvara.Netcode.Prediction
             _gapCount = 0;
             _ackIntervalSeconds = 0.0;
             AckIntervalWindow = 0;
+            AckIntervalFallbacks = 0;
             _lastAckAt = 0;
             _lastAckTick = 0;
             _maxSentTick = 0;

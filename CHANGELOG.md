@@ -64,8 +64,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   further in none. Without it, the same sweep reads up to **7.1% HIGH**. The subtraction is
   identically zero when there is no jitter, which is why the ideal fixture still reads exactly.
 
-- The measurement harness prints `snapshot cadence (est)` with the window length beside it, and
-  says so in the loud form when the window is 1.
+- **The fallback is visible on the screen a human looks at, and it has a history as well as a
+  state.** `AckIntervalWindow` alone is instantaneous: a session that spent thirty seconds on the
+  fallback and then recovered leaves it reading 8 and no other trace, which is the shape of a
+  guard nobody has watched act — the same shape `AckAheadOfSend` had until it was deliberately
+  induced. So `AckIntervalFallbacks` counts the acknowledgements that read the bare minimum, and
+  both are surfaced in the two places a reader actually is: the measurement harness prints
+  `snapshot cadence (est)` with the window and the count beside it, in the loud form when the
+  window is 1, and **`ClockSyncProbe` prints the same on its cadence line** — a fallback reported
+  only in a batch-mode test report is the invisible-fallback shape twice over.
+
+  The healthy reading is **one**, not zero, and that is asserted rather than left to be
+  misread: the first gap of a session cannot be averaged with anything, so every clean run falls
+  back exactly once. A count that stays at one is the well link; a count that climbs means no two
+  snapshots in a row are arriving and every requirement scaled by the cadence is about a quarter
+  weaker than it says it is.
 
 ### Limitations
 

@@ -488,6 +488,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="AckIntervalSeconds"/>
             public int AckIntervalWindow;
 
+            /// <summary>
+            /// Acknowledgements whose cadence reading was the bare minimum because no window
+            /// could be formed — the window's history, since the window itself is instantaneous.
+            /// </summary>
+            public int AckIntervalFallbacks;
+
             /// <summary>Observations refused as implausible for a floor.</summary>
             public int AckFloorRefused;
 
@@ -2234,6 +2240,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckFloorSwept = binder.AckLatency.SweptEnough;
             run.AckIntervalSeconds = binder.AckLatency.AckIntervalSeconds;
             run.AckIntervalWindow = binder.AckLatency.AckIntervalWindow;
+            run.AckIntervalFallbacks = binder.AckLatency.AckIntervalFallbacks;
             run.AckFloorRefused = binder.AckLatency.Refused;
 
             var acked = run.Samples.Where(x => !x.AuthoritativeTimedOut)
@@ -2639,8 +2646,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  snapshot cadence (est)   {run.AckIntervalSeconds * 1000.0:F2} ms   " +
                     (run.AckIntervalWindow >= 2
                         ? $"(averaged over {run.AckIntervalWindow} consecutive gaps; every\n" +
-                          "                             requirement above is scaled by this)\n"
-                        : "<<< FELL BACK to the single smallest gap: no two\n" +
+                          "                             requirement above is scaled by this\n" +
+                          $"                             — {run.AckIntervalFallbacks} earlier acknowledgement(s) read the\n" +
+                          "                             bare minimum instead)\n"
+                        : "<<< FELL BACK to the single smallest gap on\n" +
+                          $"                             {run.AckIntervalFallbacks} acknowledgement(s): no two\n" +
                           "                             snapshots in a row survived, so this reads the cadence\n" +
                           "                             about 25% LOW and every requirement above is that much\n" +
                           "                             weaker. Lenient, not strict.\n") +

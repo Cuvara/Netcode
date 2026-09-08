@@ -966,6 +966,50 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
+        /// The fallback keeps a count, because the window length alone is instantaneous state
+        /// and a session that fell back for thirty seconds and then recovered leaves no trace
+        /// in it.
+        /// </summary>
+        /// <remarks>
+        /// The same shape as <c>AckAheadOfSend</c> before it was deliberately induced: a
+        /// reading nobody has watched act is indistinguishable from one that cannot. A handful
+        /// at the start of any session is normal — a window cannot be formed before there are
+        /// gaps to form it from — so the count is only evidence when it keeps climbing, and
+        /// both halves are asserted here rather than only the interesting one.
+        /// </remarks>
+        [Test]
+        public void TheFallbackToTheMinimumIsCountedAndNotOnlyReportedInstantaneously()
+        {
+            const double Cadence = 4.0 / BaseHz;
+            const double Jitter = 1.0 / BaseHz;
+
+            // One in three lost: the arrivals alternate, no two in a row, so EVERY
+            // acknowledgement past the first reads the fallback.
+            var always = DriveArrivals(Cadence, Jitter, count: 120, dropEvery: 3);
+
+            Assert.That(always.AckIntervalWindow, Is.EqualTo(1));
+            Assert.That(always.AckIntervalFallbacks, Is.GreaterThan(50),
+                "a link that never delivers two snapshots in a row never leaves the fallback, "
+                + "and the count is the only place that is visible after the fact.");
+
+            // A clean link forms a window as soon as it has two gaps, so the count stops at
+            // the one acknowledgement that had only a single gap to work with.
+            var clean = DriveArrivals(Cadence, Jitter, count: 120);
+
+            Assert.That(clean.AckIntervalWindow, Is.EqualTo(AckLatencyEstimator.IntervalWindowMax));
+            Assert.That(clean.AckIntervalFallbacks, Is.EqualTo(1),
+                "the start of a session is not a defect: the first gap cannot be averaged with "
+                + "anything. A count that STAYS at one is the healthy reading, which is what "
+                + "makes a climbing one worth looking at.");
+
+            Assert.That(new AckLatencyEstimator().AckIntervalFallbacks, Is.Zero);
+
+            clean.Reset();
+            Assert.That(clean.AckIntervalFallbacks, Is.Zero,
+                "and it describes one connection, like everything else here.");
+        }
+
+        /// <summary>
         /// The candidate the record recommended, falsified on the fixture it was recommended
         /// for: a raw low percentile of the GAPS reads STRICT, which is the one direction this
         /// term may not be wrong in.
