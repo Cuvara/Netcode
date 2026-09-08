@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > claim about the cause. A transient server dip, a delay-floor step and a genuine clock
 > difference are then sorted correctly without anyone having to be right about which is
 > happening.
+>
+> **The commit sequence is left unsquashed on purpose.** A tenth-percentile floor was introduced,
+> the sweep guard above it was then fixed, and the p10's own justifying test failed *at its
+> precondition* — the distribution it was built around is refused outright once the guard works.
+> That sequence is the direct evidence that the statistic was compensating for the guard, and
+> squashing it would delete the only record of it, leaving a reverted constant with no visible
+> reason.
 
 ### Fixed
 
@@ -302,6 +309,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on this one named open term. Every assertion stands where it was — the 1.5-step correction
   budget and the budget of 2 corrections above one step included; neither was widened.
 
+
+### Known
+
+- **The snapshot interval the sweep requirement scales by is itself a minimum, and reads about
+  25% low.** `AckLatencyEstimator` measures the interval as the smallest gap between
+  acknowledgements — and a gap *can* fall below the cadence, when one arrival is late and the next
+  is on time, so it reads the interval **less the arrival jitter**. Every requirement scaled by it
+  is weakened in proportion: on a 66 ms cadence with a frame of jitter, roughly a quarter. This is
+  the third instance in one class of a minimum standing in for a quantity it is silent about, and
+  it is recorded rather than fixed on purpose — folding it in behind the sweep fix would make its
+  own effect unattributable, which is the mistake this release spent a run avoiding. The guard is
+  *lenient* because of it, never strict, so it cannot cause an over-lead on its own.
+
+- **The provisional snapshot age has no decay, so on a route that slows it grows without bound.**
+  `SnapshotStalenessEstimator`'s fitted path forgets through its epochs; the provisional path
+  measures against `_floorResidual`, a running minimum that only ever moves **downward**. On a
+  long session whose route genuinely gets slower, that floor is a memory of the session's fastest
+  moment and never forgets it. Measured: a divergence arm running last, when the Editor had been
+  loaded longest, reported an age of **21.58 base ticks** with a rising band (11.78 → 18.15) while
+  the healthy arm sat flat at 0.04 → 0.05. It is bounded where it steers — `TargetLeadTicks`
+  clamps the provisional reading with `Math.Min(.., gap)`, which is why that arm's lead was 3 and
+  not 21 — so this is a **reporting** defect rather than a steering one. But the corroboration gate
+  made the provisional path load-bearing, and a path that carries the age deserves the same decay
+  the fitted one has.
+
+- **A phase-locked client cannot measure its own pipeline constant, and the round-trip fallback is
+  zero on a fast link.** A client whose send cadence equals the snapshot cadence never sees a small
+  wait, so no floor can be offered — correctly, since inventing one is the over-lead defect. And
+  `rttTicks = round(RoundTripMs * Hz / 1000)` is `round(4 × 60 / 1000)` = **0** on loopback, so the
+  fallback does not degrade gracefully, it vanishes. The choice for such a client is therefore
+  *measured floor or nothing*, and `uplink + snapshot age` stays uncovered for it. Closing that is a
+  **send-cadence** decision — deliberately offsetting the client's send rate from the snapshot rate
+  so the wait sweeps — which is a product change, not a netcode fix, and is not made here.
 
 ## [0.33.0] - 2026-09-08
 
