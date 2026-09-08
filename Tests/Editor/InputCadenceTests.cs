@@ -365,6 +365,104 @@ namespace Cuvara.Netcode.Tests.Editor
                 "due immediately");
         }
 
+        // ---- what the cadence CANNOT fix ----
+
+        /// <summary>
+        /// Acknowledgements are read on a render frame, so the client's frame rate bounds how
+        /// many phases can be told apart — and below
+        /// <see cref="AckLatencyEstimator.MinimumOccupiedBuckets"/> of them no cadence passes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This is the limit of the fix and it is pinned deliberately.</b> Writing
+        /// <c>k = fps / snapshotHz</c>, the wait resolves only to a frame period, so at most
+        /// <c>k</c> phases are distinguishable however many the cadence visits. At 30 fps
+        /// against a 15 Hz snapshot rate <c>k = 2</c>, the occupancy test needs 3, and 11, 12,
+        /// 13 and 14 Hz are <i>all</i> refused — correctly, because the evidence genuinely is
+        /// not there. A 30 fps client cannot measure its own pipeline constant, which on a
+        /// mobile target is not hypothetical.
+        /// </para>
+        /// <para>
+        /// Asserted so that a future reader finding "13 Hz still offers no floor" on a slow
+        /// device looks at the frame rate rather than at the cadence.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void BelowThreeFramesPerSnapshotNoCadenceCanSweep()
+        {
+            // The bound the estimator's own occupancy test imposes, expressed in frames.
+            int minimumFps = AckLatencyEstimator.MinimumOccupiedBuckets * SnapshotHz;
+            Assert.That(minimumFps, Is.EqualTo(45),
+                "three resolvable phases against a 15 Hz snapshot rate is 45 fps");
+
+            foreach (var sendHz in new[] { 11, 12, 13, 14 })
+            {
+                var slow = DriveFrameQuantised(sendHz, fps: 30.0, 1.0 / BaseHz, seconds: 20.0);
+                Assert.That(slow.SweptEnough, Is.False,
+                    $"at 30 fps only two phases are distinguishable, so {sendHz} Hz cannot " +
+                    "satisfy the occupancy test — the cadence is not the binding constraint");
+            }
+
+            var fast = DriveFrameQuantised(
+                InputCadence.RecommendedSendHz(SnapshotHz), fps: 60.0, 1.0 / BaseHz,
+                seconds: 20.0);
+            Assert.That(fast.SweptEnough, Is.True,
+                "and at 60 fps the same cadence sweeps, so the refusal above is about the " +
+                "frame rate and not about the cadence");
+        }
+
+        /// <summary>
+        /// As <see cref="DrivePipeline"/>, but acknowledgements are folded in on a render
+        /// frame rather than at the instant they arrive — which is what a real client does,
+        /// and what bounds the resolution of the whole measurement.
+        /// </summary>
+        private static AckLatencyEstimator DriveFrameQuantised(
+            int sendHz, double fps, double uplinkPlusAge, double seconds)
+        {
+            var estimator = new AckLatencyEstimator();
+            var arrivals = new Queue<(long Tick, double At)>();
+            var readyAcks = new Queue<(long Ack, double At)>();
+
+            var schedule = new InputSendSchedule();
+            schedule.Start(sendHz, ClockOffset);
+
+            double frame = 1.0 / fps;
+            double nextSnapshot = ClockOffset + SnapshotPeriod * 0.37;
+            long inputTick = 0, accepted = 0;
+
+            for (double now = ClockOffset; now < ClockOffset + seconds; now += frame)
+            {
+                // The server keeps its own schedule regardless of the client's frames.
+                while (nextSnapshot <= now + frame)
+                {
+                    while (arrivals.Count > 0 && arrivals.Peek().At <= nextSnapshot)
+                    {
+                        accepted = arrivals.Dequeue().Tick;
+                    }
+
+                    if (accepted > 0) readyAcks.Enqueue((accepted, nextSnapshot));
+                    nextSnapshot += SnapshotPeriod;
+                }
+
+                if (schedule.SecondsUntilDue(now) <= 1e-12)
+                {
+                    inputTick++;
+                    estimator.RecordSent(inputTick, now);
+                    arrivals.Enqueue((inputTick, now + uplinkPlusAge));
+                    schedule.NoteSent(now);
+                }
+
+                // Read on the frame, at the frame's timestamp: the client cannot observe an
+                // arrival more precisely than the frame it notices it on.
+                while (readyAcks.Count > 0 && readyAcks.Peek().At <= now)
+                {
+                    estimator.RecordAck(readyAcks.Dequeue().Ack, now, BaseHz);
+                }
+            }
+
+            return estimator;
+        }
+
         [Test]
         public void AnUnstartedScheduleIsDueImmediatelyRatherThanNever()
         {

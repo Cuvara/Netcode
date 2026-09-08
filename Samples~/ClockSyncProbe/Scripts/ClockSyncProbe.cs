@@ -106,6 +106,9 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
 
         private System.Random _rng = new System.Random(12345);
 
+        /// <summary>The last frame's length, for the resolvable-phase bound.</summary>
+        private double _lastFrameSeconds;
+
         // ── The send cadence, and the acknowledgement floor it decides ──
         //
         // This half of the probe exists because the pipeline constant `uplink + snapshot
@@ -300,6 +303,7 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             }
 
             _clientSeconds += dt;
+            _lastFrameSeconds = dt;
 
             // Positive ppm = the client's clock runs fast, so fewer server seconds pass per
             // client second. This is the whole model: t_client = skew * t_server, the same
@@ -323,7 +327,12 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             // names is the cadence that goes out. Re-deriving the deadline from whenever the
             // frame happened to land is what used to make every nominal rate in (12, 15]
             // arrive as 12 Hz. See InputSendSchedule.
-            while (_sendSchedule.SecondsUntilDue(_clientSeconds) <= 0.0)
+            // AT MOST ONE SEND PER FRAME. A `while` here would fire the whole backlog at the
+            // same instant after a slow frame -- several inputs sharing one timestamp, which
+            // no real client produces and which would land inside a single snapshot interval
+            // where all but the newest are superseded. A real client sends from its frame
+            // loop and can only send once per frame; so does this.
+            if (_sendSchedule.SecondsUntilDue(_clientSeconds) <= 0.0)
             {
                 _inputTick++;
                 _ackLatency.RecordSent(_inputTick, _clientSeconds);
@@ -332,6 +341,17 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 _inFlightInputs.Add((_clientSeconds + UplinkSeconds, _inputTick));
                 _sentLog.Add((_inputTick, _clientSeconds));
                 _sendSchedule.NoteSent(_clientSeconds);
+
+                // THE ACHIEVED RATE, MEASURED RATHER THAN ASSUMED. LocalMovePredictor already
+                // times the interval between inputs and exposes it as ObservedInputInterval,
+                // and until now nothing read it -- a measurement nobody reads is the same
+                // defect as a counter that reads zero for two reasons. It is the one line
+                // that would have caught the send loops silently sending 12 Hz while their
+                // configuration said 15, so it is on screen next to the nominal rate.
+                //
+                // A zero vector: this is a cadence probe, not a movement one, and a deadzone
+                // input is what a real client sends when the stick is centred.
+                _predictor.RecordInput(_inputTick, 0f, 0f);
             }
 
             while (_serverSeconds >= _nextSnapshotAtServerSeconds)
@@ -425,14 +445,33 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
 
             _sendHzValue.text = $"{_sendHz} Hz" + (_sendHz == recommended ? " (recommended)" : string.Empty);
 
+            // NOMINAL vs ACHIEVED, side by side. These disagreeing is the whole of the
+            // second defect this panel documents: the loops were configured at one rate and
+            // sent at another, and nothing displayed the difference.
+            float observed = _predictor.ObservedInputInterval;
+            float achievedHz = observed > 0f ? 1f / observed : 0f;
+            bool cadenceHonoured = achievedHz <= 0f ||
+                                   Mathf.Abs(achievedHz - _sendHz) <= _sendHz * 0.05f;
+
+            // The client's frame rate bounds how finely the wait can be resolved at all:
+            // acknowledgements are read on a frame, so k = fps / snapshotHz caps the number
+            // of DISTINGUISHABLE phases however many the cadence visits. Below
+            // MinimumOccupiedBuckets of them no cadence can pass.
+            double k = _lastFrameSeconds > 0.0 ? 1.0 / (_lastFrameSeconds * SnapshotHz) : 0.0;
+
             _cadenceLine.text =
-                $"send {_sendHz} Hz vs snapshots {SnapshotHz} Hz | " +
-                $"phases {InputCadence.DistinctPhases(_sendHz, SnapshotHz)} | " +
+                $"send {_sendHz} Hz nominal / " +
+                $"{(achievedHz > 0f ? $"{achievedHz:F2}" : "--")} Hz achieved" +
+                $"{(cadenceHonoured ? string.Empty : "  ← NOT THE CONFIGURED RATE")} | " +
+                $"snapshots {SnapshotHz} Hz | " +
+                $"phases {InputCadence.DistinctPhases(_sendHz, SnapshotHz)} visited, " +
+                $"≤{Mathf.FloorToInt((float)k)} resolvable at this frame rate | " +
                 $"sweep every {InputCadence.SendsPerSweep(_sendHz, SnapshotHz):F1} sends " +
                 $"({InputCadence.SweepSeconds(_sendHz, SnapshotHz):F2} s) | " +
                 $"buckets {occupied}/{AckLatencyEstimator.SweepBuckets} " +
                 $"(needs {AckLatencyEstimator.MinimumOccupiedBuckets}) | " +
                 $"samples {_ackLatency.Samples} | superseded {_ackLatency.Superseded} | " +
+                $"schedule resyncs {_sendSchedule.Resyncs} | " +
                 $"unswept {_ackLatency.UnsweptSeconds * 1000.0:F1} ms | " +
                 $"floor {_ackLatency.FloorTicks:F2} t → lead {_ackLatency.ConservativeFloorTicks:F2} t";
 
@@ -443,6 +482,36 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                     $"{AckLatencyEstimator.MinimumSamples} acknowledged observations";
                 _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", false);
                 _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", false);
+                return;
+            }
+
+            // A CADENCE THAT IS NOT BEING HONOURED IS THE FIRST THING TO SAY, because every
+            // other line on this panel then describes a rate nobody configured.
+            if (!cadenceHonoured)
+            {
+                _cadenceVerdict.text =
+                    $"THE CONFIGURED CADENCE IS NOT WHAT IS BEING SENT — {_sendHz} Hz asked " +
+                    $"for, {achievedHz:F2} Hz measured. Every reading below describes the " +
+                    "rate that is actually going out, not the one on the slider.";
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", false);
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", true);
+                return;
+            }
+
+            // The frame rate, not the cadence, can be the binding constraint.
+            if (!_ackLatency.SweptEnough &&
+                Mathf.FloorToInt((float)k) < AckLatencyEstimator.MinimumOccupiedBuckets)
+            {
+                _cadenceVerdict.text =
+                    $"REFUSED, AND THE CADENCE IS NOT THE PROBLEM — acknowledgements are read " +
+                    $"on a render frame, so at this frame rate only " +
+                    $"{Mathf.FloorToInt((float)k)} phase(s) of the interval can be told apart, " +
+                    $"against the {AckLatencyEstimator.MinimumOccupiedBuckets} the occupancy " +
+                    "test needs. No send cadence can pass here. Raise the frame rate: the " +
+                    $"floor needs at least {AckLatencyEstimator.MinimumOccupiedBuckets * SnapshotHz} fps " +
+                    $"against a {SnapshotHz} Hz snapshot rate.";
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", false);
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", true);
                 return;
             }
 

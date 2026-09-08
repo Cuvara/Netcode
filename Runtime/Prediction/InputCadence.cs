@@ -38,6 +38,51 @@ namespace Cuvara.Netcode.Prediction
     /// configurable, so a hard-coded 13 is right for one deployment and silently wrong for
     /// the next — which is the same shape of defect as the anchor it replaces.
     /// </para>
+    /// <para>
+    /// <b>THE FRAME GRID MAKES A COPRIME CADENCE UNREACHABLE WITHOUT
+    /// <see cref="InputSendSchedule"/>, AND THAT IS WHY THE SCHEDULE IS NOT
+    /// OVER-ENGINEERING.</b> A loop that re-derives its deadline from whenever it woke can
+    /// only send on a frame boundary, so its achievable rates are <c>fps / n</c> for integer
+    /// <c>n</c>. Write <c>k = fps / snapshotHz</c>. Every achievable rate is then
+    /// <c>snapshotHz · k / n</c>, and its phase step against the snapshot stream is
+    /// <c>frac(n / k)</c> — always a multiple of <c>1/k</c>, so it visits <b>at most k
+    /// phases and never more</b>, whatever constant is written in the source. At the shipping
+    /// 60 fps against 15 Hz, <c>k = 4</c>: the achievable rates are 20, 15, 12, 10, 8.57,
+    /// 7.5 Hz with phase steps of 0.75, 0, 0.25, 0.5, 0.75, 0 — never better than four
+    /// phases, and 20, 15 and 7.5 Hz are outright locked at one. <b>No value of this
+    /// method's return can produce a sweeping cadence on that grid.</b> So the pinned
+    /// schedule is not an optimisation layered on the cadence choice; it is the thing that
+    /// makes any cadence choice reachable. Reverting to <c>await Delay(1f / 13f)</c> silently
+    /// restores the defect in full.
+    /// </para>
+    /// <para>
+    /// <b>And the client's frame rate bounds the reading even when the cadence is right.</b>
+    /// Acknowledgements are read on a render frame, so the wait term resolves only to a frame
+    /// period: the same <c>k</c> bounds how many phases the estimator can DISTINGUISH,
+    /// independently of how many the cadence VISITS. Two consequences, both measured against
+    /// the real estimator with an injected constant of 1.00 base ticks:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <b>Below <c>k = MinimumOccupiedBuckets</c> the floor is unavailable at any cadence.</b>
+    /// At 30 fps against 15 Hz, <c>k = 2</c> and the occupancy test cannot reach 3, so 11, 12,
+    /// 13 and 14 Hz are <i>all</i> refused. The first frame rate that works is 45 fps
+    /// (<c>k = 3</c>). <b>A 30 fps client cannot measure its own pipeline constant</b>, and on
+    /// a mobile target that is not a hypothetical. The refusal is correct and this is a real
+    /// limitation of the measurement, not of the cadence.
+    /// </description></item>
+    /// <item><description>
+    /// <b>At 60 fps the coprime advantage is invisible, and it is honest to say so.</b> The
+    /// frame period (16.67 ms) is coarser than 13 Hz's phase spacing (5.13 ms), so 11, 12, 13
+    /// and 14 Hz all read <c>UnsweptSeconds</c> of 16.67 ms and a lead of 1.00. The advantage
+    /// appears once the frame rate can resolve it: at 144 fps, 13 Hz reaches an unswept
+    /// remainder of 0.00 ms against 12 Hz's 13.89, and a lead of 1.67 against 0.42.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// So coprimality is chosen for the regime where it can matter and costs nothing where it
+    /// cannot — not because it improves the reading on the machine this shipped from.
+    /// </para>
     /// </remarks>
     public static class InputCadence
     {
@@ -112,10 +157,15 @@ namespace Cuvara.Netcode.Prediction
         /// </description></item>
         /// <item><description>
         /// <b>12 Hz</b> — fast enough (4 sends per sweep) but <c>gcd(12, 15) = 3</c>, so it
-        /// visits <b>4 phases</b>. Measured: <c>UnsweptSeconds</c> stuck at 16.67 ms and
-        /// <c>ConservativeFloorTicks</c> at 0.48 against a true 1.00 — it discards half the
-        /// term it exists to measure. This is why condition 1 is not "near the snapshot
-        /// rate" but coprimality: 12 is closer to 15 than 13 is, and far worse.
+        /// visits <b>4 phases</b> where 13 visits 13. This is why condition 1 is not "near the
+        /// snapshot rate" but coprimality: 12 is CLOSER to 15 than 13 is, and coarser.
+        /// <b>Measured honestly, the penalty is invisible at 60 fps and real above it</b> —
+        /// see the frame-rate note in the type remarks. At 60 fps the frame period is coarser
+        /// than either cadence's phase spacing, so 12 and 13 both read an unswept remainder
+        /// of 16.67 ms and a lead of 1.00 against a true 1.00. At 144 fps, where the phases
+        /// can be resolved, 13 Hz reaches 0.00 ms unswept and a lead of 1.67 while 12 Hz
+        /// stalls at 13.89 ms and 0.42. The rule prefers the cadence that is not the limiting
+        /// factor at any frame rate.
         /// </description></item>
         /// </list>
         /// <para>

@@ -64,10 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | 15 Hz | 1 | ∞ | locked; no floor offered. The defect. |
   | 14 Hz | 14 | 14.0 | reads correctly but has 1 Hz of margin — it re-locks the moment it drifts to 15. |
   | **13 Hz** | **13** | **6.5** | **chosen.** Still yields an estimate when drifted to 13.25, 13.5, 13.75 and 14.0. |
-  | 12 Hz | 4 | 4.0 | sweeps *faster*, yet `UnsweptSeconds` sticks at 16.67 ms and the lead lands at 0.48 against a true 1.00 — half the term discarded. |
+  | 12 Hz | 4 | 4.0 | sweeps *faster* and is **closer** to 15, yet coarser — `gcd(12, 15) = 3`. |
 
-  12 Hz is the case that decides the rule's shape: it is *closer* to 15 than 13 is and far worse,
-  because `gcd(12, 15) = 3`. The condition is coprimality, not proximity.
+  12 Hz is the case that decides the rule's shape: the condition is coprimality, not proximity.
+  **Its penalty is invisible at 60 fps and real above it**, and saying so precisely matters —
+  see the frame-rate limit below. At 60 fps the frame period (16.67 ms) is coarser than either
+  cadence's phase spacing, so 12 and 13 Hz both read an unswept remainder of 16.67 ms and a lead
+  of 1.00 against a true 1.00. At 144 fps, where the phases can be resolved, 13 Hz reaches 0.00 ms
+  unswept and a lead of 1.67 while 12 Hz stalls at 13.89 ms and 0.42. Coprimality is chosen for
+  the regime where it can matter and costs nothing where it cannot — **not** because it improves
+  the reading on the machine this shipped from.
 
 - **The configured cadence is now the cadence actually sent.** Both send loops were shaped
   `send(); await UniTask.Delay(period);`. `UniTask.Delay` starts its stopwatch when the delay is
@@ -76,12 +82,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(12, 15]` collapsed onto 60/5 = **12 Hz**: 15 sent 12, 14 sent 12, 13 sent 12.
 
   **Changing the constant alone would have been a literal no-op** — same packets, same phase, same
-  verdict — while reading as a fix in the diff and passing a test driven by an ideal timer. The
-  achieved cadence was never a property of the constant; it was a property of the loop shape and
-  the frame rate, and the two loops in this package disagreed by 3 Hz because of it. The PlayMode
-  harness pumps to an absolute deadline and achieved ~15 Hz — which is the lock measured live —
-  while the bootstrap and DOTS loops achieved ~12 and swept **by accident**, at a cadence nobody
-  chose, with four phases instead of thirteen, and only until the frame rate moved.
+  verdict — while reading as a fix in the diff and passing a test driven by an ideal timer.
+
+  **Neither loop sent at the rate it named, and the two disagreed by 3 Hz.** The PlayMode harness
+  paces with `PumpAsync`, whose absolute deadline happens to land exactly on four frames at 60 fps
+  (`1/15 Hz = 66.67 ms`, `4 × 16.67 ms`) — 15 Hz is the one value in the range that survives the
+  quantisation intact, which is why the live run shows a near-exact lock and is correctly refused.
+  The bootstrap and DOTS loops meanwhile achieved ~12 Hz and swept **by accident**, at a cadence
+  nobody chose, with four distinct phases instead of thirteen and `ConservativeFloorTicks` at 0.48
+  against a true 1.00 — and would have stopped sweeping the moment the frame rate moved.
+  **Production "working" here was not evidence of health; it was a second frame-quantisation
+  accident that happened to fall the other way.**
+
+  **And on a frame grid the cadence choice is not merely undone, it is unreachable.** A loop that
+  re-derives its deadline from its wake-up can only send on a frame boundary, so its achievable
+  rates are `fps / n`. Writing `k = fps / snapshotHz`, every achievable rate has a phase step of
+  `frac(n / k)` — always a multiple of `1/k`, so it visits **at most k phases, whatever constant
+  is written in the source**. At 60 fps against 15 Hz, `k = 4`: the achievable rates are 20, 15,
+  12, 10, 8.57 and 7.5 Hz with phase steps of 0.75, 0, 0.25, 0.5, 0.75, 0 — never better than
+  four phases, and 20, 15 and 7.5 Hz locked outright at one. **No value of the recommendation can
+  produce a sweeping cadence on that grid.** The pinned schedule is therefore not an optimisation
+  layered on the cadence choice; it is what makes any cadence choice reachable, and reverting to
+  `await Delay(1f / 13f)` silently restores the defect in full.
 
   New `InputSendSchedule` advances by one period from the previous *scheduled* instant, so
   quantisation error cancels instead of accumulating. Catch-up after a stall is bounded
@@ -103,8 +125,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, a live phase histogram
-  over the same eight divisions `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict.
+- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
+  rate readout**, a live phase histogram over the same eight divisions
+  `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict. The achieved rate is read from
+  `LocalMovePredictor.ObservedInputInterval`, which has always measured it and which **nothing
+  read** — a measurement nobody reads is the same defect as a counter that reads zero for two
+  reasons, and this is the single line that would have caught the loops sending 12 Hz while their
+  configuration said 15. The panel also names the frame-rate bound, and says so explicitly when
+  the frame rate rather than the cadence is what is blocking a reading.
   Extended rather than given its own sample because it is the same story told to the same reader —
   a clock/fit panel already lives here. **Drag the cadence to 15 and the histogram collapses to one
   bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
@@ -130,12 +158,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+- **The recommendation was simulated against the real estimator before it was proposed, and the
+  simulation refuted two claims that would otherwise have shipped.** The first — that 14 Hz would
+  be marginal at the minimum sample count — was wrong, and finding out why surfaced the quantile
+  degeneracy logged below. The second was the one that mattered: **the cadence change alone does
+  nothing on the target machine.** It greps clean, it reads as a fix in the diff, and it passes a
+  test driven by an ideal timer, because the defect lives in the loop shape rather than in the
+  constant. That is the failure mode of this codebase arriving through the *harness* instead of
+  through an edit — a test that shares the code's model of the wire can only confirm it — and the
+  only reason it was caught is that the proposal was run against the real class before it was
+  believed. **Verify a recommendation the same way a defect is verified.**
+
+- **Figures in this entry were re-taken on clean rebuilds, because one of them was stale.** A
+  mutation check of the new tests initially reported a pass; `dotnet test` had silently re-run the
+  previous assembly rather than rebuilding, because the sources live outside the throwaway project
+  directory. A clean rebuild showed 6 of 15 failing, which is the real result. Every
+  nominal-versus-achieved number quoted above was re-measured with `rm -rf bin obj` first, and the
+  12 Hz comparison was corrected as a result: its penalty is invisible at 60 fps, and the earlier
+  draft quoted an ideal-timer figure as though it described the shipping client.
+
 - **The harness is also the client, so this change moves the instrument and the thing measured in
   the same commit.** There is no third client to hold fixed. The consequence is that a live run
   cannot, on its own, separate *"the fix worked"* from *"the harness now samples differently"*:
   both the cadence and the pinned schedule alter which phases get sampled. Stated here rather than
   discovered later. What the run *can* establish is the qualitative step — a floor offered at all
   where none was before — because the previous state was a refusal, not a different number.
+- **The fix has a floor of its own: below three frames per snapshot, no cadence sweeps.**
+  Acknowledgements are read on a render frame, so the wait resolves only to a frame period and
+  `k = fps / snapshotHz` bounds how many phases can be *told apart*, independently of how many the
+  cadence *visits*. At 30 fps against 15 Hz, `k = 2` against an occupancy test needing 3, and 11,
+  12, 13 and 14 Hz are **all** refused — correctly, because the evidence genuinely is not there.
+  The first frame rate that works is 45 fps. **A 30 fps client cannot measure its own pipeline
+  constant**, which on an Android target is not hypothetical. Pinned in
+  `BelowThreeFramesPerSnapshotNoCadenceCanSweep` so that "13 Hz still offers no floor" on a slow
+  device sends the next reader to the frame rate rather than to the cadence.
+
+- **`AckLatencyEstimator`'s sweep guard is weakest on its first verdict, and this is arithmetic
+  rather than a suspicion.** `Quantile` computes `index = (int)(q * _obsCount)`. At
+  `_obsCount == 8` — exactly `MinimumSamples` — the tenth percentile is index 0 and the ninetieth
+  is index 7: **the minimum and the maximum**, which is precisely the `max - min` statistic the
+  guard was rewritten to stop being, and which a single outlier satisfies. The same holds at
+  n = 9. From **n ≥ 10** the low quantile moves off index 0 and the statistic becomes a real order
+  statistic. Not fixed here — tuning a guard's constants while changing the cadence feeding it
+  would make neither result attributable — and logged so it joins the known list rather than being
+  rediscovered.
+
 - **Known pre-existing discrepancy, unchanged by this work.** `GameConstants.MaxBankedMovementMs`
   reasons that `MaxBankedMovementTicks(15) = 4` ticks of 66.7 ms covers a bursting client's 264 ms
   idle "exactly". That arithmetic is for the *uniform* 15 Hz configuration. Under the live split

@@ -35,7 +35,7 @@ made refusals a counter; this scene makes them a colour.
 | **Step server clock +5 s** | a restart on a new tick origin; `HardResyncs` moves, `Snaps` does not |
 | **drag Send Hz to 15** | the phase histogram collapses to one bar and the sweep verdict flips to REFUSED — the send cadence now equals the snapshot rate |
 | **drag Send Hz back to 13** | all eight buckets fill within about a second and a floor is offered again |
-| **drag Send Hz to 12** | it still sweeps, but only four bars ever fill: `gcd(12, 15) = 3`, and half the term is lost |
+| **drag Send Hz to 12** | it still sweeps, but only four phases are ever visited: `gcd(12, 15) = 3`. At 60 fps the frame period hides the difference; above it, it shows |
 
 ## What is real and what is synthetic
 
@@ -70,6 +70,20 @@ on a fast link, the term was unobtainable in principle for such a client. No sta
 guard could have closed it: they all describe a distribution that was never generated. The
 only fix is to generate it, by offsetting the cadence — which is what `InputCadence` does, and
 what the slider here lets you undo.
+
+**The nominal-vs-achieved line is the one to watch.** The cadence you set and the cadence that
+goes out are different numbers whenever the send loop re-derives its deadline from whenever it
+woke: `await Delay(period)` discards the frame-quantisation remainder every iteration, and at
+60 fps that collapses every nominal rate in (12, 15] onto 12 Hz. `LocalMovePredictor` has always
+measured the achieved interval and nothing read it. This panel reads it, next to the nominal, and
+says so loudly when they disagree.
+
+**The frame rate can be the binding constraint, not the cadence.** Acknowledgements are read on a
+render frame, so the wait resolves only to a frame period: `k = fps / snapshotHz` caps how many
+phases can be *told apart*, however many the cadence *visits*. Against a 15 Hz snapshot rate that
+means **45 fps minimum** — below it the occupancy test cannot reach three buckets and no cadence
+passes. At 30 fps, 11, 12, 13 and 14 Hz are all refused. The panel says which constraint is
+binding rather than leaving you to infer it from a bare REFUSED.
 
 The histogram divides the snapshot interval into the same eight buckets
 `AckLatencyEstimator.SweepBuckets` counts occupancy over, so what is on screen is the shape
