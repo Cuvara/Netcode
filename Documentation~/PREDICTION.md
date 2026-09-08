@@ -231,10 +231,29 @@ ticks, and that is a guard which fires as a total loss — the two live readings
 0.68 base ticks and both truncated to zero, so the estimator contributed nothing in exactly the
 regime it exists for. A sub-tick deficit is not a sub-tick problem either: the tick *label* is
 an integer, so a lead 0.68 ticks short carries the wrong tick number for most of every tick and
-the reconcile returns a whole step for it. `ConservativeFloorTicks` keeps the bias in the units
-that are genuinely uncertain — `FloorSeconds - UnsweptSeconds`, where `UnsweptSeconds` is the
-measured part of the wait's range never sampled — so it shrinks to nothing as the sweep
-completes rather than whenever the link is fast.
+the reconcile returns a whole step for it. `ConservativeFloorTicks` keeps the bias and puts it
+where the bias actually is — `FloorSeconds - FloorPercentile * slope`, with `slope` the ladder
+fitted through six quantiles of the run's own observations.
+
+**The subtracted term is the statistic's construction bias, not the unswept remainder.** One
+observation is `constant + wait` and the wait sweeps a snapshot interval, so the quantiles are
+affine in `q` and the tenth percentile sits `0.1 · S` above the constant *by construction* — on
+every clean run, contamination or not. Live across eight arms at two snapshot rates the reported
+floor tracked `intercept + 0.1 × slope` to two decimals (`0.16 + 0.207 = 0.37` against 0.37
+measured at 30 Hz), against a true pipeline constant of 0.14–0.28 base ticks. Because the slope
+is measured per run rather than assumed from a configured rate, the correction follows the link.
+
+This replaces a subtraction of `UnsweptSeconds` (≈ `S / phases`), which was a different quantity
+that merely resembled the bias at the two cadences this package ships; see the CHANGELOG for the
+sign-flip arithmetic that retired it. `UnsweptSeconds` remains as a diagnostic.
+
+**When the ladder is not straight the contribution is zero, and the substitution is visible.**
+The affine model is what predicts the bias, so a distribution it does not describe is refused
+rather than corrected by a slope that means nothing. `FloorCorrectionApplied` carries the state,
+`FloorCorrectionRefusals` counts it, `FloorBiasTicks` is what was subtracted and
+`LadderSlopeTicks` / `LadderWorstResidualTicks` are the evidence it was fitted from. A silent
+zero here reads identically to "the link is instant" in every other counter, which is why none
+of it is silent.
 
 ### What makes a floor safe to steer on
 

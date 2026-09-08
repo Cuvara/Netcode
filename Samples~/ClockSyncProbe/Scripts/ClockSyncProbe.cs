@@ -472,8 +472,15 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 $"(needs {AckLatencyEstimator.MinimumOccupiedBuckets}) | " +
                 $"samples {_ackLatency.Samples} | superseded {_ackLatency.Superseded} | " +
                 $"schedule resyncs {_sendSchedule.Resyncs} | " +
-                $"unswept {_ackLatency.UnsweptSeconds * 1000.0:F1} ms | " +
-                $"floor {_ackLatency.FloorTicks:F2} t → lead {_ackLatency.ConservativeFloorTicks:F2} t";
+                $"unswept {_ackLatency.UnsweptSeconds * 1000.0:F1} ms (diagnostic only) | " +
+                $"floor {_ackLatency.FloorTicks:F2} t − bias {_ackLatency.FloorBiasTicks:F2} t " +
+                $"→ lead {_ackLatency.ConservativeFloorTicks:F2} t" +
+                (_ackLatency.FloorCorrectionApplied
+                    ? $" (slope {_ackLatency.LadderSlopeTicks:F2} t, worst residual " +
+                      $"{_ackLatency.LadderWorstResidualTicks:F2} t)"
+                    : $" | CORRECTION REFUSED ×{_ackLatency.FloorCorrectionRefusals}: the ladder " +
+                      $"is not straight (worst residual {_ackLatency.LadderWorstResidualTicks:F2} t), " +
+                      "so the lead gets NOTHING from the floor");
 
             if (_ackLatency.Samples < AckLatencyEstimator.MinimumSamples)
             {
