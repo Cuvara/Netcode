@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`AckLatencyEstimator` — the pipeline constant the staleness envelope absorbs.** The client
+  applies an input at its OWN base tick; the server applies it at the tick its packet is drained
+  on, so the two label the same input with the same tick number only if the client leads by
+  `uplink + snapshot age`. `SnapshotStalenessEstimator` fits a lower envelope and therefore
+  absorbs any constant by construction, so neither its reading nor the clock error can ever show
+  this term — which is why it survived two rounds of fixes with every counter reading clean. The
+  estimator times each input from its send to the first snapshot whose `ack_tick` reaches it and
+  takes the minimum, which converges on `uplink + age`. No new wire traffic and no server change:
+  both ends of the interval were already at the client. Call
+  `WorldViewBinder.NoteInputSent(tick)` beside `LocalMovePredictor.RecordInput`, or the estimator
+  has one end of the interval and offers nothing.
+
+### Fixed
+
+- **The acknowledgement floor is carried into the lead as a fraction, not truncated to whole
+  base ticks.** Truncation was the reason this term stayed open. Live the floor read 0.14 and
+  0.68 base ticks and `Math.Floor` returned zero both times, so the estimator contributed
+  *nothing* on exactly the links it exists for — every localhost run measured. And a sub-tick
+  deficit is not a sub-tick problem: the tick label is an integer, so a client leading 0.68 ticks
+  short carries the wrong tick number for most of every tick and the reconcile returns a whole
+  step for it. That is the second step of the 2.00-step residual against a floor of 1.00. The
+  one-sided bias that truncation was there to provide is kept and moved into the units that are
+  actually uncertain — `AckLatencyEstimator.ConservativeFloorTicks` is the floor less
+  `UnsweptSeconds`, the measured part of the wait's range never sampled — so it shrinks as the
+  sweep completes instead of firing as a total loss whenever the link is fast.
+
+- **An acknowledgement now times only the newest input it retires.** It timed every input it
+  covered. That could never pull the floor *down* — an older input waited for an acknowledgement
+  a later one had already earned, so its interval is larger, and a minimum is monotone — but it
+  stretched the observed **span**, which is the whole of the evidence `SweptEnough` rests on. On
+  a client sending four inputs per snapshot in phase, the superseded send times widened the span
+  by three send periods and the guard read "swept" on a link whose wait never varied at all,
+  offering a floor inflated by a fixed wait. That is an over-lead, the original defect arriving
+  from the other side. Superseded observations are drained and counted (`Superseded`) rather than
+  folded in.
+
+- **A measured floor no longer silently lowers the runaway ceiling.** `rttTicks` was computed
+  only on the branch a floor did not take, so the arrival of a floor dropped the round trip out
+  of `ceiling = gap * 2 + rttTicks + floor` as well as out of the lead — a clamp tightening for a
+  reason that has nothing to do with a runaway, on a change whose safety argument was that it
+  could not touch the steer. It is now computed unconditionally. Together with the truncation
+  above this is the coupling behind the clock error moving from −1 to −2/−4 when the estimator
+  was first wired in: the floor was never steering anything, the round trip had stopped steering
+  anything, and a truncated floor put nothing back.
+
+- **`InputToVisibleMovement_WithAndWithoutPrediction` is no longer `[Ignore]`d.** It was ignored
+  on this one named open term. Every assertion stands where it was — the 1.5-step correction
+  budget and the budget of 2 corrections above one step included; neither was widened.
+
+
 ## [0.33.0] - 2026-09-08
 
 ### Fixed

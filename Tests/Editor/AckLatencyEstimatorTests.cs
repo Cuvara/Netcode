@@ -218,5 +218,124 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(e.Samples, Is.EqualTo(0));
             Assert.That(e.Refused, Is.EqualTo(0));
         }
+
+        /// <summary>
+        /// A phase-locked link whose acknowledgements retire several inputs at once must still
+        /// be refused, and the retired-but-not-newest inputs are why it once was not.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is the failure the retire-everything loop actually caused, and it is NOT the
+        /// one it was suspected of. Timing every input an acknowledgement covers cannot pull
+        /// the floor down: an older input waited for an acknowledgement a later input had
+        /// already earned, so its interval is LARGER, and a minimum is monotone — larger values
+        /// never move it. The suspicion that stale send times dragged the minimum down is
+        /// refuted by that alone.
+        /// </para>
+        /// <para>
+        /// What they do corrupt is the SPAN, and the span is the entire evidence
+        /// <see cref="AckLatencyEstimator.SweptEnough"/> rests on. Here the send cadence is four
+        /// times the acknowledgement cadence and locked to it, so every acknowledgement retires
+        /// four inputs whose send times are three send periods apart. Folding all four in
+        /// stretches the observed maximum by that spread — which has nothing to do with the wait
+        /// term — and the guard reads "swept" on a link where the wait never varied at all. A
+        /// guard fed values from outside the quantity it guards is not a guard.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void SupersededObservationsDoNotStretchTheSweep()
+        {
+            var e = new AckLatencyEstimator();
+            double now = ClockOffset;
+            const double constant = 0.0100;
+            long tick = 0;
+
+            // Four sends per acknowledgement, exactly in phase: the wait is the same every
+            // time, so there is no sweep and nothing may be offered.
+            for (var snapshot = 0; snapshot < 200; snapshot++)
+            {
+                for (var k = 0; k < 4; k++)
+                {
+                    tick++;
+                    e.RecordSent(tick, now + k * (SnapshotPeriod / 4.0));
+                }
+
+                now += SnapshotPeriod;
+                e.RecordAck(tick, now + constant, BaseHz);
+            }
+
+            Assert.That(e.Superseded, Is.GreaterThan(0),
+                "precondition: acknowledgements must actually be covering more than one input, "
+                + "or this case is not exercising the loop it is about");
+
+            Assert.That(e.SweptEnough, Is.False,
+                "the wait term is identical on every observation here — the cadences are locked "
+                + "at 4:1 — so nothing about this link is evidence that the minimum is near the "
+                + "constant. It read swept only because the superseded inputs' send times "
+                + "stretched the span by three send periods.");
+
+            Assert.That(e.HasEstimate, Is.False,
+                "and with no sweep there must be no floor, because a floor here reads high by a "
+                + "fixed wait and an over-lead is the original defect from the other side.");
+        }
+
+        /// <summary>
+        /// A constant smaller than one base tick must survive into the contribution, because
+        /// truncating it to a whole tick is how this term stayed open.
+        /// </summary>
+        /// <remarks>
+        /// The lead was fed <c>Math.Floor(FloorTicks)</c>, which is zero for every localhost
+        /// link ever measured here — 0.14 and 0.68 base ticks were the two live readings. So the
+        /// estimator contributed nothing in exactly the regime it exists for. And the deficit is
+        /// not proportionally small: the tick label is an integer, so a lead 0.68 ticks short
+        /// carries the wrong tick number for most of every tick and the reconcile returns a
+        /// whole step for it.
+        /// </remarks>
+        [Test]
+        public void AFractionOfABaseTickSurvivesInsteadOfTruncatingToNothing()
+        {
+            // 0.3 of a base tick: far below anything Math.Floor can carry.
+            var e = Drive(0.3 / BaseHz, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
+
+            Assert.That(e.HasEstimate, Is.True, "precondition: the sweep must have been verified");
+            Assert.That(Math.Floor(e.FloorTicks), Is.EqualTo(0.0),
+                "precondition: this is the regime truncation discards entirely");
+
+            Assert.That(e.ConservativeFloorTicks, Is.GreaterThan(0f),
+                "a sub-tick constant is still a whole step of correction, because the tick "
+                + "label it shifts is an integer. Truncation made the estimator a no-op on "
+                + "every fast link, which is every link it was measured on.");
+
+            Assert.That(e.ConservativeFloorTicks, Is.LessThanOrEqualTo(e.FloorTicks),
+                "the contribution is the floor biased LOW and may never exceed it");
+        }
+
+        /// <summary>
+        /// The contribution is the floor less the part of the wait's range never sampled, so it
+        /// is bounded by the evidence rather than by a rounding rule.
+        /// </summary>
+        [TestCase(0.0)]
+        [TestCase(0.0083)]     // half a base tick
+        [TestCase(0.0167)]     // one base tick
+        [TestCase(0.0333)]     // two base ticks
+        public void TheContributionIsTheFloorLessItsOwnUncertainty(double uplinkPlusAge)
+        {
+            var e = Drive(uplinkPlusAge, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
+
+            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.ConservativeFloorTicks, Is.LessThanOrEqualTo(e.FloorTicks),
+                "biased low, never high: an over-lead is the defect this exists to remove, "
+                + "arriving from the other side.");
+
+            double expected = Math.Max(0.0, (e.FloorSeconds - e.UnsweptSeconds) * BaseHz);
+            Assert.That(e.ConservativeFloorTicks, Is.EqualTo((float)expected).Within(1e-4),
+                "the bias is the measured unswept remainder and nothing else — no tuned "
+                + "fraction, no rounding rule, so it shrinks to zero as the sweep completes.");
+
+            Assert.That(e.ConservativeFloorTicks,
+                Is.LessThanOrEqualTo((float)(uplinkPlusAge * BaseHz) + 0.5f),
+                "and it must not exceed the true constant by more than the residual "
+                + "uncertainty, or it is over-leading on evidence it does not have.");
+        }
     }
 }

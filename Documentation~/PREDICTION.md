@@ -190,24 +190,77 @@ argument the staleness estimator already makes. Call `WorldViewBinder.NoteInputS
 beside `LocalMovePredictor.RecordInput`, or the estimator only has one end of the interval and
 offers nothing.
 
-Three properties make it safe to steer a clock on, and they are worth keeping if this is ever
-reworked:
+### The lead arithmetic, in full
 
-- **No provisional reading.** This term *adds* lead, and an over-lead is the original defect
-  from the other side. Staleness can offer a provisional figure because it can be clamped
-  downward onto one already in use; there is no equivalent safe direction here.
+```
+lead = age                                  Staleness: fitted line, provisional, or gap
+     + (HasEstimate ? ConservativeFloorTicks : rttTicks * 0.5)
+ceiling = SnapshotTickGap * 2 + rttTicks + ceil(ConservativeFloorTicks)
+TargetLeadTicks = min(round(lead), ceiling)
+```
+
+Three things about that are load-bearing and were each got wrong once.
+
+**The floor displaces the round trip, it is not added to it.** They measure the same pipeline
+by different means, so adding them counts it twice. The floor wins because it times the real
+path end to end — the input drain, the server's staged snapshot write, the wire, the wait for a
+client frame — while the heartbeat round trip sees none of the staging and half of it is not the
+quantity anyway. A consumer that supplies `RoundTripMs` and never calls `NoteInputSent` keeps
+exactly the behaviour it had before the estimator existed.
+
+**`rttTicks` is computed whether or not there is a floor.** It used to live on the `else`
+branch, so a floor appearing removed the round trip from the *ceiling* too. A clamp that
+tightens because a measurement arrived is a second, accidental steer — and, with the
+truncation below, it is the whole explanation for the clock error moving from −1 to −2/−4 the
+first time this estimator was wired in. Nothing was steering on the floor; the round trip had
+simply stopped steering.
+
+**The contribution is fractional, biased low by its own measurement uncertainty.** The bias is
+not optional: an over-lead pushes the client past the server, which is the original defect
+arriving from the other side. But the first attempt produced it with `Math.Floor` on whole base
+ticks, and that is a guard which fires as a total loss — the two live readings were 0.14 and
+0.68 base ticks and both truncated to zero, so the estimator contributed nothing in exactly the
+regime it exists for. A sub-tick deficit is not a sub-tick problem either: the tick *label* is
+an integer, so a lead 0.68 ticks short carries the wrong tick number for most of every tick and
+the reconcile returns a whole step for it. `ConservativeFloorTicks` keeps the bias in the units
+that are genuinely uncertain — `FloorSeconds - UnsweptSeconds`, where `UnsweptSeconds` is the
+measured part of the wait's range never sampled — so it shrinks to nothing as the sweep
+completes rather than whenever the link is fast.
+
+### What makes a floor safe to steer on
+
+- **No provisional reading.** This term *adds* lead. Staleness can offer a provisional figure
+  because it can be clamped downward onto one already in use; there is no equivalent safe
+  direction here, so nothing is offered until `MinimumSamples` observations have been folded in.
 - **The sweep is verified, not assumed.** A client sending at the world rate sends at exactly
-  the snapshot rate. If the two stay in phase, every observation carries the same fixed wait
-  and the minimum reads high by up to a whole interval. A floor is offered only once the
-  observations span `MinimumSweepFraction` of a snapshot interval, that interval measured as
-  the smallest gap between acknowledgements.
-- **The contribution is truncated, not rounded.** A slow sweep leaves the reading high;
-  truncating means that costs accuracy, never correctness, and the estimator's worst case is
-  contributing nothing.
+  the snapshot rate. If the two stay in phase, every observation carries the same fixed wait and
+  the minimum reads high by up to a whole interval. A floor is offered only once the
+  observations span `MinimumSweepFraction` of a snapshot interval, that interval measured as the
+  smallest gap between acknowledgements.
+- **Only the newest input an acknowledgement retires is timed.** An older input waited for an
+  acknowledgement a *later* one had already earned. Folding those in cannot lower the floor — a
+  minimum is monotone — but it stretches the observed span by however far the send cadence runs
+  ahead of the acknowledgement cadence, and the span is the entire evidence the sweep check
+  rests on. A client sending four inputs per snapshot in phase read "swept" on that alone.
+  Superseded observations are drained and counted as `Superseded`.
+- **Out-of-band observations are refused, not clamped.** Past `MaximumFloorSeconds` an
+  observation is a stall, a reconnect or a suspended process, none of which describe a steady
+  pipeline. A clamped bad observation is still wrong and now looks plausible.
 
-When both a floor and `RoundTripMs` are available the floor wins: it times the real path end
-to end, while the heartbeat round trip sees neither the input drain nor the server's staged
-snapshot write, and half of it is not the quantity anyway.
+### Reading the two ACK FLOOR lines
+
+`PredictionLatencyMeasurement` prints both, and they are **not** the same statistic:
+
+| Line | What it is |
+|---|---|
+| `ACK FLOOR (harness)` | the smallest input→ack seen across the ~20 *sample* inputs, one per sample iteration. An upper bound on `uplink + age`. |
+| `ACK FLOOR (estimator)` | the estimator's minimum over every observation, sample and settle inputs alike — several times as many, at a different phase against the snapshot cadence. |
+
+So the estimator's line is expected to sit **at or below** the harness's, and on a healthy
+localhost run both should be a fraction of a base tick with the estimator's the smaller of the
+two. A minimum over more, better-swept observations is legitimately lower; that is what a
+minimum filter is for. What would be a fault is the estimator reading *above* the harness — that
+is a phase lock, and `ACK FLOOR (estimator) … NOT OFFERED` is what should happen instead.
 
 ### Reading a correction figure
 

@@ -251,6 +251,68 @@ namespace Cuvara.Netcode.Tests.Editor
         /// other side; an under-lead just leaves residual. Truncating makes an inflated reading
         /// cost accuracy and never correctness.
         /// </remarks>
+        /// <summary>
+        /// The runaway ceiling must not shrink merely because an acknowledgement floor appeared.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The round-trip term used to be computed only on the branch the floor did not take,
+        /// so <c>rttTicks</c> was still zero when the ceiling was built from it. The arrival of
+        /// a measurement therefore tightened a clamp that exists to bound a runaway — for a
+        /// reason that has nothing to do with runaways — and did so silently, on a change whose
+        /// whole safety argument was that it could not touch the steer.
+        /// </para>
+        /// <para>
+        /// This is the second half of the coupling that moved the live clock error when the
+        /// estimator was first wired in. It is checked here because a ceiling is invisible
+        /// until something hits it, and nothing in an ordinary run does.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheCeilingKeepsTheRoundTripWhenAFloorAppears()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+
+            double until = now + SnapshotStalenessEstimator.MinimumBaselineSeconds
+                               + SnapshotStalenessEstimator.EpochSeconds * 2;
+            while (now < until)
+            {
+                binder.TickRate.Sample(tick, now);
+                binder.Staleness.Sample(tick, now, BaseHz);
+                tick += SnapshotEvery;
+                now += Interval;
+            }
+
+            Assert.That(binder.Staleness.IsUsable, Is.True, "precondition: a line must be fitted");
+
+            // 100 ms round trip at 60 Hz is 6 ticks.
+            binder.RoundTripMs = 100;
+
+            // A floor from a fast route: measured, offered, and contributing ~nothing itself.
+            // Exactly the shape that made the deletion invisible.
+            FeedAckFloor(binder, constantSeconds: 0.0, seconds: 40.0);
+            Assert.That(binder.AckLatency.HasEstimate, Is.True, "precondition: a floor is offered");
+
+            // One snapshot held long past anything the route produces, so the ceiling is what
+            // is returned and can be read.
+            binder.TickRate.Sample(tick, now + 60.0 / BaseHz);
+            binder.Staleness.Sample(tick, now + 60.0 / BaseHz, BaseHz);
+
+            int gap = binder.TickRate.SnapshotTickGap;
+            int rttTicks = (int)Math.Round(binder.RoundTripMs * binder.TickRate.EstimatedHz / 1000.0);
+            Assert.That(rttTicks, Is.GreaterThan(0),
+                "precondition: the round trip must be worth whole ticks, or there is nothing " +
+                "for the ceiling to lose");
+
+            Assert.That(binder.TargetLeadTicks(),
+                Is.EqualTo(gap * 2 + rttTicks + (int)Math.Ceiling(binder.AckLatency.ConservativeFloorTicks)),
+                "the ceiling is two snapshot intervals plus the round trip plus the measured " +
+                "floor. Computing the round trip only when there is no floor made a floor " +
+                "lower the clamp by the whole round trip here, which is a steer, not a bound.");
+        }
+
         [Test]
         public void AnInflatedFloorCannotOverLead()
         {

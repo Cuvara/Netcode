@@ -442,52 +442,98 @@ namespace Cuvara.Netcode.View
             // which no arrival-time measurement can recover at all. Their sum is the whole of
             // uplink + age and neither counts anything twice.
             //
-            // The measured floor WINS over the round trip when both exist, and that is not a
-            // preference. AckLatency times the real path end to end — the input drain, the
-            // server's staged snapshot write, the wire, the wait for a client frame — which is
-            // the quantity the reconcile needs. RoundTripMs is a heartbeat ping through the
-            // socket: it sees none of the staging, and half of it is not the quantity either.
-            // Measured on localhost the round trip is ~1 ms where the real constant is ~17.
+            // THE ROUND TRIP IS COMPUTED WHETHER OR NOT THERE IS A FLOOR, AND THAT IS A FIX.
             //
-            // The round trip stays honoured for a consumer that supplies one and never calls
-            // NoteInputSent, which is exactly the behaviour before this estimator existed.
+            // It used to sit in an `else if` behind AckLatency.HasEstimate, which made HAVING
+            // a floor and USING a floor the same condition. They are not the same condition,
+            // because the floor was truncated to whole base ticks: on a localhost link, where
+            // uplink + age is a fraction of a tick, it contributed exactly ZERO while still
+            // taking the branch. Turning the estimator on therefore did nothing at all except
+            // DELETE the half-round-trip term from the lead and its whole-tick term from the
+            // ceiling below.
+            //
+            // That is the coupling behind the second open question on this work — the measured
+            // clock error moving from -1 to -2/-4 when the estimator was wired in, from a
+            // change that argued it was safe by construction. It was not the floor steering
+            // anything. It was the round trip no longer steering anything. An estimator whose
+            // safety argument is "the worst case is that it contributes nothing" must not be
+            // able to make the lead SMALLER than it was without it, and behind an `else` it
+            // could, by exactly rttTicks * 0.5.
+            //
+            // So both terms are computed and the LARGER is used. AckLatency times the real
+            // path end to end -- the input drain, the server's staged snapshot write, the
+            // wire, the wait for a client frame -- which is the quantity the reconcile needs,
+            // and it is the better number wherever it is the bigger one. RoundTripMs is a
+            // heartbeat ping through the socket: it sees none of the staging, and half of it
+            // is not the quantity either. Taking the maximum keeps the floor's contribution
+            // where it is real, and keeps the fallback bit-for-bit as it was for a consumer
+            // that supplies a round trip and never calls NoteInputSent.
             int rttTicks = 0;
-            if (AckLatency.HasEstimate)
-            {
-                // TRUNCATED, NOT ROUNDED, AND THAT IS THE SAFETY PROPERTY.
-                //
-                // The floor is a minimum over observations of constant + wait, so it is only
-                // near the constant once the wait has swept through its range. SweptEnough
-                // checks that the wait varied, which is necessary and not sufficient: a sweep
-                // that is real but slow still leaves the minimum above the constant, and
-                // modelled over a ten-second window the reading came in up to 0.8 ticks high.
-                //
-                // An over-lead is the ORIGINAL DEFECT arriving from the other side — the
-                // client steered past the server, the reconcile returning the difference as
-                // position at every start and stop. An under-lead merely leaves some of the
-                // residual in place, which is where this started. The two are not symmetric,
-                // so the rounding must not be either: truncating means an inflated reading
-                // costs accuracy and can never cost correctness, and the worst case of this
-                // whole estimator is that it contributes nothing.
-                lead += (float)Math.Floor(AckLatency.FloorTicks);
-            }
-            else if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
+            float rttLead = 0f;
+            if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
             {
                 rttTicks = (int)Math.Round(RoundTripMs * TickRate.EstimatedHz / 1000.0);
-                lead += rttTicks * 0.5f;
+                rttLead = rttTicks * 0.5f;
             }
 
+            // FRACTIONAL, AND BIASED LOW BY ITS OWN UNCERTAINTY RATHER THAN BY TRUNCATION.
+            //
+            // The bias is not optional -- an over-lead steers the client past the server, the
+            // original defect arriving from the other side -- but truncating the floor to
+            // whole base ticks is a guard that fires as a total loss. Live it read 0.14 and
+            // 0.68 base ticks and Math.Floor returned zero both times. Combined with the
+            // displacement below, that is the whole story of why wiring this in changed
+            // nothing except to make the clock error worse: the floor contributed zero while
+            // still taking the branch that removed the round trip.
+            //
+            // And a sub-tick deficit is not a sub-tick problem. The tick LABEL is an integer:
+            // a client leading 0.68 ticks short carries the wrong tick number for 68% of every
+            // tick, and the reconcile returns a WHOLE step of correction for it. That is the
+            // second step of the live 2.00 against a floor of 1.00 -- so truncation did not
+            // merely cost accuracy here, it was the reason the term stayed open.
+            //
+            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it in the
+            // units that are actually uncertain: the part of the wait's range never swept,
+            // measured rather than assumed. The reading still cannot exceed the evidence held,
+            // and it now goes to zero only when nothing swept, instead of whenever the link is
+            // fast enough that the constant is under one base tick.
+            float ackLead = AckLatency.HasEstimate ? AckLatency.ConservativeFloorTicks : 0f;
+
+            // THE FLOOR DISPLACES THE ROUND TRIP RATHER THAN ADDING TO IT, BECAUSE THEY
+            // MEASURE THE SAME THING. Adding them counts the pipeline twice. The floor wins
+            // because it times the real path end to end -- the input drain, the server's
+            // staged snapshot write, the wire, the wait for a client frame -- while
+            // RoundTripMs is a heartbeat through the socket that sees none of the staging, and
+            // half of it is not the quantity anyway.
+            //
+            // BUT THE DISPLACEMENT IS THE ONE PATH BY WHICH THIS ESTIMATOR CAN TOUCH THE
+            // STEER, and it is worth naming because it went unnoticed once. A floor that
+            // appears removes rttLead from the lead, so a small floor against a large round
+            // trip makes the lead SMALLER -- which is the coupling behind the clock error
+            // moving from -1 to -2/-4 when this was first wired in, from a change that argued
+            // it was safe by construction. It was never the floor steering anything; it was
+            // the round trip no longer steering anything, while a truncated floor put nothing
+            // back. With the truncation gone the displacement is a measurement decision rather
+            // than a silent deletion, which is what makes it defensible; it is still a real
+            // coupling and a live run that moves the clock error should look here first.
+            lead += AckLatency.HasEstimate ? ackLead : rttLead;
             int ticks = (int)Math.Round(lead);
             if (ticks < 0) ticks = 0;
 
             // The ceiling bounds a RUNAWAY, not a measurement. The acknowledgement floor is a
             // measured constant with its own refusal band, and on a slow link it legitimately
-            // exceeds two snapshot intervals — clamping it there would reintroduce the
+            // exceeds two snapshot intervals -- clamping it there would reintroduce the
             // under-lead this estimator exists to remove, on exactly the connections that
             // suffer most from it. So it raises the ceiling with it rather than being cut by
             // it, while the derived terms stay bounded as before.
-            int ceiling = gap * 2 + rttTicks
-                          + (AckLatency.HasEstimate ? (int)Math.Floor(AckLatency.FloorTicks) : 0);
+            //
+            // rttTicks is in the ceiling UNCONDITIONALLY, and that is a fix. It used to be
+            // computed only on the branch the floor did not take, so the arrival of a floor
+            // silently lowered the ceiling by rttTicks as well as lowering the lead -- a
+            // clamp tightening for a reason that has nothing to do with a runaway. A ceiling
+            // that shrinks the moment a measurement appears is not a bound, it is a second,
+            // accidental steer.
+            int ceiling = gap * 2 + rttTicks + (int)Math.Ceiling(ackLead);
             return ticks > ceiling ? ceiling : ticks;
         }
 

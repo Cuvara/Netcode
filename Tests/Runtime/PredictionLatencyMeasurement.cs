@@ -377,8 +377,19 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Round trip the session reported, milliseconds.</summary>
             public long RoundTripMs;
 
-            /// <summary>The measured pipeline constant the lead now uses, in base ticks.</summary>
+            /// <summary>The measured pipeline constant, in base ticks.</summary>
             public float AckFloorMeasuredTicks;
+
+            /// <summary>
+            /// What the lead actually received from it: the floor less its own unswept
+            /// uncertainty. Printed beside the raw floor because the gap between them is the
+            /// measurement's own error bar, and reading only one of the two is how the
+            /// truncated version looked healthy while contributing nothing.
+            /// </summary>
+            public float AckFloorContributionTicks;
+
+            /// <summary>Inputs an acknowledgement drained without timing. See AckLatencyEstimator.</summary>
+            public int AckFloorSuperseded;
 
             /// <summary>Whether that floor was offered at all, and why not when it was not.</summary>
             public bool AckFloorOffered;
@@ -893,24 +904,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// line below is still reported here, so the next attempt starts from real numbers.
         /// </para>
         /// <para>
-        /// <b>Un-ignoring is a one-line change.</b> Every assertion is left in place and none
-        /// has been loosened; only this attribute stands between the suite and the result.
+        /// <b>No longer ignored, and no assertion was loosened to get there.</b> It was
+        /// <c>[Ignore]</c>d on one named open term — the steering target not covering
+        /// <c>uplink + snapshot age</c>, which cost a residual of 2.00 steps against a floor of
+        /// 1.00. <see cref="Prediction.AckLatencyEstimator"/> measures that term and
+        /// <c>WorldViewBinder.TargetLeadTicks</c> now carries it, so the attribute is gone with
+        /// the 1.5-step budget and the two-correction budget standing exactly where they were.
+        /// If the residual comes back, it belongs in this attribute again with the term named —
+        /// never in a wider bound.
+        /// </para>
+        /// <para>
         /// Run it by hand against a live stack whenever the lead arithmetic is touched — it is
         /// the only thing in the repository that measures prediction against a real server,
         /// and each of the three defects it has found was invisible to the EditMode suite.
         /// </para>
         /// </remarks>
         [UnityTest]
-        [Ignore("Open term: the steering target does not cover uplink + snapshot age (~1 base " +
-                "tick on localhost), so the residual correction is 2.00 steps against a floor " +
-                "of 1.00 and the 1.5-step budget fails. The budget is right and must NOT be " +
-                "widened — a bound that accepted 2.00 would accept the defect it measures. " +
-                "Everything else reads clean (rates agree at 60 Hz, clock error 0 to -1, lead " +
-                "from a fitted line, 139 of 140 reconciles closing through the history path), " +
-                "because a lower-envelope fit absorbs the missing constant by construction — " +
-                "which is why this has twice been misdiagnosed as a tick-rate mismatch. " +
-                "Follow-up: AckLatencyEstimator on branch feat/ack-latency-estimator. Every " +
-                "assertion is left standing; remove this attribute to re-enable.")]
         public IEnumerator InputToVisibleMovement_WithAndWithoutPrediction() => UniTask.ToCoroutine(async () =>
         {
             // Skip, loudly, when there is nothing to measure against.
@@ -1827,6 +1836,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.SkewPpm = binder.Staleness.SkewPpm;
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
+            run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
+            run.AckFloorSuperseded = binder.AckLatency.Superseded;
             run.AckFloorOffered = binder.AckLatency.HasEstimate;
             run.AckFloorSwept = binder.AckLatency.SweptEnough;
             run.AckFloorRefused = binder.AckLatency.Refused;
@@ -1992,8 +2003,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
                             : "   <<< NOT OFFERED: the wait never swept, so the\n" +
                               "                             minimum is not evidence about the floor. The lead keeps\n" +
                               "                             the round-trip fallback.") + "\n" +
+                $"  ack floor in the lead    {run.AckFloorContributionTicks:F2} base ticks   " +
+                    "(the floor less its unswept uncertainty — what the\n" +
+                "                             lead actually received. Fractional on purpose: truncating\n" +
+                "                             this to whole ticks is what left the term open.)\n" +
                 $"  ack floor refused        {run.AckFloorRefused}   " +
                     "(observations too long to be a floor — stalls, not routes)\n" +
+                $"  ack floor superseded     {run.AckFloorSuperseded}   " +
+                    "(inputs an ack drained without timing — a later input had\n" +
+                "                             already earned that ack, so the interval is not this pipeline)\n" +
                 $"  clock rate difference    {run.SkewPpm:F0} ppm" +
                     (Math.Abs(run.SkewPpm) > 10_000
                         ? "   <<< the two clocks run at materially different rates\n" +

@@ -134,6 +134,19 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Acknowledged observations folded in since construction or <see cref="Reset"/>.</summary>
         public int Samples { get; private set; }
 
+        /// <summary>
+        /// Inputs drained by an acknowledgement that also covered a newer one, and therefore
+        /// NOT folded into the statistics. See <see cref="RecordAck"/>.
+        /// </summary>
+        /// <remarks>
+        /// These are real inputs and their acknowledgement is real; what is not real is the
+        /// <i>interval</i>, because such an input waited for an acknowledgement that a later
+        /// input had already earned. Counted rather than silently dropped: a large share of
+        /// them means the send cadence is running well ahead of the acknowledgement cadence,
+        /// which is worth seeing.
+        /// </remarks>
+        public int Superseded { get; private set; }
+
         /// <summary>Observations refused as implausible for a floor. See <see cref="MaximumFloorSeconds"/>.</summary>
         public int Refused { get; private set; }
 
@@ -170,6 +183,43 @@ namespace Cuvara.Netcode.Prediction
         public double AckIntervalSeconds =>
             _ackIntervalMin == double.MaxValue ? 0.0 : _ackIntervalMin;
 
+        /// <summary>
+        /// Span between the largest and smallest observation held, in seconds — how much of
+        /// the wait term's range has actually been seen.
+        /// </summary>
+        public double ObservedSpanSeconds
+        {
+            get
+            {
+                double lo = Math.Min(_epochMin, _previousEpochMin);
+                double hi = Math.Max(_epochMax, _previousEpochMax);
+                if (lo == double.MaxValue || hi == double.MinValue) return 0.0;
+                return hi - lo;
+            }
+        }
+
+        /// <summary>
+        /// The part of the wait term's range never sampled, in seconds — and therefore the
+        /// most the floor can be reading high by.
+        /// </summary>
+        /// <remarks>
+        /// The wait ranges over one snapshot interval. The observations have covered
+        /// <see cref="ObservedSpanSeconds"/> of it, so the unsampled remainder is the interval
+        /// less the span, and the true constant lies somewhere in
+        /// <c>[FloorSeconds - this, FloorSeconds]</c>. Never negative: a span wider than the
+        /// interval means the range is fully covered, not that the floor is under-read.
+        /// </remarks>
+        public double UnsweptSeconds
+        {
+            get
+            {
+                double interval = AckIntervalSeconds;
+                if (interval <= 0.0) return 0.0;
+                double slack = interval - ObservedSpanSeconds;
+                return slack > 0.0 ? slack : 0.0;
+            }
+        }
+
         /// <summary>The measured floor in seconds, or 0 before <see cref="HasEstimate"/>.</summary>
         public double FloorSeconds
         {
@@ -188,6 +238,37 @@ namespace Cuvara.Netcode.Prediction
         /// <c>uplink + age</c> and neither counts anything twice.
         /// </remarks>
         public float FloorTicks { get; private set; }
+
+        /// <summary>
+        /// The floor with its own measurement uncertainty subtracted, in base ticks, or 0
+        /// before <see cref="HasEstimate"/>. <b>This is the term to add to the lead.</b>
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why not the floor itself, and why not the floor truncated to whole ticks.</b>
+        /// An over-lead steers the client past the server and is the original defect arriving
+        /// from the other side; an under-lead merely leaves residual in place. The asymmetry
+        /// is real and the reading must be biased low — but the first attempt did that by
+        /// truncating to whole base ticks, and that is a guard which fires as a total loss.
+        /// On any link whose <c>uplink + age</c> is under one base tick — every localhost run
+        /// measured so far, at 0.14 and 0.68 ticks — <c>Math.Floor</c> returns zero and the
+        /// estimator contributes nothing at all, in exactly the regime it exists for. And a
+        /// sub-tick deficit is not a sub-tick problem: the tick LABEL is an integer, so a
+        /// client leading by 0.68 ticks too little carries the wrong tick number for 68% of
+        /// every tick and the reconcile returns a whole step of correction for it. That is the
+        /// second step of the live residual, and truncation is what left it there.
+        /// </para>
+        /// <para>
+        /// So the bias is kept and moved into the right units: units of what is actually
+        /// uncertain. The floor is a minimum over <c>constant + wait</c>, so it reads high by
+        /// however much of the wait's range was never sampled — which is
+        /// <see cref="UnsweptSeconds"/>, and is measured rather than assumed. Subtracting it
+        /// gives the low end of the bracket the observations actually support: still biased
+        /// low, still incapable of over-leading on the evidence held, and it goes to zero only
+        /// when nothing was swept rather than whenever the link is fast.
+        /// </para>
+        /// </remarks>
+        public float ConservativeFloorTicks { get; private set; }
 
         /// <summary>
         /// Remembers that an input was sent, so its acknowledgement can be timed.
@@ -258,35 +339,70 @@ namespace Cuvara.Netcode.Prediction
                 _lastAckAt = nowSeconds;
             }
 
-            // Retire every input this acknowledgement covers. Only the newest of them saw a
-            // short wait for the snapshot, but a minimum filter is unharmed by the inflated
-            // ones and retiring all of them is what keeps the ring from filling.
+            // Retire every input this acknowledgement covers, but time only the NEWEST of
+            // them.
+            //
+            // An older input's interval is not a measurement of this pipeline: it waited for
+            // an acknowledgement that a LATER input had already earned, so it carries the
+            // constant plus the whole of its own extra wait. Folding those in cannot lower the
+            // floor -- a minimum is monotone, and larger values never move it down -- so this
+            // is not what makes the floor read low. What it does corrupt is the SPAN, and the
+            // span is the evidence SweptEnough rests on: superseded observations stretch the
+            // maximum by however far the send cadence runs ahead of the acknowledgement
+            // cadence, so the sweep looks satisfied on evidence that is not about the wait at
+            // all. A guard that gates the whole reading must not be fed values from outside
+            // the quantity it is guarding.
+            double newestSentAt = 0.0;
+            bool haveNewest = false;
+
             while (_count > 0 && _pendingTick[_head] <= ackTick)
             {
-                double latency = nowSeconds - _pendingSentAt[_head];
+                if (haveNewest)
+                {
+                    // The one held so far is superseded by this newer one.
+                    Superseded++;
+                }
+
+                newestSentAt = _pendingSentAt[_head];
+                haveNewest = true;
+
                 _head = (_head + 1) % PendingCapacity;
                 _count--;
-
-                if (latency <= 0.0)
-                {
-                    // The acknowledgement cannot precede the send. A non-positive reading is
-                    // a clock that moved, not a fast route.
-                    Refused++;
-                    continue;
-                }
-
-                if (latency > MaximumFloorSeconds)
-                {
-                    Refused++;
-                    continue;
-                }
-
-                Samples++;
-                if (latency < _epochMin) _epochMin = latency;
-                if (latency > _epochMax) _epochMax = latency;
             }
 
-            FloorTicks = HasEstimate ? (float)(FloorSeconds * baseHz) : 0f;
+            if (haveNewest)
+            {
+                double latency = nowSeconds - newestSentAt;
+
+                if (latency <= 0.0 || latency > MaximumFloorSeconds)
+                {
+                    // The acknowledgement cannot precede the send: a non-positive reading is a
+                    // clock that moved, not a fast route. And a floor is not a latency spike --
+                    // a second of acknowledgement delay is a stall, a reconnect or a suspended
+                    // process. Refused and counted, never clamped: a clamped bad observation is
+                    // still wrong and now looks plausible.
+                    Refused++;
+                }
+                else
+                {
+                    Samples++;
+                    if (latency < _epochMin) _epochMin = latency;
+                    if (latency > _epochMax) _epochMax = latency;
+                }
+            }
+
+            if (HasEstimate)
+            {
+                FloorTicks = (float)(FloorSeconds * baseHz);
+
+                double conservative = (FloorSeconds - UnsweptSeconds) * baseHz;
+                ConservativeFloorTicks = conservative > 0.0 ? (float)conservative : 0f;
+            }
+            else
+            {
+                FloorTicks = 0f;
+                ConservativeFloorTicks = 0f;
+            }
         }
 
         /// <summary>
@@ -308,7 +424,9 @@ namespace Cuvara.Netcode.Prediction
             _lastAckTick = 0;
             Samples = 0;
             Refused = 0;
+            Superseded = 0;
             FloorTicks = 0f;
+            ConservativeFloorTicks = 0f;
         }
     }
 }
