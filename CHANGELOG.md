@@ -55,6 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > version, the acceptance test is "does it work **on top of the previous version**", not "does it
 > work".
 >
+> **Every guard in this release asks "should I believe this measurement". Not one asked "and what
+> happens when I don't".** That gap has three separate defects in it, and it was only visible from
+> the third:
+>
+> - the acknowledgement floor **truncated to whole base ticks** contributed *zero* while still
+>   taking its branch, so turning the estimator on deleted the round-trip term and put nothing
+>   back;
+> - the round-trip fallback itself is `round(RoundTripMs * Hz / 1000)`, which is **`round(0.24)` =
+>   0** on loopback — it does not degrade gracefully, it vanishes;
+> - and the provisional age, once it saturated `Math.Min(.., gap)`, delivered **`gap`** — the
+>   warm-up fallback — on every call.
+>
+> Three different mechanisms, one hole: the fallback path was never measured, never guarded and
+> never printed, because attention was on whether to trust the estimate. **A fallback is not
+> automatically the safe option; it is another claim about the same quantity and needs the same
+> scrutiny as the estimate it replaces.**
+>
 > **The sharpest instance, because it is a fallback rather than a reading.** The fitted rate is
 > refused *because its slope is untrusted* — and the fallback asserts **slope = zero**, which is
 > the same untrusted quantity set to a different value, and the one that grows without bound. A
