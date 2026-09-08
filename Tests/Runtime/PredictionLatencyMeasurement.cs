@@ -466,6 +466,34 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public bool RateCorroborated;
 
+            /// <summary>
+            /// Whether the AGE was measured against the fitted line or the unit-rate floor.
+            /// </summary>
+            /// <remarks>
+            /// <b>Not the same as <see cref="StalenessFitted"/>, and printing only that one made
+            /// a run unreadable.</b> `SNAPSHOT AGE ... (fitted)` was driven by `IsUsable`, which
+            /// means "a line exists", while the age had fallen to the provisional path because
+            /// the slope was refused. So the report asserted the opposite of what the code did,
+            /// on the one line an investigation was turning on.
+            /// </remarks>
+            public bool AgeIsFitted;
+
+            /// <summary>Observations the acknowledgement floor was computed from, and their shape.</summary>
+            /// <remarks>
+            /// <b>The harness's own floor is not a reference for these.</b> It times 20 sample
+            /// inputs; the estimator times every send, ~140 of them, at a different phase. When
+            /// the two disagree there is no way to tell which distribution is unusual without
+            /// seeing the estimator's own — so it is printed rather than inferred. Choosing a
+            /// statistic from the harness's twenty samples is what produced two wrong choices.
+            /// </remarks>
+            public int AckObservations;
+
+            /// <inheritdoc cref="AckObservations"/>
+            public float AckObservationP10;
+
+            /// <inheritdoc cref="AckObservations"/>
+            public float AckObservationMedian;
+
             /// <summary>Fits that failed to reproduce over a doubled baseline.</summary>
             /// <inheritdoc cref="RateCorroborated"/>
             public int FitsUncorroborated;
@@ -1980,6 +2008,10 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // predictor, so the two columns are comparable and a difference between them is
             // itself a finding.
             run.StalenessFitted = binder.Staleness.IsUsable;
+            run.AgeIsFitted = binder.Staleness.AgeIsFitted;
+            run.AckObservations = binder.AckLatency.Samples;
+            run.AckObservationP10 = binder.AckLatency.ObservationQuantileTicks(0.10);
+            run.AckObservationMedian = binder.AckLatency.ObservationQuantileTicks(0.50);
             run.StalenessTicks = binder.Staleness.StalenessTicks;
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
@@ -2147,9 +2179,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     (run.SnapshotAges.Count >= 4
                         ? $"{run.SnapshotAgeMin:F2} .. {run.SnapshotAgeMax:F2}, " +
                           $"first half {run.SnapshotAgeFirstHalf:F2} -> second half {run.SnapshotAgeSecondHalf:F2}" +
-                          (run.SnapshotAgeSecondHalf > run.SnapshotAgeFirstHalf * 1.5f
-                              ? "\n                             <<< RISING: the client is falling further behind the\n" +
-                                "                             stream as the run goes on, so the age is real and growing"
+                          (run.SnapshotAgeSecondHalf - run.SnapshotAgeFirstHalf >= 1.0f
+                              ? "\n                             <<< RISING by a whole base tick or more across the run"
                               : run.SnapshotAgeMax > run.SnapshotAgeMin * 4f
                                   ? "\n                             <<< a STEP rather than a trend, which is what a fit\n" +
                                     "                             anchored before a displacement looks like"
@@ -2163,6 +2194,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         : "(the lead adds half of this)") + "\n" +
                 $"  ACK FLOOR (harness)      {run.AckFloorTicks:F2} base ticks   " +
                     "(smallest input->ack seen; upper bound on uplink + age)\n" +
+                $"  ack observations         {run.AckObservations} timed, " +
+                    $"p10 {run.AckObservationP10:F2} t, median {run.AckObservationMedian:F2} t   " +
+                    "(the estimator's OWN distribution — the\n" +
+                "                             harness floor below is 20 samples at a different phase and is\n" +
+                "                             not a reference for it)\n" +
                 $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
                     (run.AckFloorOffered
                         ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +

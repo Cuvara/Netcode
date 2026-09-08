@@ -335,6 +335,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget and the budget of 2 corrections above one step included; neither was widened.
 
 
+- **`SNAPSHOT AGE ... (fitted)` was labelled from the wrong flag, and the provisional age carries
+  no rate term.** Two defects in the work this release added, found by a run that could not be
+  read because of the first. The label was driven by `IsUsable` — "a line exists" — while the age
+  had fallen to the provisional path because the slope was refused, so the report asserted the
+  opposite of what the code did on the one line the investigation turned on. `AgeIsFitted` is now
+  printed. And the provisional reading is `(y - x) - floor` at **unit rate**: it has no slope, so a
+  client clock *n*% fast adds *n*% of elapsed time to it every second. Measured: **45.56 base
+  ticks** (759 ms) on a run whose apparent skew was 81 351 ppm over ~10 s — 0.074 × 10 s = 740 ms,
+  which is the reading to within 2%. The same build read **0.09** on a run whose skew was −55 ppm.
+  It is bounded where it steers, by `Math.Min(.., gap)`, so no lead exceeded 4 in any arm; the
+  reported number is not bounded and now says what it is measured against.
+
+- **The age band's trend test was multiplicative and could not see a linear drift.** `second half >
+  first half × 1.5` reported `43.31 -> 45.60` as *"flat: the age is a stable property of the
+  route"*, because the ratio is 1.05 — on a quantity with a large offset, a proportional test is
+  blind to exactly the additive growth it is there to catch. Now `second - first >= 1.0` base tick.
+
+- **The estimator's own observation distribution is printed** — count, p10 and median in base
+  ticks. The harness's floor times ~20 sample inputs while the estimator times every send at a
+  different phase, so when they disagree there is no way to tell which distribution is unusual
+  without seeing the estimator's. Both statistic choices made in this cycle were made by reasoning
+  about the harness's twenty samples, and both were wrong.
+
 ### Known
 
 - **The snapshot interval the sweep requirement scales by is itself a minimum, and reads about

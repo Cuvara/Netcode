@@ -254,6 +254,10 @@ namespace Cuvara.Netcode.Prediction
         // not come from this client's numbering. See AckAheadOfSend.
         private long _maxSentTick;
 
+        // The rate the last acknowledgement was folded in at, so diagnostics can report in
+        // base ticks without the caller having to pass it back.
+        private float _lastBaseHz;
+
         /// <summary>Acknowledged observations folded in since construction or <see cref="Reset"/>.</summary>
         public int Samples { get; private set; }
 
@@ -341,6 +345,23 @@ namespace Cuvara.Netcode.Prediction
                 // cannot. See SweepBuckets.
                 return OccupiedBuckets() >= MinimumOccupiedBuckets;
             }
+        }
+
+        /// <summary>
+        /// A quantile of the observations the floor is computed from, in base ticks — for
+        /// diagnostics, so a consumer can see the distribution rather than infer it.
+        /// </summary>
+        /// <remarks>
+        /// <b>Exposed because two statistics have now been chosen from the wrong evidence.</b>
+        /// The measurement harness times ~20 sample inputs; this estimator times every send,
+        /// several times as many and at a different phase. When the two floors disagree there is
+        /// no way to tell which distribution is unusual without seeing this one, and both wrong
+        /// choices made in this cycle were made by reasoning about the harness's twenty.
+        /// </remarks>
+        public float ObservationQuantileTicks(double q)
+        {
+            if (_obsCount == 0 || _lastBaseHz <= 0f) return 0f;
+            return (float)(Quantile(q) * _lastBaseHz);
         }
 
         /// <summary>
@@ -533,6 +554,8 @@ namespace Cuvara.Netcode.Prediction
             // timed at the wait for one client frame and set a floor an order of magnitude
             // below the route. Discard them; there is no interval here to measure. See
             // AckAheadOfSend for the measurements this cost.
+            _lastBaseHz = baseHz;
+
             if (ackTick > _maxSentTick)
             {
                 AckAheadOfSend += _count;
@@ -677,6 +700,7 @@ namespace Cuvara.Netcode.Prediction
             _lastAckAt = 0;
             _lastAckTick = 0;
             _maxSentTick = 0;
+            _lastBaseHz = 0f;
             _obsHead = 0;
             _obsCount = 0;
             Samples = 0;
