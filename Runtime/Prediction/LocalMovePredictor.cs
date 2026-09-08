@@ -1557,17 +1557,20 @@ namespace Cuvara.Netcode.Prediction
         /// <c>drift / (gain * snapshotHz)</c>. At the default gain of 0.1 and 15 snapshots a
         /// second that is <c>drift / 1.5</c>: a client clock 9% fast against a 60 Hz server
         /// gains 5.4 ticks a second and settles <b>3.6 base ticks</b> ahead, permanently.
-        /// Reproduced across 1.00x to 1.103x and matching the formula to two decimals.
+        /// Reproduced across 1.00x to 1.103x — synthetic ratios, driven directly — and matching
+        /// the formula to two decimals.
         /// </para>
         /// <para>
         /// That standing offset is not a diagnostic. The reconcile's history path compares at
         /// the snapshot's own tick number, so an offset of n ticks makes the two sides label
         /// different moments with the same number and the whole of it comes back as position
         /// — a correction at every start and stop, sized by the offset. Live, a client
-        /// measuring the wire at <b>55.0 Hz against an advertised 60</b> (a ratio of 1.091,
-        /// the Windows-performance-counter-against-Linux case
-        /// <see cref="SnapshotStalenessEstimator.MinimumSkew"/> documents) sat at a clock
-        /// error of <b>3</b> and corrected by 2 to 3 steps at every transition.
+        /// measuring the wire at <b>55.0 Hz against an advertised 60</b> sat at a clock error
+        /// of <b>3</b> and corrected by 2 to 3 steps at every transition. <b>That reading was
+        /// itself an artefact</b> — the same machine idle measured 60.2 Hz and 220 ppm minutes
+        /// later — so read it as what a mis-fed rate costs, not as evidence that such a rate is
+        /// common. See <see cref="SnapshotStalenessEstimator.CorroborationPpm"/>; the rate no
+        /// longer reaches this clock without reproducing over a doubled baseline.
         /// </para>
         /// <para>
         /// <b>Feed-forward, not an integrator.</b> The rate is already measured —

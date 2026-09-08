@@ -23,13 +23,26 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
     /// them a slider.
     /// </para>
     /// <para>
-    /// <b>The dial is real.</b> The default skew, +110,000 ppm, is not an invented stress
-    /// case: it is the measured ratio between the Windows performance counter and the Linux
-    /// monotonic clock on the machine this package was developed on — the value that sat
-    /// just past the original 0.90/1.10 clamp and silently disabled the fit for a whole
-    /// session (0.23.0's headline fix). The refusal region on the slider starts where
-    /// <see cref="SnapshotStalenessEstimator.MaximumSkew"/> puts it, so the boundary that
-    /// was once invisible is a colour change.
+    /// <b>The dial's default is a historical figure, not a measured one, and that
+    /// correction is itself worth seeing here.</b> +110,000 ppm was recorded as the measured
+    /// ratio between the Windows performance counter and the Linux monotonic clock on this
+    /// package's development machine, and it is why the original 0.90/1.10 clamp was widened.
+    /// It has since been falsified: the same machine measures <b>220 ppm</b> — a ratio of
+    /// 1.0002 — when the Editor is idle, and only reads six figures under load, where a
+    /// <i>delay floor that rises between the fit's two anchors</i> is absorbed by the slope.
+    /// The dial keeps the value because the clamp must still admit such a ratio and because
+    /// the refusal boundary is worth being able to see; it is a synthetic stress case now,
+    /// not a machine's fingerprint.
+    /// </para>
+    /// <para>
+    /// <b>Which is what the "Raise delivery floor" button is for.</b> It adds a sustained
+    /// delay to every delivery — not the one-off "Stall a frame", a permanent step, which is
+    /// what a loaded machine or a server hiccup produces. The two clocks stay in perfect
+    /// agreement and the fit reports tens of thousands of ppm anyway, because a line through
+    /// two best-case samples is only a rate if the minimum achievable delay was the same at
+    /// both. Watch <c>corroborated</c> stay NO and both the clock rate and the age refuse to
+    /// follow it: a rate reads the same over any baseline, a floor step fakes
+    /// <c>step / baseline</c> and halves when the baseline doubles.
     /// </para>
     /// <para>
     /// Everything runs on the real classes. The only synthetic parts are the two clocks —
@@ -45,8 +58,9 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
         private const double SnapshotIntervalServerSeconds = SnapshotEvery / (double)BaseHz;
 
         /// <summary>
-        /// The measured ratio between this package's development machine and its server —
-        /// the case that broke the original clamp. See the class remarks.
+        /// The ratio once believed measured on this package's development machine, and the
+        /// reason the original clamp was widened. Since falsified — see the class remarks —
+        /// and kept as a synthetic stress case at the clamp boundary.
         /// </summary>
         private const float DefaultSkewPpm = 110_000f;
 
@@ -55,8 +69,7 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
         // clientSeconds is what every real component reads: it plays the role of the
         // monotonic clock the estimator samples with. serverSeconds advances slower or
         // faster by the configured skew — positive ppm means the CLIENT's clock runs fast,
-        // which is what the development machine does, so per client second fewer server
-        // seconds elapse.
+        // so per client second fewer server seconds elapse.
         private double _clientSeconds;
         private double _serverSeconds;
         private long _serverTick = 1000;
@@ -69,6 +82,19 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
         private SnapshotStalenessEstimator _staleness;
         private LocalMovePredictor _predictor;
         private long _lastDeliveredTick;
+
+        /// <summary>
+        /// A sustained delay added to every delivery, in seconds. The artefact generator.
+        /// </summary>
+        /// <remarks>
+        /// Distinct from the one-off stall on purpose. A stall is one long frame and the
+        /// envelope fit shrugs it off — that is what a lower envelope is FOR. A floor that
+        /// rises and stays risen is invisible to the same construction, because the fit's two
+        /// anchors then sit at different minimum delays and the line between them tilts. That
+        /// tilt is read as clock rate, and before the corroboration gate it was believed:
+        /// measured live at 90 636 ppm on a machine whose real ratio is 220.
+        /// </remarks>
+        private double _deliveryFloorSeconds;
 
         private float _skewPpm = DefaultSkewPpm;
         private float _jitterMs;
@@ -144,11 +170,14 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
 
             root.Q<Button>("stall").clicked += () => _pendingStallSeconds = 0.25f;
             root.Q<Button>("step-clock").clicked += () => _pendingServerStepSeconds = 5.0;
+            root.Q<Button>("floor-step").clicked += () =>
+                _deliveryFloorSeconds = _deliveryFloorSeconds > 0 ? 0 : 0.30;
             root.Q<Button>("reset").clicked += Reset;
         }
 
         private void Reset()
         {
+            _deliveryFloorSeconds = 0;
             _clientSeconds = 0;
             _serverSeconds = 0;
             _serverTick = 1000;
@@ -207,7 +236,7 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 _nextSnapshotAtServerSeconds += SnapshotIntervalServerSeconds;
 
                 double jitter = _jitterMs > 0f ? _rng.NextDouble() * _jitterMs / 1000.0 : 0.0;
-                _pending.Add((_clientSeconds + jitter, _serverTick));
+                _pending.Add((_clientSeconds + jitter + _deliveryFloorSeconds, _serverTick));
             }
 
             for (var i = _pending.Count - 1; i >= 0; i--)
@@ -241,12 +270,19 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
 
         /// <summary>
         /// The binder's steering target, minus the round-trip term a synthetic stream does
-        /// not have: the measured staleness when the fit is usable, one snapshot interval
-        /// until then.
+        /// not have.
         /// </summary>
+        /// <remarks>
+        /// Gated on <see cref="SnapshotStalenessEstimator.AgeIsFitted"/>, not
+        /// <c>IsUsable</c>, exactly as <c>WorldViewBinder.TargetLeadTicks</c> is. IsUsable
+        /// says a line was fitted; it does not say the line is trustworthy, and the age is
+        /// the height above a line the slope tilts — so an uncorroborated slope steers the
+        /// lead through the residual even after the clock has stopped listening to it. Raise
+        /// the delivery floor and watch the lead NOT move: that is the difference.
+        /// </remarks>
         private int TargetLeadTicks()
         {
-            float lead = _staleness.IsUsable ? _staleness.StalenessTicks : SnapshotEvery;
+            float lead = _staleness.AgeIsFitted ? _staleness.StalenessTicks : SnapshotEvery;
             int ticks = Mathf.RoundToInt(lead);
             return Mathf.Clamp(ticks, 0, SnapshotEvery * 2);
         }
@@ -261,7 +297,10 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 $"measured {_staleness.SkewPpm / 1000.0:+0.0;-0.0} ×10³ ppm | " +
                 $"staleness {_staleness.StalenessTicks:F2} t | " +
                 $"baseline {_staleness.BaselineSeconds:F0} s | " +
-                $"fits {_staleness.Fits} | refused {_staleness.FitsRefused}" +
+                $"fits {_staleness.Fits} | refused {_staleness.FitsRefused} | " +
+                $"corroborated {(_staleness.RateCorroborated ? "YES" : "NO")} | " +
+                $"age from {(_staleness.AgeIsFitted ? "the fit" : "the unit-rate floor")}" +
+                (_deliveryFloorSeconds > 0 ? " | FLOOR +300 ms" : string.Empty) +
                 (_staleness.FitsRefused > 0
                     ? $" (last {_staleness.RefusedSkewPpm / 1000.0:+0.0;-0.0} ×10³ ppm)"
                     : string.Empty);
