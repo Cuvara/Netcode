@@ -113,6 +113,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contaminant from any other cause is undetectable by anything present, so that limitation travels
   with the instrument rather than in someone's memory.
 
+  **First run: row one. The guard fires.** Last input tick before the disconnect 65, first
+  `ack_tick` after it 65, max sent tick when that was observed **1**, elapsed 61 ms, and
+  `AckAheadOfSend` **1**. The condition is real, reachable by an abrupt reconnect with the same
+  device id inside about sixty milliseconds, and the `ackTick > _maxSentTick` discard catches it.
+
+  **That changes what a future zero means, which is the durable half of this result.** Before
+  today `AckAheadOfSend == 0` was ambiguous between "the guard works" and "the guard cannot
+  work" — the same shape as a counter reading zero for two reasons. The guard has now been
+  observed acting, so a zero from here is **evidence of absence from an instrument known to
+  function**. What the run does *not* establish is the rate in normal operation: one deliberately
+  induced occurrence says the mechanism works, not how often a real client meets it.
+
 
 - `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
   rate readout**, a live phase histogram over the same eight divisions
@@ -540,6 +552,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the measured bias removes that, and the corrected statistic then under-reads under contamination,
   which is the direction this package calls tolerable. **Safe on clean data and safe when wrong**,
   with no rate in the argument.
+
+  **And the porosity argument is weaker than it looked, which the induction run settled against
+  it.** That argument modelled contamination *reaching* the estimator and biasing the statistic.
+  The one left-tail cause this package can name does not reach it: `RecordAck` discards the whole
+  pending ring and returns before any observation is folded in, so those intervals never enter the
+  distribution at all. **The porosity argument therefore rests entirely on left-tail causes nobody
+  has identified**, which is a weaker footing than it had when it was first written down. It does
+  not change the proposal — that stopped depending on contamination rates once the harm asymmetry
+  became the primary argument, and the raw percentile's over-lead bias stands on every clean run
+  regardless — but the record should not leave the porosity case looking better supported than it
+  is.
 
   The left-tail rate remains unmeasured and is still worth measuring, for a narrower reason: it
   converts `AckAheadOfSend` from a guard nobody has watched act into a measurement. It has read 0
