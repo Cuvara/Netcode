@@ -7,26 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **The failure mode behind this release: a reading that is silent about the thing it is being
-> trusted for.**
+> **The failure mode behind this release: reasoning about one property and gating on another.**
 >
-> Four separate readings in this investigation were believed, and each was true of something
-> adjacent to what it was being used to prove. `SkewPpm` returns **0** when no line has been
-> fitted, which is byte-identical to what two perfectly matched clocks produce — a
-> prediction-OFF arm reading "0 ppm" was taken for a control. A **1.103** clock ratio was
-> recorded as this machine's measured truth and used to widen `MinimumSkew`/`MaximumSkew`; it
-> was this same delay-floor artefact, and the same machine measures 1.0002 when idle. The live
-> measurement was `[Ignore]`d on one named term, and an ignored test reads as "not applicable"
-> rather than "unverified", so nothing downstream of it was checked for three releases. And
-> *"a physical constant cannot take two values in one run"* was sound about a crystal ratio and
-> was applied to a loaded server tick loop, which is not one.
+> Every defect in this release was found by noticing that a statement believed to be evidence was
+> true of something *adjacent* to what it was being used to prove. None of them were wrong
+> statements, which is why none of them were caught by review.
 >
-> None of these were wrong statements. Each was a **true statement about the wrong object**,
-> holding a place where evidence was assumed to be. The defence is not more counters — it is
-> making a counter distinguish *"nothing happened"* from *"nothing is wrong"*, which is why
-> `fits 0` now prints in as many words that it must not be read as a control, why the wire-rate
-> gap prints as a number instead of "(agrees)", and why the fitted rate must now reproduce
-> before anything acts on it.
+> - `SkewPpm` returns **0** when no line has been fitted, byte-identical to what two perfectly
+>   matched clocks produce. A prediction-OFF arm reading "0 ppm" was taken for a control.
+> - A **1.103** clock ratio was recorded as this machine's measured truth and used to widen
+>   `MinimumSkew`/`MaximumSkew`. It was a delay-floor artefact; the same machine measures 1.0002
+>   idle. The bounds are unchanged — the number that was wrong was the justification.
+> - The live measurement was `[Ignore]`d on one named term, and an ignored test reads as *"not
+>   applicable"* rather than *"unverified"*, so nothing downstream of it was checked for three
+>   releases.
+> - *"A physical constant cannot take two values in one run"* was sound about a crystal ratio and
+>   was applied to a loaded server tick loop, which is not one.
+> - The rate was gated on corroboration and the **age** left on `IsUsable`, justified by an
+>   argument about the *slope*. The age is the height above a line the slope tilts, so the same
+>   displacement moves both, and a refused slope went on steering the lead through the residual.
+> - The server's own metrics were read across a six-sample window that happened to be quiet and
+>   reported as "the server was fine". Sampled finer, it dips to 54.23 Hz and drops 38 ticks.
+>   **A window with no drops is not a run with no drops.**
+>
+> Two rules come out of it, and they are worth more than any single fix here. **Never read a zero
+> as evidence without the counter beside it that says a measurement happened** — hence
+> `staleness fit` printing fits/refused/baseline, the wire-rate gap printing a percentage instead
+> of "(agrees)", and the clock error printing a band rather than a latched sample. And **a gate
+> with no test that reads it is not a gate**: removing one token from the binder's rate gate
+> restored the defect in full while 126 tests stayed green, which is why
+> `WorldViewBinderRateGateTests` now exists.
+>
+> The corresponding design move is to gate on **reproducibility rather than on a diagnosis**. A
+> fitted rate is believed once it survives a doubled baseline — no threshold on magnitude, no
+> claim about the cause. A transient server dip, a delay-floor step and a genuine clock
+> difference are then sorted correctly without anyone having to be right about which is
+> happening.
 
 ### Fixed
 
