@@ -89,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different faults wanting different bands — but a gap of 3% or more is now called out as the
   starved-frame-loop signature it is.
 
+- **`Clock Sync Probe` gains a "Raise delivery floor" button — the defect made pressable.** Every
+  netcode feature ships a scene, and this one belongs in the existing clock scene rather than a
+  new one: same subject, same two synthetic clocks. The button adds a *sustained* 300 ms to every
+  delivery, distinct from the one-off "Stall a frame" — a lower envelope shrugs off a stall, which
+  is what it is for, and is blind to a floor that rises and stays risen. The two clocks remain in
+  perfect agreement and the fit reports tens of thousands of ppm anyway; the readout then shows
+  `corroborated NO`, `age from the unit-rate floor`, and a steering lead that stays put instead of
+  climbing with the baseline. The scene's `TargetLeadTicks` now mirrors the binder's gate on
+  `AgeIsFitted` rather than `IsUsable`, so the sample cannot drift from the code it demonstrates.
+  **The dial's +110,000 ppm default is relabelled**: it was recorded as this machine's measured
+  ratio and used to justify widening the clamp, and it is falsified — 220 ppm idle on the same
+  Windows-Editor/Linux-container pair. It stays as a synthetic stress case at the clamp boundary,
+  in the scene, its README and the sample description, with the correction stated in all three.
+
 - **A refused slope no longer reaches the lead through the snapshot age either.** Gating the
   clock was half a fix. `StalenessTicks` is `y - (offset + skew * x)`, and `skew` is the *same*
   slope `RateCorroborated` refuses — so an uncorroborated fit went on steering the lead through

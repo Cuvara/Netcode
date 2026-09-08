@@ -48,3 +48,36 @@ so a number seen here is directly comparable with one seen there.
 - `UI/ClockSyncProbeView.uxml` / `.uss` — UI Toolkit panel; the meter is the one picture.
 - `UI/ClockSyncProbePanel.asset` — PanelSettings, shared theme.
 - `Scenes/ClockSyncProbe.unity` — a camera and a `UIDocument`; everything else is script.
+
+## Raise delivery floor — the defect v0.34.0 closes
+
+Press it and nothing about the two clocks changes: they stay in whatever agreement the dial
+sets, and at the default they agree exactly. All it does is add a sustained 300 ms to every
+delivery — not the one-off "Stall a frame", a floor that rises and stays risen, which is what a
+loaded machine or a transient server hiccup produces.
+
+The fit reports tens of thousands of ppm anyway. That is not noise and it is not a bug in the
+arithmetic: the envelope is a line through two best-case samples, and it is a *rate* only if the
+minimum achievable delay was the same at both anchors. When the floor rises between them the
+later anchor sits above the true line and the slope absorbs the displacement. Measured live, one
+machine minutes apart read 220 ppm idle and 90 636 ppm under load, and the client obediently ran
+its base-tick clock 8.3% slow.
+
+What the readout now shows is the guard refusing it:
+
+- `corroborated NO` — a rate reads the same over any baseline; a floor step fakes
+  `step / baseline` and halves when the baseline doubles, so it never reproduces.
+- `age from the unit-rate floor` — the age is the height above that same tilted line, so gating
+  only the clock left the slope steering the lead through the residual. It falls back to a
+  reading that carries no slope at all.
+- The steering lead stays put instead of climbing with the baseline.
+
+Press it again to clear the floor and watch corroboration return once two fits agree across a
+doubled baseline.
+
+**On the dial's +110,000 ppm default.** It was recorded as this machine's *measured* ratio and
+used to justify widening the estimator's clamp. It has since been falsified — the same
+Windows-Editor/Linux-container pair measures **220 ppm** idle — and the six-figure readings only
+appear under load, which is this button's mechanism. The default is kept because the clamp must
+still admit such a ratio and the refusal boundary is worth being able to see, but it is a
+synthetic stress case now, not a machine's fingerprint.
