@@ -479,6 +479,37 @@ Named rather than left to be rediscovered.
   restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
   therefore only readable within one session.
 
+- **A limitation with no consequence for the action is not a limitation — and the caveats carried
+  through this work were audited against that rather than the principle merely being stated.**
+
+  The case that produced it: the quantile ladder cannot tell a client running 9% fast from a
+  server running 9% slow, and that was carried for most of a day as a standing limitation. It is
+  not one. Both causes produce an error of `advertised/measured − 1`, and both take the same
+  correction — convert with the measured rate. Nothing anybody would *do* differs between the two
+  worlds, so the inability to distinguish them costs nothing.
+
+  Applied to the rest of this work's caveats, and deliberately reported with the ones that
+  **survive**, because a principle that dissolves everything it is pointed at is a licence rather
+  than a test:
+
+  | caveat | verdict |
+  |---|---|
+  | the ladder cannot attribute skew to client or server | **dissolved** — same correction either way |
+  | two quantiles are silent about a distribution | **discharged** — it had a real consequence, which is why the ladder exists; it is now paid, not waived |
+  | the harness is also the client, so the instrument moved with the measurement | **narrowed** — it bars a quantitative before/after comparison, which nothing here relied on; the qualitative step (a refusal becoming a floor) is unaffected |
+  | below 3 frames per snapshot no cadence sweeps | **stands** — it decides whether the feature works on a 30 fps device |
+  | at exactly 60 fps the constant is unrecoverable | **stands** — it decides whether a run can be read at all |
+  | a non-uniform clock breaks the ladder | **stands** — it changes what must be checked (the residual) |
+  | the clock error reaches the steering lead, not just the report | **stands, bounded** — real, and at most `0.02 × floor` on any run the validity gate admits |
+  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **stands** — the guard's first verdict is its weakest |
+
+  **The guard on the principle, which matters more than the principle.** "No consequence for the
+  action" has to mean *no consequence for any action anyone might take with this information* —
+  not *no consequence for the action I already intend*. Read the second way it becomes a tool for
+  discarding inconvenient caveats, which is a considerably worse failure than carrying a few
+  harmless ones. The test is whether two people who disagree about what to do next would both be
+  unaffected; if only one of them is, the limitation is real and it is theirs.
+
 ### Notes
 
 
