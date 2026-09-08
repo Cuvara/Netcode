@@ -48,7 +48,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > the real estimator before it was proposed. **Verify a recommendation the way a defect is
 > verified.**
 
+### Added
+
+
+- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
+  rate readout**, a live phase histogram over the same eight divisions
+  `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict. The achieved rate is read from
+  `LocalMovePredictor.ObservedInputInterval`, which has always measured it and which **nothing
+  read** — a measurement nobody reads is the same defect as a counter that reads zero for two
+  reasons, and this is the single line that would have caught the loops sending 12 Hz while their
+  configuration said 15. The panel also names the frame-rate bound, and says so explicitly when
+  the frame rate rather than the cadence is what is blocking a reading.
+  Extended rather than given its own sample because it is the same story told to the same reader —
+  a clock/fit panel already lives here. **Drag the cadence to 15 and the histogram collapses to one
+  bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
+  it is one bar.
+
+- `PredictionLatencyMeasurement` reports the **acknowledgement quantile ladder** — `q = 0, 0.10,
+  0.25, 0.50, 0.75, 0.90` off one ring in one pass — with an ordinary least squares fitted through
+  it, plus the client frame rate that bounds all of them. **The point is to stop choosing between
+  statistics.** If one observation is `constant + wait` and the wait sweeps a snapshot interval,
+  the quantiles are affine in `q`: the **slope** says whether the sweep covered the whole interval,
+  and the **intercept** is the pipeline constant recovered independently of any single quantile —
+  which is what the open question about `FloorPercentile` actually needs. A ladder that is not
+  straight *falsifies* the model rather than returning a plausible number from it, which is a
+  property two order statistics could never have; the reported residual is the test, and its
+  tolerance is a fraction of the fitted slope rather than a constant somebody can tune. Both
+  numbers were already computable and neither was shown.
+
+- **`PredictionLatencyMeasurement` now refuses a run that measured a server other than the one it
+  was configured for**, and reports which of its settings came from the environment rather than
+  from a default. **Three times in one day an experiment ran to completion against the wrong
+  object and produced internally consistent numbers**: a game server that never registered in
+  Redis, so the gateway routed elsewhere; a `dotnet test` that silently re-ran a stale assembly;
+  and a snapshot-rate experiment whose environment never crossed the WSL-to-Windows boundary
+  (no `WSLENV`), so it measured the 15 Hz server while the 30 Hz one sat idle at
+  `players_online 0`. In each case the output looked exactly as a *successful* run had been
+  predicted to look, which is why reading the log is not a sufficient check.
+
+  Two halves, because neither covers the other: the gate compares the measured snapshot gap
+  against the gap the configured rate implies and returns Inconclusive on a mismatch — catching
+  **misrouting**; the provenance line names which environment variables were actually present —
+  catching **an override that never arrived**, where configuration and reality agree because both
+  are the default. The comparison is in **base ticks**, deliberately, because a tick count is
+  skew-invariant: comparing measured Hz against configured Hz would false-fail on a fast-clocked
+  client, which is the very arm where the ladder is still readable. Its tolerance is a quarter of
+  the expected gap — wide enough that a wobbling estimate does not make this the gate people
+  disable, narrow enough that a doubled or halved interval cannot pass.
+
+
+- **`LocalMovePredictor.Adoptions` — the third reconcile outcome now has a name and a
+  counter.** A reconcile was documented and instrumented as having two outcomes: answered
+  from the history (`HistoryHits`), or fallen back to replaying the ticks the server has not
+  seen (`ReplayedSteps`). There is a third. When the history misses *and* the fallback finds
+  nothing to rebuild — an empty pending buffer, and a snapshot tick that is not behind the
+  client's clock, so the held-forward path of #53 does not fire either — the predictor
+  replaces its prediction with the authoritative position outright and throws the whole
+  prediction lead away.
+
+  **That is the largest correction this class can make, and it moved no counter.**
+  `ReplayedSteps` stood still, because nothing was replayed. `HistoryHits` stood still,
+  because nothing was compared. The only reading that changed was `HistoryMisses` — whose
+  own summary says the reconcile "fell back to replaying", which is exactly what did not
+  happen. A live run reporting `reconciles from history 115 hit, 34 missed` reported
+  `replayed steps 2`: **32 wholesale adoptions, invisible on every instrument the class
+  had.**
+
+  **Why it stayed invisible is the part worth keeping.** The measurement report printed
+  `replayed steps 0   (zero is the HEALTHY reading …)` and `PREDICTION.md` said the same in
+  prose. Both were written when replaying was the only fallback there was, and both were
+  still *true of the case they were written about* — a client whose clock tracks the server
+  hits the history every time and legitimately replays nothing. What changed underneath them
+  was not the sentence but the set of things a miss could do, and neither text was gated on
+  the miss count. So the reading that meant "everything is fine" and the reading that meant
+  "the lead is being discarded fifteen times a second" printed as the same zero, under a
+  note asserting the first.
+
+  `Adoptions` is measured by comparing `ReplayedSteps` across the fallback rather than by
+  testing the branch conditions, so a replay that runs its loop and produces no step — a
+  lapsed hold, a movement model refusing every step — is counted as the adoption it is.
+  What is counted is the outcome, not the route to it.
+
+- `adopted wholesale` line in `PredictionLatencyMeasurement`'s report, beside `reconciles
+  from history`, printing the count against the miss count so the next live run reads the
+  two together.
+
+- `ReconcileAdoptionTests`, pinning all four reconcile states through the public surface: a
+  hit never adopts; a miss with pending input replays; a miss whose snapshot is *behind* the
+  clock rebuilds the held lead (#53) and does not adopt; and a miss with nothing to replay
+  adopts, with every pre-existing counter asserted to stand still — which is the defect,
+  stated as a test.
+
+### Changed
+
+
+- **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
+  is a real cost in feel and it is accepted deliberately, because the term it buys is currently
+  worth multiple base ticks of standing reconcile error. Recorded here so it is a trade on the
+  record rather than a silent regression. The uplink packet rate also falls ~13%, and because sends
+  are now strictly slower than acknowledgements arrive, `AckLatencyEstimator.Superseded` goes to
+  zero.
+- The server is unaffected by the slower cadence, and this was checked rather than assumed. Its
+  movement model integrates the newest held direction once per base tick whether or not a packet
+  arrived (`ApplyHeldMovement`: *"never on how many input packets a client sends"*), and the hold
+  expiry is a 250 ms **silence** timeout rather than a send-rate window. A stall still takes four
+  consecutive lost packets at 13 Hz exactly as it did at 15; the tolerated silence is identical.
+- The four fixed harnesses (`E2ECertification`'s three, `WorldView`) stay pinned at 15 Hz on
+  purpose — changing what a certification harness measures as a side effect of a cadence fix is not
+  something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
+  so the disagreement with the default does not read as an oversight to be tidied away.
+
+
+- **The `replayed steps 0` remark is corrected rather than removed**, in both the report and
+  `PREDICTION.md`. It claimed zero replayed steps was "the HEALTHY reading" outright; it is
+  healthy **only when the miss count is zero**. `PREDICTION.md` now quotes the old claim,
+  says why it was wrong, and gives the three outcomes in a table — a reader who remembers the
+  old advice finds it addressed instead of finding silence.
+- `NETCODE.md`'s measurement-guard table said the harness asserts `ReplayedSteps > 0`. It has
+  asserted `HistoryHits + ReplayedSteps > 0` since the history path landed. Corrected, and
+  `Adoptions` is documented as deliberately excluded from that sum: an adoption compares
+  nothing, so a run made entirely of adoptions has run its reconcile loop and still never
+  tested prediction against the server.
+
 ### Fixed
+
 
 - **The client no longer sends input at the snapshot rate, so the `uplink + snapshot age` term is
   measurable at all.** `AckLatencyEstimator` recovers that constant by timing an input to the
@@ -148,72 +271,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a further 2 Hz. It now passes the constant directly — **the value is unchanged**, only the
   coupling is gone.
 
-### Added
 
-- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
-  rate readout**, a live phase histogram over the same eight divisions
-  `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict. The achieved rate is read from
-  `LocalMovePredictor.ObservedInputInterval`, which has always measured it and which **nothing
-  read** — a measurement nobody reads is the same defect as a counter that reads zero for two
-  reasons, and this is the single line that would have caught the loops sending 12 Hz while their
-  configuration said 15. The panel also names the frame-rate bound, and says so explicitly when
-  the frame rate rather than the cadence is what is blocking a reading.
-  Extended rather than given its own sample because it is the same story told to the same reader —
-  a clock/fit panel already lives here. **Drag the cadence to 15 and the histogram collapses to one
-  bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
-  it is one bar.
+- **The five remaining script-bearing samples gain an `.asmdef`, closing the double-import
+  compile error named as a known list in 0.34.0.** `ContentPipeline`, `E2ECertification`,
+  `InterpolationProbe`, `KcpProbe` and `WorldView` each get one, modelled on `ClockSyncProbe`.
+  Without an assembly definition a sample's scripts compile into the consuming project's
+  **default assembly**, and Unity's sample importer writes every import to a version-named
+  folder — `Assets/Samples/<package>/<version>/<sample>/` — so a project that imported an
+  earlier version and committed it has two copies on disk after an update. Both copies compile
+  together, every type is declared twice, and the default assembly fails with `CS0101` and
+  `CS0229`. The Editor is dead until one copy is deleted by hand.
 
-- `PredictionLatencyMeasurement` reports the **acknowledgement quantile ladder** — `q = 0, 0.10,
-  0.25, 0.50, 0.75, 0.90` off one ring in one pass — with an ordinary least squares fitted through
-  it, plus the client frame rate that bounds all of them. **The point is to stop choosing between
-  statistics.** If one observation is `constant + wait` and the wait sweeps a snapshot interval,
-  the quantiles are affine in `q`: the **slope** says whether the sweep covered the whole interval,
-  and the **intercept** is the pipeline constant recovered independently of any single quantile —
-  which is what the open question about `FloorPercentile` actually needs. A ladder that is not
-  straight *falsifies* the model rather than returning a plausible number from it, which is a
-  property two order statistics could never have; the reported residual is the test, and its
-  tolerance is a fraction of the fitted slope rather than a constant somebody can tune. Both
-  numbers were already computable and neither was shown.
+  **The property that makes this worth fixing pre-emptively rather than on report: it cannot be
+  found before a release.** The second copy only comes into existence at the moment of a version
+  bump, so the failure never lands on whoever imported the sample and tested it — it lands on the
+  first person to update afterwards, in a project the sample's author never saw. No amount of
+  care at import time surfaces it. 0.34.0 hit it live while importing that release's own headline
+  sample against a committed 0.28.1 copy.
 
-- **`PredictionLatencyMeasurement` now refuses a run that measured a server other than the one it
-  was configured for**, and reports which of its settings came from the environment rather than
-  from a default. **Three times in one day an experiment ran to completion against the wrong
-  object and produced internally consistent numbers**: a game server that never registered in
-  Redis, so the gateway routed elsewhere; a `dotnet test` that silently re-ran a stale assembly;
-  and a snapshot-rate experiment whose environment never crossed the WSL-to-Windows boundary
-  (no `WSLENV`), so it measured the 15 Hz server while the 30 Hz one sat idle at
-  `players_online 0`. In each case the output looked exactly as a *successful* run had been
-  predicted to look, which is why reading the log is not a sufficient check.
+  0.34.0 fixed only `ClockSyncProbe` and deliberately named the other six, on the reasoning that
+  writing six sets of assembly references blind on the eve of a release was the larger risk. That
+  list is now closed, with one member removed from it rather than fixed: **`DemoBootstrap`
+  contains no `.cs` files at all** — a scene and a `NetworkBootstrapConfig` asset, nothing that
+  compiles — so it has no default-assembly footprint and cannot exhibit the defect. It is left
+  without an asmdef on purpose, not overlooked.
 
-  Two halves, because neither covers the other: the gate compares the measured snapshot gap
-  against the gap the configured rate implies and returns Inconclusive on a mismatch — catching
-  **misrouting**; the provenance line names which environment variables were actually present —
-  catching **an override that never arrived**, where configuration and reality agree because both
-  are the default. The comparison is in **base ticks**, deliberately, because a tick count is
-  skew-invariant: comparing measured Hz against configured Hz would false-fail on a fast-clocked
-  client, which is the very arm where the ladder is still readable. Its tolerance is a quarter of
-  the expected gap — wide enough that a wobbling estimate does not make this the gate people
-  disable, narrow enough that a doubled or halved interval cannot pass.
+  References were derived per sample from the types each source actually names, not copied
+  between samples, and they differ: `InterpolationProbe` and `KcpProbe` need only
+  `Cuvara.Netcode.Runtime`; `ContentPipeline`, `E2ECertification` and `WorldView` additionally
+  need `UniTask` and `Shared.GameLogic`. `UnityEngine.UIElements` and `UnityEngine.Networking`
+  are engine modules and are auto-referenced, which is why `ClockSyncProbe` lists neither despite
+  building its whole panel in UIElements.
 
-### Changed
-
-- **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
-  is a real cost in feel and it is accepted deliberately, because the term it buys is currently
-  worth multiple base ticks of standing reconcile error. Recorded here so it is a trade on the
-  record rather than a silent regression. The uplink packet rate also falls ~13%, and because sends
-  are now strictly slower than acknowledgements arrive, `AckLatencyEstimator.Superseded` goes to
-  zero.
-- The server is unaffected by the slower cadence, and this was checked rather than assumed. Its
-  movement model integrates the newest held direction once per base tick whether or not a packet
-  arrived (`ApplyHeldMovement`: *"never on how many input packets a client sends"*), and the hold
-  expiry is a 250 ms **silence** timeout rather than a send-rate window. A stall still takes four
-  consecutive lost packets at 13 Hz exactly as it did at 15; the tolerated silence is identical.
-- The four fixed harnesses (`E2ECertification`'s three, `WorldView`) stay pinned at 15 Hz on
-  purpose — changing what a certification harness measures as a side effect of a cadence fix is not
-  something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
-  so the disagreement with the default does not read as an oversight to be tidied away.
+  **What this does not do.** Two imported copies now carry two asmdefs with the same assembly
+  name, which Unity reports as a duplicate-assembly-name error rather than compiling. That is
+  still an error, but it is scoped to the sample folders, names the offending assembly, and
+  leaves the rest of the project compiling — where `CS0101` in the default assembly takes
+  everything down at once and points at neither copy.
 
 ### Limitations
+
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
@@ -356,7 +453,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restated as something that follows from what it is correcting for, or removed in favour of one
   that is.
 
+### Open terms
+
+
+Both were found while instrumenting the adopt path, both are real, and neither is fixed
+here — each needs its own change with its own test rather than a silent rider on this one.
+Named rather than left to be rediscovered.
+
+- **The two-argument `Reconcile(Vec2, long)` overload can adopt while incrementing nothing
+  at all.** `HistoryMisses` is gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`,
+  so a two-arg caller whose pending buffer is empty takes the authoritative position
+  wholesale and moves neither `HistoryHits`, nor `HistoryMisses`, nor `ReplayedSteps`.
+  `Adoptions` is the first counter that sees it — it is measured off the fallback's outcome
+  and has no such gate — but the hit/miss pair still reads as though no reconcile occurred.
+  Not the live path: `com.cuvara.dots` drives the three-argument form. A consumer that
+  cannot supply the snapshot tick is on it, which is exactly the caller least able to
+  diagnose the result.
+
+- **`Reset()` clears `Adoptions` but not `HistoryHits` / `HistoryMisses`.** It already
+  cleared `ReplayedSteps`, `Snaps`, `Reconciles`, `DroppedInputs`, `RejectedInputs` and
+  `CoalescedInputs` and left the history pair alone; `Adoptions` was added to the cleared
+  set because it is the sibling of `ReplayedSteps`, which makes the asymmetry visible rather
+  than creating it. The consequence is specific and worth stating: **after a reconnect, any
+  ratio between `Adoptions` and `HistoryMisses` is meaningless**, because the numerator
+  restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
+  therefore only readable within one session.
+
 ### Notes
+
 
 - **The recommendation was simulated against the real estimator before it was proposed, and the
   simulation refuted two claims that would otherwise have shipped.** The first — that 14 Hz would

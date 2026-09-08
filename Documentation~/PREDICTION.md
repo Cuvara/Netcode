@@ -352,10 +352,45 @@ causes is how big each correction is:
 | a ratio of the two rates | a genuine tick-rate mismatch; `TickRateEstimator.Disagrees` should be true as well |
 | `clock error` steps, with `clock rate difference` large | proportional droop against a clock-rate difference — check `clock rate correction` is not 1.0 |
 
-`replayed steps 0` is a **healthy** reading, not an open loop: the history path is the
-accurate one and replaying is its fallback, so a client whose clock tracks the server hits
-the history every time and replays nothing. Read `reconciles from history` for whether the
-loop closed.
+### `replayed steps 0` — what this section used to say, and why it was wrong
+
+It said: *`replayed steps 0` is a **healthy** reading, not an open loop: the history path is
+the accurate one and replaying is its fallback, so a client whose clock tracks the server
+hits the history every time and replays nothing.* Half of that is still true — a client in
+step does hit the history every time — but the conclusion drawn from it was wrong, and wrong
+in the direction that hides the worst case.
+
+A reconcile has **three** outcomes, not two:
+
+| Outcome | Counter | What the prediction does |
+|---|---|---|
+| **hit** | `HistoryHits` | compared at the snapshot's own tick; moved by the disagreement alone |
+| **replay** | `ReplayedSteps` | rewound to the server's answer, then rebuilt forward over the ticks it has not seen |
+| **adopt** | `Adoptions` | replaced by the server's answer outright — the whole prediction lead discarded |
+
+Replaying is not the only thing a miss can do. When the history misses *and* there is
+nothing outstanding to replay — an empty pending buffer, and a snapshot tick that is not
+behind the client's clock, so the held-forward path of #53 does not fire either — the
+predictor takes the server's position wholesale. That is the largest correction it can make,
+and until `LocalMovePredictor.Adoptions` existed it moved **no counter at all**: not
+`ReplayedSteps`, not `HistoryHits`, not `Snaps` in any way you could attribute. The only
+reading that changed was `HistoryMisses`, documented as "fell back to replaying" — which is
+precisely what did not happen.
+
+It was measured. A live run reporting `reconciles from history 115 hit, 34 missed` reported
+`replayed steps 2`. Thirty-two corrections had been absorbed silently, under a paragraph
+telling the reader the number was fine.
+
+So the corrected rule:
+
+> `replayed steps 0` is healthy **only when `reconciles from history` shows zero misses.**
+> With misses present, read `adopted wholesale` before drawing any conclusion from it: that
+> line, not this one, says whether the misses rebuilt the lead or threw it away.
+
+A nonzero `Adoptions` is not a disagreement about position — it says the client's clock has
+not reached the tick the snapshot describes, so the history cannot answer for a moment the
+client has not lived through. Read it against `TARGET LEAD` and `SNAPSHOT AGE`, not against
+the correction magnitudes in the table above.
 
 The `[Measure]` block prints `SNAPSHOT AGE measured`, `TARGET LEAD in use`, `snapshot gap
 measured` and `clock error (last steer)` for every run, prediction-OFF included, because
