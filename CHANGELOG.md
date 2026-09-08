@@ -7,7 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **The defect: a constant that was correct, used for something it does not describe.**
+>
+> Every send loop in this package took its cadence from `GameConstants.DefaultTickRate`, under a
+> tooltip reading *"matches the server's simulation rate"*. It does not. The server advertises
+> `JoinTokenResponse.tick_rate = SimulationRates.MovementHz = CriticalHz`, which is **60**. The
+> 15 in that constant is `WorldHz` — the World group's rate, which is also **the cadence the
+> snapshot broadcast runs at**. So the client was not sending at the simulation rate. It was
+> sending at exactly the *snapshot* rate, and that is the one cadence at which the pipeline
+> constant cannot be measured at all.
+>
+> The constant was never wrong. Nothing about `DefaultTickRate = 15` needed changing, and it has
+> not changed. What was wrong was the *use*, and a wrong use of a right constant does not fail a
+> review that checks the constant. This is the same shape as 0.34.0's release theme — reasoning
+> about one property and gating on another — arriving one layer down, in a value rather than in a
+> guard, and found by reading rather than by a live run.
+>
+> **A fifth sibling for 0.34.0's list of failure modes, distinct from the four already there: a
+> simulation whose idealisation removed the very quantisation the defect is made of.** The first
+> model of this fix used an ideal timer. It produced 12 Hz reading `UnsweptSeconds` 16.67 ms and a
+> lead of 0.48 against 13 Hz's 5.13 ms and 1.17 — a clean argument for coprimality, and a
+> description of a client that does not exist. It had already reached this changelog before it was
+> re-measured with acknowledgements read on render frames, where **11, 12, 13 and 14 Hz are
+> indistinguishable at 60 fps** because the frame period is coarser than any of their phase
+> spacings. The model was of the right system and the wrong machine.
+>
+> This is not the "fixture written from the code's model of the wire" failure — that one shares the
+> code's assumption. Nor is it a reading believed for the wrong property. **An idealised model is
+> wrong in the direction of the thing being idealised away**, and here the quantisation removed for
+> tractability *was* the mechanism: the same frame grid that hides the coprime advantage is what
+> made the cadence unreachable in the first place. Defence: when the defect is made of
+> quantisation, a model without it cannot be evidence about the fix — and the conclusion has to be
+> stated for the regime it was measured in. **Coprimality is chosen for the regime where it can
+> matter and costs nothing where it cannot, not because it improves the reading on the machine this
+> shipped from.**
+>
+> **A statistic computed from a fit that includes the suspect point cannot detect that point.**
+> Three detectors for sparse left-tail contamination were built and all three failed, and it took
+> the third to see that they had failed for one reason rather than three. The maximum residual
+> understates a dropped `q00`; a leave-one-out variant *flips sign* as contamination grows; and
+> `q00 − intercept` has no resolution at all — clean runs read +0.01…+0.05 and a run with one bad
+> observation in 128 reads −0.11…+0.11. In every case **the contaminated point is inside the fit,
+> so the line follows it down and the discrepancy the test looks for is absorbed by the thing it
+> is measured against.** Detection has to come from data the fit excludes, or from outside the fit
+> entirely — which is what `AckAheadOfSend` is, and why a counter that is *narrower than the
+> question* is the only working left-tail instrument in the package. Generalised: **when a test and
+> the thing it tests share an input, agreement is not evidence.**
+>
+> **Prefer operations that cannot be partially wrong; where you cannot have that, build the check
+> the measurement lacks.** Five times in one day an operation touched more than it was aimed at.
+> Four were silent — a server unregistered in Redis so the gateway routed elsewhere, a stale test
+> assembly, an environment that never crossed the WSL boundary, a stale results file — and each
+> produced internally consistent numbers about the wrong object. The fifth, a version-pinning regex
+> that matched every git dependency instead of one, **failed loudly and immediately**. The
+> difference is not luck: package resolution carries a *total* correctness check, since every
+> dependency must resolve, while a measurement carries none and will report faithfully on whatever
+> it was pointed at. That asymmetry is what the run precondition gate exists to close, and it
+> fired on its first deliberate test.
+>
+> **And one no-op in the opposite direction.** A cadence change alone greps clean, reads as a fix
+> in the diff, and does nothing at all on the target machine, because the defect lives in the loop
+> shape rather than in the constant. It was caught only because the recommendation was run against
+> the real estimator before it was proposed. **Verify a recommendation the way a defect is
+> verified.**
+
 ### Added
+
+
+- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
+  rate readout**, a live phase histogram over the same eight divisions
+  `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict. The achieved rate is read from
+  `LocalMovePredictor.ObservedInputInterval`, which has always measured it and which **nothing
+  read** — a measurement nobody reads is the same defect as a counter that reads zero for two
+  reasons, and this is the single line that would have caught the loops sending 12 Hz while their
+  configuration said 15. The panel also names the frame-rate bound, and says so explicitly when
+  the frame rate rather than the cadence is what is blocking a reading.
+  Extended rather than given its own sample because it is the same story told to the same reader —
+  a clock/fit panel already lives here. **Drag the cadence to 15 and the histogram collapses to one
+  bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
+  it is one bar.
+
+- `PredictionLatencyMeasurement` reports the **acknowledgement quantile ladder** — `q = 0, 0.10,
+  0.25, 0.50, 0.75, 0.90` off one ring in one pass — with an ordinary least squares fitted through
+  it, plus the client frame rate that bounds all of them. **The point is to stop choosing between
+  statistics.** If one observation is `constant + wait` and the wait sweeps a snapshot interval,
+  the quantiles are affine in `q`: the **slope** says whether the sweep covered the whole interval,
+  and the **intercept** is the pipeline constant recovered independently of any single quantile —
+  which is what the open question about `FloorPercentile` actually needs. A ladder that is not
+  straight *falsifies* the model rather than returning a plausible number from it, which is a
+  property two order statistics could never have; the reported residual is the test, and its
+  tolerance is a fraction of the fitted slope rather than a constant somebody can tune. Both
+  numbers were already computable and neither was shown.
+
+- **`PredictionLatencyMeasurement` now refuses a run that measured a server other than the one it
+  was configured for**, and reports which of its settings came from the environment rather than
+  from a default. **Three times in one day an experiment ran to completion against the wrong
+  object and produced internally consistent numbers**: a game server that never registered in
+  Redis, so the gateway routed elsewhere; a `dotnet test` that silently re-ran a stale assembly;
+  and a snapshot-rate experiment whose environment never crossed the WSL-to-Windows boundary
+  (no `WSLENV`), so it measured the 15 Hz server while the 30 Hz one sat idle at
+  `players_online 0`. In each case the output looked exactly as a *successful* run had been
+  predicted to look, which is why reading the log is not a sufficient check.
+
+  Two halves, because neither covers the other: the gate compares the measured snapshot gap
+  against the gap the configured rate implies and returns Inconclusive on a mismatch — catching
+  **misrouting**; the provenance line names which environment variables were actually present —
+  catching **an override that never arrived**, where configuration and reality agree because both
+  are the default. The comparison is in **base ticks**, deliberately, because a tick count is
+  skew-invariant: comparing measured Hz against configured Hz would false-fail on a fast-clocked
+  client, which is the very arm where the ladder is still readable. Its tolerance is a quarter of
+  the expected gap — wide enough that a wobbling estimate does not make this the gate people
+  disable, narrow enough that a doubled or halved interval cannot pass.
+
 
 - **`LocalMovePredictor.Adoptions` — the third reconcile outcome now has a name and a
   counter.** A reconcile was documented and instrumented as having two outcomes: answered
@@ -53,6 +164,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+
+- **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
+  is a real cost in feel and it is accepted deliberately, because the term it buys is currently
+  worth multiple base ticks of standing reconcile error. Recorded here so it is a trade on the
+  record rather than a silent regression. The uplink packet rate also falls ~13%, and because sends
+  are now strictly slower than acknowledgements arrive, `AckLatencyEstimator.Superseded` goes to
+  zero.
+- The server is unaffected by the slower cadence, and this was checked rather than assumed. Its
+  movement model integrates the newest held direction once per base tick whether or not a packet
+  arrived (`ApplyHeldMovement`: *"never on how many input packets a client sends"*), and the hold
+  expiry is a 250 ms **silence** timeout rather than a send-rate window. A stall still takes four
+  consecutive lost packets at 13 Hz exactly as it did at 15; the tolerated silence is identical.
+- The four fixed harnesses (`E2ECertification`'s three, `WorldView`) stay pinned at 15 Hz on
+  purpose — changing what a certification harness measures as a side effect of a cadence fix is not
+  something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
+  so the disagreement with the default does not read as an oversight to be tidied away.
+
+
 - **The `replayed steps 0` remark is corrected rather than removed**, in both the report and
   `PREDICTION.md`. It claimed zero replayed steps was "the HEALTHY reading" outright; it is
   healthy **only when the miss count is zero**. `PREDICTION.md` now quotes the old claim,
@@ -65,6 +194,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tested prediction against the server.
 
 ### Fixed
+
+
+- **The client no longer sends input at the snapshot rate, so the `uplink + snapshot age` term is
+  measurable at all.** `AckLatencyEstimator` recovers that constant by timing an input to the
+  first snapshot whose `ack_tick` reaches it — `uplink + wait-for-the-next-snapshot + age`, where
+  the wait is the only varying term, so the minimum converges on the constant. **That argument
+  holds only while the wait sweeps.** Sending at the snapshot rate locks the two cadences in
+  phase: every observation carries the same fixed wait and the minimum reads high by up to a whole
+  snapshot interval.
+
+  **The guard added in 0.34.0 detected this and refused, and refusing was right.** Measured live:
+  `median 61.9 ms, p90 62.7, min 23.7` — a p10-to-median span of 0.28 base ticks, a textbook lock.
+  A phase-locked client genuinely holds no evidence about its own pipeline constant, and a floor
+  offered on that evidence would read high, which is an **over**-lead — the original defect
+  arriving from the other side. But refusing correctly is not the same as being finished: the
+  fallback is `RoundTripMs * 0.5`, and on a fast link `round(4 ms × 60 Hz / 1000)` is **0**. For a
+  phase-locked client the term was therefore unobtainable *in principle*, not merely
+  unimplemented. **No statistic, guard or fallback can close it** — they all describe a
+  distribution that was never generated. Only changing the cadence generates it.
+
+  New `InputCadence` picks the send rate from the snapshot rate: the fastest rate below it that is
+  coprime with it (so the phase set is as fine as possible), visits at least
+  `AckLatencyEstimator.MinimumOccupiedBuckets` phases, and completes a sweep inside
+  `AckLatencyEstimator.MinimumSamples` observations. Against the default 15 Hz snapshot rate that
+  is **13 Hz**: 13 distinct phases spaced 5.13 ms, a full sweep every 0.5 s against a 5 s epoch.
+
+  **The rule is encoded rather than the number, because `WorldHz` is operator-configurable** and a
+  hard-coded 13 would be right for one deployment and silently wrong for the next — which is the
+  same defect as the anchor it replaces. **Note the coupling this creates:** the cadence now
+  depends on `AckLatencyEstimator.MinimumSamples` and `MinimumOccupiedBuckets`. Changing either
+  changes how often every client sends input. Both are referenced by name so the dependency is
+  greppable, and `InputCadence` says so in its remarks.
+
+  Why not the neighbouring rates, measured by driving the real estimator with an injected constant
+  of 1.00 base ticks:
+
+  | cadence | phases | sends/sweep | outcome |
+  |---|---|---|---|
+  | 15 Hz | 1 | ∞ | locked; no floor offered. The defect. |
+  | 14 Hz | 14 | 14.0 | reads correctly but has 1 Hz of margin — it re-locks the moment it drifts to 15. |
+  | **13 Hz** | **13** | **6.5** | **chosen.** Still yields an estimate when drifted to 13.25, 13.5, 13.75 and 14.0. |
+  | 12 Hz | 4 | 4.0 | sweeps *faster* and is **closer** to 15, yet coarser — `gcd(12, 15) = 3`. |
+
+  12 Hz is the case that decides the rule's shape: the condition is coprimality, not proximity.
+  **Its penalty is invisible at 60 fps and real above it**, and saying so precisely matters —
+  see the frame-rate limit below. At 60 fps the frame period (16.67 ms) is coarser than either
+  cadence's phase spacing, so 12 and 13 Hz both read an unswept remainder of 16.67 ms and a lead
+  of 1.00 against a true 1.00. At 144 fps, where the phases can be resolved, 13 Hz reaches 0.00 ms
+  unswept and a lead of 1.67 while 12 Hz stalls at 13.89 ms and 0.42. Coprimality is chosen for
+  the regime where it can matter and costs nothing where it cannot — **not** because it improves
+  the reading on the machine this shipped from.
+
+- **The configured cadence is now the cadence actually sent.** Both send loops were shaped
+  `send(); await UniTask.Delay(period);`. `UniTask.Delay` starts its stopwatch when the delay is
+  *constructed* — after the send — and resumes on the first Update frame at or past the period,
+  **discarding the remainder every iteration**. Simulated at 60 fps, every nominal rate in
+  `(12, 15]` collapsed onto 60/5 = **12 Hz**: 15 sent 12, 14 sent 12, 13 sent 12.
+
+  **Changing the constant alone would have been a literal no-op** — same packets, same phase, same
+  verdict — while reading as a fix in the diff and passing a test driven by an ideal timer.
+
+  **Neither loop sent at the rate it named, and the two disagreed by 3 Hz.** The PlayMode harness
+  paces with `PumpAsync`, whose absolute deadline happens to land exactly on four frames at 60 fps
+  (`1/15 Hz = 66.67 ms`, `4 × 16.67 ms`) — 15 Hz is the one value in the range that survives the
+  quantisation intact, which is why the live run shows a near-exact lock and is correctly refused.
+  The bootstrap and DOTS loops meanwhile achieved ~12 Hz and swept **by accident**, at a cadence
+  nobody chose, with four distinct phases instead of thirteen and `ConservativeFloorTicks` at 0.48
+  against a true 1.00 — and would have stopped sweeping the moment the frame rate moved.
+  **Production "working" here was not evidence of health; it was a second frame-quantisation
+  accident that happened to fall the other way.**
+
+  **And on a frame grid the cadence choice is not merely undone, it is unreachable.** A loop that
+  re-derives its deadline from its wake-up can only send on a frame boundary, so its achievable
+  rates are `fps / n`. Writing `k = fps / snapshotHz`, every achievable rate has a phase step of
+  `frac(n / k)` — always a multiple of `1/k`, so it visits **at most k phases, whatever constant
+  is written in the source**. At 60 fps against 15 Hz, `k = 4`: the achievable rates are 20, 15,
+  12, 10, 8.57 and 7.5 Hz with phase steps of 0.75, 0, 0.25, 0.5, 0.75, 0 — never better than
+  four phases, and 20, 15 and 7.5 Hz locked outright at one. **No value of the recommendation can
+  produce a sweeping cadence on that grid.** The pinned schedule is therefore not an optimisation
+  layered on the cadence choice; it is what makes any cadence choice reachable, and reverting to
+  `await Delay(1f / 13f)` silently restores the defect in full.
+
+  New `InputSendSchedule` advances by one period from the previous *scheduled* instant, so
+  quantisation error cancels instead of accumulating. Catch-up after a stall is bounded
+  (`ResyncAfterPeriods`) and counted: an unbounded backlog would arrive as a burst inside one
+  snapshot interval, where every input is superseded and contributes no observation — destroying
+  the phase relationship the schedule exists to preserve.
+
+- `LiveBackendConfig.TickRate` was serving as both the prediction fallback rate **and** the
+  harness's send cadence — the same conflation, in the instrument. Split into `FallbackTickRate`
+  (still `CUVARA_TICK_RATE`, still 15, still only the fallback its documentation always described)
+  and `InputSendHz` (new `CUVARA_INPUT_SEND_HZ`, defaulting to the recommendation). `SnapshotRateHz`
+  is now named separately rather than implied.
+
+- `DOTSNetworkBridge` passed `inputRateHz` as `fallbackTickRate` while its own remarks said that
+  constant was "deliberately NOT reused for this". The two were numerically equal at 15 so the
+  confusion cost nothing visible; offsetting the cadence would have quietly made the fallback wrong
+  by a further 2 Hz. It now passes the constant directly — **the value is unchanged**, only the
+  coupling is gone.
+
 
 - **The five remaining script-bearing samples gain an `.asmdef`, closing the double-import
   compile error named as a known list in 0.34.0.** `ContentPipeline`, `E2ECertification`,
@@ -103,7 +332,207 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the rest of the project compiling — where `CS0101` in the default assembly takes
   everything down at once and points at neither copy.
 
+### Limitations
+
+
+- **The acknowledgement floor requires at least three frames per snapshot, and below that no send
+  cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
+  only to a frame period: with `k = fps / snapshotHz`, at most `k` phases can be **told apart**,
+  independently of how many the cadence **visits**. The occupancy test needs
+  `MinimumOccupiedBuckets` = 3 of them, so the floor is unavailable below `3 × snapshotHz` — **45
+  fps** against the default 15 Hz snapshot rate. Measured at 30 fps against the real estimator, 11,
+  12, 13 and 14 Hz are **all** refused; at 45 fps and above, 13 Hz sweeps.
+
+  **This package ships to Android with IL2CPP, where 30 fps is not a hypothetical — it is the
+  target class.** So on a substantial share of real devices the pipeline constant is not
+  measurable, the estimator correctly offers nothing, and the prediction lead falls back to the
+  round trip. The refusal is right: the evidence genuinely is not there, and this is a limit of
+  the *measurement*, not of the cadence. It is named here rather than left to be rediscovered on
+  device, because the symptom — "13 Hz still offers no floor" — points at the cadence, and the
+  cause is the frame rate. `BelowThreeFramesPerSnapshotNoCadenceCanSweep` pins it, and
+  `ClockSyncProbe` reports which of the two constraints is binding rather than showing one
+  undifferentiated REFUSED: **two refusals that look identical and mean different things is the
+  defect this release is named after.**
+
+- **At exactly 60 fps against a 60 Hz base tick the pipeline constant is not recoverable at any
+  value, and this is a second face of the same law.** Acknowledgements are read on a render frame,
+  so no observation can be finer than a frame period. At 60 fps that period is 16.67 ms — *exactly
+  one base tick* — and since sends and acknowledgement reads both land on frames, **every
+  observation is an integer number of base ticks**. Simulated across injected constants of 0.00,
+  0.10, 0.50 and 1.00 base ticks, the estimator returns the same quantiles (2.00 / 2.00 / 4.00)
+  in all four cases: the constant is not merely imprecise, it is absent from the output.
+
+  A PlayMode run with no vsync usually sits far above 60 fps and therefore resolves fractional
+  ticks — which is how the first live run to offer a floor produced a p10 of 0.47 base ticks
+  (7.83 ms). That value is itself proof the client was above 128 fps, since no observation can be
+  shorter than one frame. **The frame rate is not a nuisance parameter for this measurement; with
+  the `k`-law above it is one of the two things that decide whether the quantity exists in the
+  output at all.** `PredictionLatencyMeasurement` now prints the client frame rate next to every
+  reading, and says so explicitly when one frame equals one base tick, because a floor quoted
+  without the frame rate it was taken at is not a reading.
+
+- **The quantile ladder survives a clock rate the environment gate refuses, and that is a property
+  worth relying on rather than a coincidence.** Every acknowledgement observation is a difference
+  of two readings of the *same* client clock, so a clock running fast by `(1+e)` scales every
+  observation by `(1+e)` and nothing else. A uniform scaling maps a straight line to a straight
+  line: `C + q·S` becomes `(1+e)C + q·(1+e)S`, so **slope and intercept inflate together and the
+  shape is untouched**. The two things the ladder is read for — *did the wait sweep* (slope against
+  the snapshot interval) and *what share of the floor is `FloorPercentile`* (`0.1·slope` over the
+  total) — are both ratios, and both are therefore exactly skew-invariant. Only the *absolute*
+  constant is inflated.
+
+  Confirmed on the first ladder run, which had a 90 697 ppm arm the gate refuses. That skew alone
+  predicts a slope of 4.363 base ticks against 4.31 measured (−1.2%), and it explains the arm's
+  "55.0 Hz" tick rate as the *same* artifact rather than a second fault: `60 / 1.0907 = 55.01`. A
+  fast client clock makes a healthy 60 Hz server look slow by exactly the factor it inflates
+  intervals by. De-skewed, the refused arm and the clean arm agree on the pipeline constant to
+  0.03 base ticks (0.5 ms).
+
+  **Three limits, because "readable" is not "unconditional".** *(1)* The ladder is skew-invariant
+  in shape but skew-**blind** in attribution: a client running 9% fast and a server running 9% slow
+  predict identical ladders, and nothing in this instrument separates them. *(2)* Only a *uniform*
+  scaling is harmless — a clock that changes rate within the observation window smears the line,
+  and the reported residual is the detector for exactly that. *(3)* **The inflation reaches
+  behaviour, not just the report.** `ConservativeFloorTicks` feeds the steering lead in these same
+  units, so a client whose clock runs fast by `e` over-leads by `e` times the floor. At 9% and a
+  0.77-tick floor that is 0.07 of a base tick — small, but it is a real over-lead in the direction
+  this estimator exists to avoid, and it is not visible in any counter that reports the floor
+  alone.
+
+- **OPEN: `FloorPercentile` is now measured as the inflating term, and that does not by itself say
+  what should replace it.** Across four arms, two snapshot rates and two containers, the floor
+  tracks `intercept + 0.1 × slope` — at 30 Hz, `0.16 + 0.207 = 0.37` against 0.37 measured. The
+  pipeline constant on loopback is **0.16–0.27 base ticks (2.7–4.5 ms)**; everything above that in
+  the reported floor is the statistic. The pre-registered rule in `AckLatencyEstimator` says the
+  minimum returns if the floor is inflated, and its condition is now met.
+
+  **It should not be executed on this evidence, because every candidate is indistinguishable on
+  it.** Simulated against the real estimator on a clean sweep, the minimum, the tenth percentile
+  less `0.1·S`, the ladder intercept and the conservative floor all land within 0.05 of the true
+  constant. The four arms measured were all clean sweeps. **They diverge only under contamination,
+  and they diverge in opposite directions for the two kinds:**
+
+  | | right tail (server stalls) | left tail (spurious short observations) |
+  |---|---|---|
+  | minimum | **best** — a right tail cannot move it (0.20/0.50/1.02 against C of 0.20/0.50/1.00) | **fatal** — collapses onto the contaminant (0.03/0.07/0.15) |
+  | tenth percentile | inflated by the same `0.1·S` | survives while contamination stays under 10% |
+  | ladder intercept | **worst** — the tail bends the line and least squares drags the intercept down, under-reading by up to 0.18 | also degraded |
+
+  **Read that last row twice, because the intuition it violates is the natural one.** The ladder
+  intercept is the most principled-looking candidate on clean data — it uses every observation,
+  it is the model's own estimate of the constant, and it carries a built-in validity check. It is
+  also the **least** trustworthy of the four exactly where robustness is needed, and for a reason
+  that is easy to miss: least squares fits the whole line, so a right tail lifting the *upper*
+  quantiles rotates the line and drags the *intercept* down at the other end. A statistic can be
+  contaminated by data at the opposite end of the distribution from where it is read. Anyone
+  arriving at this problem fresh — including the two of us, on this morning's numbers — will want
+  to propose "just use the intercept". The simulation is what refutes it, not the reasoning.
+
+  So the choice is not "which statistic is more robust" but **which contamination this system
+  actually produces** — and the left-tail case is exactly the one whose known cause
+  (`AckAheadOfSend`, a previous session's `LastInputTick`) has since been guarded, so its current
+  rate is unmeasured rather than known to be zero.
+
+  **The discriminating measurement is the ladder's own residual, under load.** Both contaminations
+  raise it decisively — 0.12–0.37 right-tailed and 0.14–0.26 left-tailed, against 0.02–0.05 on a
+  clean sweep — and the position of `q00` relative to the fitted line separates which. That points
+  at a fifth option the ladder makes possible for the first time, and which is what this class
+  already believes: **guard on straightness and keep a low statistic**, so that a contaminated
+  distribution is refused rather than handed to a statistic chosen to survive it. In the class's
+  own words, *a statistic cannot repair a guard*.
+
+  **PROPOSAL, WITH ITS DECIDING MEASUREMENT STILL UNRUN — do not read this as settled.**
+  `floor = quantile(0.10) − 0.10 × measured_slope`. The percentile stays; its now-measured bias is
+  subtracted using the ladder's own slope per run, so the correction is self-correcting rather
+  than assuming `S`. On clean data it lands within 0.05 of the constant.
+
+  *Why the minimum is not proposed — and the case against it is weaker than it first looks.*
+  Contamination makes the minimum **under**-read, and this package's stated asymmetry is that an
+  under-lead "merely leaves residual in place" while an over-lead is the original defect arriving
+  from the other side. So the minimum's failure mode is in the *tolerable* direction, and
+  "disqualified" was too strong. What survives against it is narrower and still real: it is an
+  extremum over a ring, driven by a single sample, so it carries run-to-run variance into the
+  steering lead even on clean data. Meanwhile the **raw** tenth percentile is systematically
+  biased by `0.1 · S` in the *dangerous* direction — which is the whole finding of this section,
+  and the reason the proposal subtracts that bias rather than keeping or replacing the statistic.
+  Corrected, it is unbiased on clean data and under-reads under contamination: safe in both.
+  Uncorrected, it over-leads on every healthy run.
+
+  *The porosity of a straightness guard, which is why the guard does not settle the choice.* A straightness
+  guard set at 0.12 from the six clean arms (residuals 0.03–0.11) is **porous to sparse left-tail
+  contamination**. Simulated over 200 seeds at a true constant of 0.25:
+
+  | contamination | mean residual | passes the guard | minimum reads |
+  |---|---|---|---|
+  | none | 0.03 | 100% | 0.26 |
+  | right tail 10% | 0.11 | 80% | 0.26 |
+  | **left tail — one observation in 128** | **0.07** | **98%** | **0.13** |
+  | left tail 2% | 0.09 | 90% | 0.05 |
+
+  **One spurious short observation halves the minimum and the guard does not see it**, because
+  `q00` moves to the contaminant while the fitted line follows it down, so the residual understates
+  the displacement. The asymmetry is the whole point: a right tail is both *detected* and *harmless*
+  to the minimum; a left tail is neither. A leave-one-out test on `q00` — the obvious fix — is not
+  usable either: its sign **flips** at higher contamination, because the remaining points are
+  themselves contaminated and the line follows them down.
+
+  **AND THERE IS NO TEST HERE FOR SPARSE LEFT-TAIL CONTAMINATION — INCLUDING THE ONE THIS ENTRY
+  ORIGINALLY NAMED.** `q00`'s distance from the fitted line was proposed as the sufficient shape
+  test, on the reasoning that a spurious short observation drags `q00` below the line. Measured
+  over 300 seeds, it does not: clean runs give +0.01..+0.05 and a run with **one** contaminant in
+  128 gives −0.11..+0.11, ranges that overlap almost entirely. At a −0.10 threshold it catches 3%
+  of contaminated runs; at −0.12 or beyond, none. The mechanism is the one that defeats the
+  residual and the leave-one-out variant too: **`q00` is one of the six fitted points, so when it
+  drops the line follows it down and the difference barely moves.** The number is still reported,
+  labelled as a datum and not a test, so the idea is not re-derived and trusted.
+
+  Two consequences, both narrowing what earlier entries here claimed. **The load run rules out
+  gross contamination of either kind and cannot rule out the sparse left tail** — no instrument
+  present would have seen it. And **the only left-tail cause with a detector is the one
+  `AckAheadOfSend` counts**; an unknown cause is invisible to everything this harness prints.
+
+  **THE ARGUMENT THAT CARRIES THIS DOES NOT DEPEND ON ANY CONTAMINATION RATE, AND THAT IS WHY THE
+  PROPOSAL IS NOT HELD ON AN UNRUN EXPERIMENT.** It was first argued from guard porosity, which
+  does depend on the rate; that argument is weaker than the one that replaced it. The one that
+  carries it is the **direction of harm on a healthy run**: the raw tenth percentile is
+  systematically biased by `0.1 · S` in the *over-lead* direction — the original defect arriving
+  from the other side — on every clean run, whether or not any contamination exists. Subtracting
+  the measured bias removes that, and the corrected statistic then under-reads under contamination,
+  which is the direction this package calls tolerable. **Safe on clean data and safe when wrong**,
+  with no rate in the argument.
+
+  The left-tail rate remains unmeasured and is still worth measuring, for a narrower reason: it
+  converts `AckAheadOfSend` from a guard nobody has watched act into a measurement. It has read 0
+  on seven consecutive runs, which means the condition did not arise on those runs, not that it
+  cannot. The documented cause is an acknowledgement naming a tick this session never sent — a
+  reconnect onto a server still holding the previous session's `LastInputTick`. **That experiment
+  can only measure the one cause the package counts; an unknown cause is invisible to every
+  instrument here, so a null result narrows the question rather than closing it.**
+
+  *A sequencing disclosure, because a reader should be able to judge this rather than trust it.*
+  The porosity finding above was made **after** the load run had already retired the percentile's
+  original justification, which is the shape of a post-hoc rescue. It is offered as falsifiable
+  rather than as argued: the reconnect experiment settles it either way, and it was named as the
+  decisive one before this proposal was written down.
+
+  **The load run retired the percentile's original defence and did not touch this one.** Under an
+  8-player load the ladder stayed straight — residuals 0.03 and 0.07, `q00` on the fitted line
+  (0.00 and −0.03) — so neither contamination appeared. The percentile's justification of record
+  was a *bimodal-under-load* regime, and that regime has not been observed on this system. A
+  constant defended by a regime nobody can produce is not defended. That defence is gone; the
+  guard-porosity argument above is a different one, and load could never have tested it, because
+  the left-tail cause is a reconnect condition rather than a load phenomenon.
+
+  **On not executing the pre-registered rule.** `AckLatencyEstimator` says the minimum returns if
+  the floor is inflated. Its *condition* is met — confirmed on two independent axes. Its *premise*
+  is false: it assumed a working sweep guard makes the minimum safe, and the guard cannot see the
+  case that kills the minimum. **A pre-registered rule whose premise is falsified by later evidence
+  must not be executed on the strength of its condition alone.** Pre-registration protects against
+  reading numbers backwards; it does not protect against the reasoning that set the threshold being
+  wrong, and the two failures look identical from inside the rule.
+
 ### Open terms
+
 
 Both were found while instrumenting the adopt path, both are real, and neither is fixed
 here — each needs its own change with its own test rather than a silent rider on this one.
@@ -128,6 +557,122 @@ Named rather than left to be rediscovered.
   restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
   therefore only readable within one session.
 
+- **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
+  number chosen for an unrelated reason.** This is recorded as a defect rather than an
+  observation, because a term that works only for its current inputs is not a working term.
+
+  It subtracts `UnsweptSeconds` — on a swept link about `S / phases` — from a floor inflated by
+  `0.1 · S`. **Those are unrelated quantities.** One is the part of the wait's range never
+  sampled; the other is the offset of a chosen order statistic from the minimum. Nothing connects
+  them, and they nearly cancel only because the two shipped cadences visit 13 phases (15 Hz) and
+  23 phases (30 Hz) — both near the **10** at which `1/phases` happens to equal `FloorPercentile`
+  and the cancellation would be exact.
+
+  What survives is `S · (0.1 − 1/phases)`, and **its sign flips with the phase count**:
+
+  | phases | remainder | direction |
+  |---|---|---|
+  | 13 (13 Hz vs 15 Hz) | `4 · (0.1 − 0.077)` = **+0.09** | over-lead |
+  | 23 (23 Hz vs 30 Hz) | `2 · (0.1 − 0.043)` = **+0.11** | over-lead |
+  | 10 | 0 | exact, by coincidence |
+  | 8 | `4 · (0.1 − 0.125)` = **−0.10** | under-lead |
+
+  So both shipping configurations sit on the over-lead side — the direction this estimator exists
+  to avoid — by about a tenth of a base tick, and a cadence recommendation that happened to select
+  8 phases would silently invert that with nothing in any counter changing. The phase count is
+  chosen by `InputCadence` for reasons that have nothing to do with `FloorPercentile`; the two
+  constants are coupled only by this accident.
+
+  **It is not urgent and it is not small in the way that matters.** The magnitude is a tenth of a
+  tick; the defect is that the term's correctness is not a property of the term. Whatever is
+  decided about `FloorPercentile` — including leaving it alone — this subtraction should be
+  restated as something that follows from what it is correcting for, or removed in favour of one
+  that is.
+
+  **Retired by consequence, not fixed, if the proposal above is adopted.** Subtracting a *measured*
+  statistical bias (`0.10 × measured_slope`) removes the reason to subtract the unrelated
+  `UnsweptSeconds`, and with it the coincidence. The arithmetic above stays recorded rather than
+  deleted, because "this term was removed because something else replaced its job" and "this term
+  was correct" are different histories, and only the first one warns the next person who reaches
+  for `UnsweptSeconds` as a bias correction.
+
+### Notes
+
+
+- **The recommendation was simulated against the real estimator before it was proposed, and the
+  simulation refuted two claims that would otherwise have shipped.** The first — that 14 Hz would
+  be marginal at the minimum sample count — was wrong, and finding out why surfaced the quantile
+  degeneracy logged below. The second was the one that mattered: **the cadence change alone does
+  nothing on the target machine.** It greps clean, it reads as a fix in the diff, and it passes a
+  test driven by an ideal timer, because the defect lives in the loop shape rather than in the
+  constant. That is the failure mode of this codebase arriving through the *harness* instead of
+  through an edit — a test that shares the code's model of the wire can only confirm it — and the
+  only reason it was caught is that the proposal was run against the real class before it was
+  believed. **Verify a recommendation the same way a defect is verified.**
+
+- **Figures in this entry were re-taken on clean rebuilds, because one of them was stale.** A
+  mutation check of the new tests initially reported a pass; `dotnet test` had silently re-run the
+  previous assembly rather than rebuilding, because the sources live outside the throwaway project
+  directory. A clean rebuild showed 6 of 15 failing, which is the real result. Every
+  nominal-versus-achieved number quoted above was re-measured with `rm -rf bin obj` first, and the
+  12 Hz comparison was corrected as a result: its penalty is invisible at 60 fps, and the earlier
+  draft quoted an ideal-timer figure as though it described the shipping client.
+
+- **The harness is also the client, so this change moves the instrument and the thing measured in
+  the same commit.** There is no third client to hold fixed. The consequence is that a live run
+  cannot, on its own, separate *"the fix worked"* from *"the harness now samples differently"*:
+  both the cadence and the pinned schedule alter which phases get sampled. Stated here rather than
+  discovered later. What the run *can* establish is the qualitative step — a floor offered at all
+  where none was before — because the previous state was a refusal, not a different number.
+- **`AckLatencyEstimator`'s sweep guard is weakest on its first verdict, and this is arithmetic
+  rather than a suspicion.** `Quantile` computes `index = (int)(q * _obsCount)`. At
+  `_obsCount == 8` — exactly `MinimumSamples` — the tenth percentile is index 0 and the ninetieth
+  is index 7: **the minimum and the maximum**, which is precisely the `max - min` statistic the
+  guard was rewritten to stop being, and which a single outlier satisfies. The same holds at
+  n = 9. From **n ≥ 10** the low quantile moves off index 0 and the statistic becomes a real order
+  statistic. Not fixed here — tuning a guard's constants while changing the cadence feeding it
+  would make neither result attributable — and logged so it joins the known list rather than being
+  rediscovered.
+
+- **Known pre-existing discrepancy, unchanged by this work.** `GameConstants.MaxBankedMovementMs`
+  reasons that `MaxBankedMovementTicks(15) = 4` ticks of 66.7 ms covers a bursting client's 264 ms
+  idle "exactly". That arithmetic is for the *uniform* 15 Hz configuration. Under the live split
+  60/15 rates the handler is built with `MovementHz = 60`, so the budget is `MaxBankedMovementTicks(60)
+  = 15` base ticks = **250 ms**, and the 264 ms case it claims to cover is already 14 ms over. This
+  is in the server repo, predates this change, and is logged here so it is on a known list rather
+  than a future surprise.
+
+
+- **A limitation with no consequence for the action is not a limitation — and the caveats carried
+  through this work were audited against that rather than the principle merely being stated.**
+
+  The case that produced it: the quantile ladder cannot tell a client running 9% fast from a
+  server running 9% slow, and that was carried for most of a day as a standing limitation. It is
+  not one. Both causes produce an error of `advertised/measured − 1`, and both take the same
+  correction — convert with the measured rate. Nothing anybody would *do* differs between the two
+  worlds, so the inability to distinguish them costs nothing.
+
+  Applied to the rest of this work's caveats, and deliberately reported with the ones that
+  **survive**, because a principle that dissolves everything it is pointed at is a licence rather
+  than a test:
+
+  | caveat | verdict |
+  |---|---|
+  | the ladder cannot attribute skew to client or server | **dissolved** — same correction either way |
+  | two quantiles are silent about a distribution | **discharged** — it had a real consequence, which is why the ladder exists; it is now paid, not waived |
+  | the harness is also the client, so the instrument moved with the measurement | **narrowed** — it bars a quantitative before/after comparison, which nothing here relied on; the qualitative step (a refusal becoming a floor) is unaffected |
+  | below 3 frames per snapshot no cadence sweeps | **stands** — it decides whether the feature works on a 30 fps device |
+  | at exactly 60 fps the constant is unrecoverable | **stands** — it decides whether a run can be read at all |
+  | a non-uniform clock breaks the ladder | **stands** — it changes what must be checked (the residual) |
+  | the clock error reaches the steering lead, not just the report | **stands, bounded** — real, and at most `0.02 × floor` on any run the validity gate admits |
+  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **stands** — the guard's first verdict is its weakest |
+
+  **The guard on the principle, which matters more than the principle.** "No consequence for the
+  action" has to mean *no consequence for any action anyone might take with this information* —
+  not *no consequence for the action I already intend*. Read the second way it becomes a tool for
+  discarding inconvenient caveats, which is a considerably worse failure than carrying a few
+  harmless ones. The test is whether two people who disagree about what to do next would both be
+  unaffected; if only one of them is, the limitation is real and it is theirs.
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**
