@@ -328,6 +328,58 @@ namespace Cuvara.Netcode.Tests.Editor
                 "lower the clamp by the whole round trip here, which is a steer, not a bound.");
         }
 
+        /// <summary>
+        /// A provisional age that saturates its own clamp must not be delivered as the clamp
+        /// value, because the clamp value is the defect.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>Math.Min(StalenessTicks, gap)</c> reads as a safety ceiling and behaves like one
+        /// while the provisional figure is roughly right. It is not a ceiling once the figure
+        /// runs away: the provisional reading carries no slope, so an untrustworthy timebase
+        /// makes it accumulate, it exceeds <c>gap</c> on every call, and the clamp then returns a
+        /// CONSTANT — which is <c>gap</c>, the warm-up fallback the whole of v0.33.0 and v0.34.0
+        /// exist to stop steering on.
+        /// </para>
+        /// <para>
+        /// Measured: a provisional age of <b>45.56 base ticks</b> against a true age of 0.09 one
+        /// commit earlier on the same box, all three arms steering on a lead of 4, the worst
+        /// correction figures of any run in the sequence — <c>37 of 39</c> above one step at
+        /// <c>4.00</c> — and <c>reconciles from history 142 hit / 0 missed</c>, so nothing was
+        /// missing from the history and the corrections were pure over-lead.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ASaturatedProvisionalReadingIsRefusedRatherThanDeliveredAsTheClamp()
+        {
+            var binder = NewBinder();
+            long tick = 1000;
+            double now = ClockOffset + tick / (double)BaseHz + 0.010;
+
+            // Enough for a provisional reading, and a client clock running fast enough that the
+            // unit-rate height runs away: this is the shape a refused fit leaves behind.
+            for (var i = 0; i < 40; i++)
+            {
+                binder.TickRate.Sample(tick, now);
+                binder.Staleness.Sample(tick, now, BaseHz);
+                tick += SnapshotEvery;
+                now += Interval * 1.08;          // 8% fast, the measured artefact's magnitude
+            }
+
+            Assert.That(binder.Staleness.HasEstimate, Is.True, "precondition: a provisional reading");
+            Assert.That(binder.Staleness.AgeIsFitted, Is.False,
+                "precondition: and it must be the provisional one, not a corroborated fit");
+            Assert.That(binder.Staleness.StalenessTicks,
+                Is.GreaterThan(binder.TickRate.SnapshotTickGap),
+                "precondition: the reading must actually saturate, or this pins nothing");
+
+            Assert.That(binder.TargetLeadTicks(), Is.Zero,
+                "a saturated clamp is a constant, and that constant is the warm-up fallback. "
+                + "An untrustworthy timebase has to produce an UNDER-lead, not the largest lead "
+                + "available — the uplink is still covered by the acknowledgement floor, which is "
+                + "measured independently of this.");
+        }
+
         [Test]
         public void AnInflatedFloorCannotOverLead()
         {

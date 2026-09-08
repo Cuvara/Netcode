@@ -335,6 +335,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget and the budget of 2 corrections above one step included; neither was widened.
 
 
+- **A saturated provisional age is refused instead of being delivered as the clamp — the clamp
+  value *was* the defect.** `Math.Min(StalenessTicks, gap)` reads as a safety ceiling and behaves
+  like one while the provisional figure is roughly right. It is not a ceiling once the figure runs
+  away: the provisional reading carries **no slope term**, so an untrustworthy timebase makes it
+  accumulate at the apparent skew, it exceeds `gap` on every call, and the clamp then returns a
+  **constant** — which is `gap`, the warm-up fallback the whole of v0.33.0 and v0.34.0 exist to
+  stop steering on. The report even labels it one line below: *"a lead equal to this is the warm-up
+  fallback, not a measurement."* Measured: a provisional age of **45.56 base ticks** against a true
+  age of 0.09 one commit earlier on the same box, all three arms steering on a lead of 4, the worst
+  correction figures of the sequence (**37 of 39** above one step at **4.00**) with `reconciles
+  from history 142 hit / 0 missed` — nothing missing from the history, so the corrections were pure
+  over-lead. A provisional age above one snapshot interval is not a plausible age for a healthy
+  route (a route genuinely that slow produces a fit whose slope *reproduces*, and takes the fitted
+  branch), so it is now treated as **evidence of an unusable reading** and contributes zero. An
+  untrustworthy timebase must produce an under-lead, not the largest lead available; the uplink is
+  still covered by the acknowledgement floor, which is measured independently.
+
+- **The provisional floor decays per epoch, like the fitted path's anchors.** It only ever moved
+  downward, so it was a memory of the session's fastest moment and the height above it carried the
+  whole of any rate difference accumulated since. One epoch of memory now, the same shape
+  `AckLatencyEstimator` uses, so a single unlucky epoch cannot leave the client without a reading.
+  This bounds the accumulation; it does not eliminate it at large apparent skew, which is why the
+  saturation refusal above is the load-bearing half.
+
 - **`SNAPSHOT AGE ... (fitted)` was labelled from the wrong flag, and the provisional age carries
   no rate term.** Two defects in the work this release added, found by a run that could not be
   read because of the first. The label was driven by `IsUsable` — "a line exists" — while the age
@@ -369,18 +393,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is recorded rather than fixed on purpose — folding it in behind the sweep fix would make its
   own effect unattributable, which is the mistake this release spent a run avoiding. The guard is
   *lenient* because of it, never strict, so it cannot cause an over-lead on its own.
-
-- **The provisional snapshot age has no decay, so on a route that slows it grows without bound.**
-  `SnapshotStalenessEstimator`'s fitted path forgets through its epochs; the provisional path
-  measures against `_floorResidual`, a running minimum that only ever moves **downward**. On a
-  long session whose route genuinely gets slower, that floor is a memory of the session's fastest
-  moment and never forgets it. Measured: a divergence arm running last, when the Editor had been
-  loaded longest, reported an age of **21.58 base ticks** with a rising band (11.78 → 18.15) while
-  the healthy arm sat flat at 0.04 → 0.05. It is bounded where it steers — `TargetLeadTicks`
-  clamps the provisional reading with `Math.Min(.., gap)`, which is why that arm's lead was 3 and
-  not 21 — so this is a **reporting** defect rather than a steering one. But the corroboration gate
-  made the provisional path load-bearing, and a path that carries the age deserves the same decay
-  the fitted one has.
 
 - **A phase-locked client cannot measure its own pipeline constant, and the round-trip fallback is
   zero on a fast link.** A client whose send cadence equals the snapshot cadence never sees a small

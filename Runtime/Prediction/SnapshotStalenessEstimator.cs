@@ -250,8 +250,11 @@ namespace Cuvara.Netcode.Prediction
         // Lowest unit-rate residual seen since construction or Reset. Unlike _bestResidual
         // this survives the epoch boundary: it is the floor the PROVISIONAL reading is taken
         // above, and an epoch is far too short a memory for a floor.
+        // The unit-rate floor, kept per epoch with one epoch of memory. See the update site.
         private double _floorResidual;
         private bool _haveFloor;
+        private double _previousFloorResidual;
+        private bool _havePreviousFloor;
 
         // The older anchor: lowest sample of an earlier epoch, and the far end of the
         // baseline the rate is fitted over.
@@ -457,6 +460,14 @@ namespace Cuvara.Netcode.Prediction
             // Kept live while a fit exists but is UNCORROBORATED, because that is when the
             // provisional reading below is the one being used and a frozen floor would make it
             // stale. See the age branch beneath.
+            //
+            // AND KEPT PER EPOCH, WHICH IS THE POINT. A floor that only ever moves downward is a
+            // memory of the session's fastest moment, and the height above it therefore carries
+            // the whole of any rate difference accumulated since: the provisional reading has no
+            // slope term, so a client clock n% fast adds n% of elapsed time to it every second.
+            // Measured, unbounded: 45.56 base ticks -- 759 ms -- on a run whose apparent skew was
+            // 81 351 ppm over ten seconds, against 0.09 on a run whose skew was -55 ppm. The
+            // fitted path forgets through its epochs and this one did not.
             if (!_haveFit || !RateCorroborated)
             {
                 double unit = y - x;
@@ -489,11 +500,17 @@ namespace Cuvara.Netcode.Prediction
                 if (above < 0) above = 0;
                 StalenessTicks = (float)(above * baseHz);
             }
-            else if (Samples >= MinimumProvisionalSamples && _haveFloor)
+            else if (Samples >= MinimumProvisionalSamples && (_haveFloor || _havePreviousFloor))
             {
                 // Provisional: height above the running floor, at unit rate. See HasEstimate
                 // for why this is offered and why the caller must clamp it from above.
-                double above = (y - x) - _floorResidual;
+                double floor = _floorResidual;
+                if (_havePreviousFloor && _previousFloorResidual < floor)
+                {
+                    floor = _previousFloorResidual;
+                }
+
+                double above = (y - x) - floor;
                 if (above < 0) above = 0;
                 StalenessTicks = (float)(above * baseHz);
             }
@@ -511,6 +528,14 @@ namespace Cuvara.Netcode.Prediction
             {
                 return;
             }
+
+            // Retire the unit-rate floor with the epoch, so the provisional reading is a height
+            // above a RECENT minimum rather than the session's best moment. One epoch of memory,
+            // the same shape AckLatencyEstimator uses, so a single unlucky epoch cannot leave the
+            // client without a reading.
+            _previousFloorResidual = _floorResidual;
+            _havePreviousFloor = _haveFloor;
+            _haveFloor = false;
 
             if (!_haveAnchor)
             {
@@ -618,6 +643,8 @@ namespace Cuvara.Netcode.Prediction
             _haveFit = false;
             _anchorX = _anchorY = 0;
             _haveAnchor = false;
+            _previousFloorResidual = 0;
+            _havePreviousFloor = false;
             _bestX = _bestY = _bestResidual = 0;
             _haveBest = false;
             _floorResidual = 0;

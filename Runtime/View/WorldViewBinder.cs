@@ -438,8 +438,28 @@ namespace Cuvara.Netcode.View
             }
             else if (Staleness.HasEstimate)
             {
-                // Provisional, so trusted only downwards. See the remarks.
-                lead = Math.Min(Staleness.StalenessTicks, gap);
+                // Provisional, so trusted only downwards -- but a reading that SATURATES that
+                // clamp is not a reading at all, and treating it as one delivers the defect.
+                //
+                // Math.Min(.., gap) was written as a ceiling on a provisional figure expected to
+                // be roughly right and occasionally high. A provisional reading has no slope
+                // term, so when the timebase is untrustworthy it accumulates at the apparent
+                // skew: measured at 45.56 base ticks against a true age of 0.09, on a run whose
+                // apparent skew was 81 351 ppm. Clamped, that returns `gap` on every call -- and
+                // a saturated clamp is a constant, which is precisely the warm-up fallback this
+                // work exists to remove. All three arms of that run steered on a lead of 4
+                // against an age under a tenth of a tick, and the report labelled it, one line
+                // below: "a lead equal to this is the warm-up fallback, not a measurement".
+                //
+                // So saturation is treated as EVIDENCE OF AN UNUSABLE READING rather than as a
+                // number to clamp. A provisional age above one snapshot interval is not a
+                // plausible age for a healthy route; a route genuinely that slow produces a fit
+                // whose slope REPRODUCES, and takes the branch above. Down here it means the
+                // timebase cannot be trusted, and an untrustworthy timebase must produce an
+                // UNDER-lead, not the largest one available -- the uplink is still covered by the
+                // acknowledgement floor, which is measured independently of this.
+                float provisional = Staleness.StalenessTicks;
+                lead = provisional > gap ? 0f : provisional;
             }
             else
             {
