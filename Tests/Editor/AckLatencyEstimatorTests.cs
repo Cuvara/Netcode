@@ -121,7 +121,10 @@ namespace Cuvara.Netcode.Tests.Editor
             // at `now + latency` instead would let the latency spread shrink the measured
             // snapshot interval -- the estimator takes it as the smallest gap between
             // acknowledgements -- and with it the sweep requirement that interval scales.
-            for (var i = 1; i <= AckLatencyEstimator.MinimumSamples - 1; i++)
+            // Up to MinimumSweepSamples, not MinimumSamples: a sweep verdict below that count
+            // is read from the extremes and is not evidence of anything. See
+            // TheFirstVerdictIsNotTakenFromTheExtremes.
+            for (var i = 1; i <= AckLatencyEstimator.MinimumSweepSamples - 1; i++)
             {
                 now += SnapshotPeriod;
                 e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
@@ -134,7 +137,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 Assert.That(e.FloorTicks, Is.EqualTo(0f), "and it must read zero, not a guess");
             }
 
-            for (var i = AckLatencyEstimator.MinimumSamples; i <= AckLatencyEstimator.MinimumSamples + 4; i++)
+            for (var i = AckLatencyEstimator.MinimumSweepSamples;
+                 i <= AckLatencyEstimator.MinimumSweepSamples + 4;
+                 i++)
             {
                 now += SnapshotPeriod;
                 e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
@@ -562,6 +567,94 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(e.HasEstimate, Is.False,
                 "so no floor is offered, and the lead keeps the round-trip fallback rather than "
                 + "taking a reading ten times the observed minimum.");
+        }
+
+        /// <summary>
+        /// The guard's FIRST verdict must not be its weakest one: a distribution that is
+        /// refused once there are enough observations must not be certified while there are
+        /// few.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>Quantile</c> truncates <c>q * n</c> to an index, so at <c>n = 8</c> the tenth
+        /// percentile is index 0 and the ninetieth is index 7 — the minimum and the maximum.
+        /// The span half of the guard is therefore <c>max - min</c> in that window, which is
+        /// precisely the statistic the guard was rewritten to stop being, and the occupancy
+        /// half does not cover for it: three buckets is a low bar for a body that is merely
+        /// narrow rather than locked.
+        /// </para>
+        /// <para>
+        /// This is the gather-catch shape the class already documents, widened to a body of
+        /// 30-44 ms so that it occupies three buckets of a 67 ms interval. It reads a span of
+        /// 39 ms at <c>n = 8</c> and 14 ms once the quantiles are interior — one is above the
+        /// 33 ms requirement and the other is well below it, from the same distribution. The
+        /// floor it would have offered in the window is taken at index 0 as well:
+        /// <b>0.20 base ticks against a body minimum of 1.81</b>.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheFirstVerdictIsNotTakenFromTheExtremes()
+        {
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 140; i++)
+            {
+                // One in forty caught a gather; the rest are a narrow body that never swept.
+                latencies.Add(i % 40 == 0 ? 0.0034 : 0.0301 + (i % 9) * 0.0018);
+            }
+
+            var all = latencies.ToArray();
+
+            Assert.That(DriveDistribution(all).SweptEnough, Is.False,
+                "precondition: with the quantiles interior this distribution spans about 14 ms "
+                + "of a 67 ms interval and is correctly refused.");
+
+            for (var n = AckLatencyEstimator.MinimumSamples;
+                 n < AckLatencyEstimator.MinimumSweepSamples + 4;
+                 n++)
+            {
+                var prefix = new double[n];
+                Array.Copy(all, prefix, n);
+                var e = DriveDistribution(prefix);
+
+                Assert.That(e.SweptEnough, Is.False,
+                    $"at n = {n} the same refused distribution certified itself as swept. A "
+                    + "guard whose first verdict is its weakest one is worse than no guard: it "
+                    + "passes in exactly the window — the first fraction of a second after a "
+                    + "join or a reset — where nothing else has evidence to contradict it.");
+
+                Assert.That(e.HasEstimate, Is.False,
+                    $"and at n = {n} a floor followed from it. It is taken at index 0 there too, "
+                    + "so it is the minimum of the gather catches rather than of the pipeline, "
+                    + "and WorldViewBinder.TargetLeadTicks would let it DISPLACE the round-trip "
+                    + "fallback rather than merely add to it.");
+            }
+        }
+
+        /// <summary>
+        /// The sample floor for a span verdict is derived from the quantiles, not written down,
+        /// so changing either constant cannot silently reopen the window.
+        /// </summary>
+        [Test]
+        public void TheSweepFloorIsWhereBothQuantilesBecomeInterior()
+        {
+            int n = AckLatencyEstimator.MinimumSweepSamples;
+
+            Assert.That(n, Is.GreaterThanOrEqualTo(AckLatencyEstimator.MinimumSamples),
+                "a sweep verdict can never be offered on fewer observations than a floor needs.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepLowQuantile * n), Is.GreaterThan(0),
+                "at the floor the low quantile must not be the minimum.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepHighQuantile * n), Is.LessThan(n - 1),
+                "at the floor the high quantile must not be the maximum. Note this is 11 for "
+                + "0.10/0.90 and not 10: (int)(0.9 * 10) is 9, which is still the last index "
+                + "of ten.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepLowQuantile * (n - 1)) == 0
+                        || (int)(AckLatencyEstimator.SweepHighQuantile * (n - 1)) >= n - 2,
+                Is.True,
+                "and it must be the SMALLEST such count — one fewer observation must still put "
+                + "a quantile on an extremum, or the floor is costing evidence for nothing.");
         }
     }
 }

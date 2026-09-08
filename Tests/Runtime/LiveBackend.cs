@@ -151,11 +151,24 @@ namespace Cuvara.Netcode.Tests.PlayMode
     /// by doing nothing is the failure this repository has spent days eliminating.
     /// </para>
     /// <para>
-    /// <b>Known duplication.</b> <c>PredictionLatencyMeasurement</c> carries a private copy of
-    /// this logic. Consolidating the two means editing that file, which is verified in the
-    /// Editor against a live stack and whose changes decide whether a run counts — so it is
-    /// deliberately a separate change rather than folded in here. Recorded so the duplication
-    /// is a decision rather than an oversight.
+    /// <b>Cheap and bounded on purpose</b> — a TCP connect with a short timeout, not the auth
+    /// flow. The point is to decide whether to run at all, and a probe that took as long as the
+    /// thing it guards would be its own problem.
+    /// </para>
+    /// <para>
+    /// <b>Any exception here is treated as "unreachable", never as a failure.</b> A throw from
+    /// the probe is the same situation as a refused connection — no backend — and surfacing it
+    /// as a test failure would recreate exactly the bug this method exists to fix.
+    /// </para>
+    /// <para>
+    /// <b>Previously duplicated.</b> <c>PredictionLatencyMeasurement</c> carried a private copy
+    /// of this logic and now calls this one. The two copies were NOT identical: the private one
+    /// observed a faulted connect explicitly and checked <c>TcpClient.Connected</c> afterwards,
+    /// where this one relied on awaiting the connect to throw and never checked whether the
+    /// socket actually opened. <b>The private, stricter body is what survives</b> — the consumer
+    /// whose verdict decides whether a measurement run counts must not have its gate changed by
+    /// a de-duplication, so consolidation moved the stricter implementation up rather than
+    /// pointing the stricter caller at the looser one.
     /// </para>
     /// </remarks>
     public static class LiveBackendProbe
@@ -190,13 +203,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         return $"no {what} at {host}:{port} — connect timed out after {TimeoutMs} ms";
                     }
 
-                    await connect.AsUniTask();
-                    return null;
+                    if (connect.IsFaulted)
+                    {
+                        // Observed deliberately: an unobserved faulted Task would surface
+                        // later as an unrelated error in whatever test runs next.
+                        string why = connect.Exception?.GetBaseException().Message ?? "connect failed";
+                        return $"no {what} at {host}:{port} — {why}";
+                    }
+
+                    return client.Connected
+                        ? null
+                        : $"no {what} at {host}:{port} — the socket did not open";
                 }
             }
             catch (Exception ex)
             {
-                return $"no {what} at {host}:{port} — {ex.GetType().Name}: {ex.Message}";
+                return $"no {what} at {host}:{port} — {ex.Message}";
             }
         }
     }
