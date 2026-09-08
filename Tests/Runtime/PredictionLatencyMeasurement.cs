@@ -453,6 +453,27 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public double SkewPpm;
 
+            /// <summary>
+            /// Whether that rate was reproduced over a doubled baseline, and therefore reached
+            /// the clock at all.
+            /// </summary>
+            /// <remarks>
+            /// <b>Read this before reading the ppm.</b> The envelope fit is a rate only if the
+            /// minimum achievable delay was the same at both anchors; a starved frame loop
+            /// raises that floor and the slope absorbs the rise as rate. False beside a large
+            /// ppm is that artefact being caught. False beside a small one is a session too
+            /// short to have doubled a baseline yet, which is ordinary in the first ~10 s.
+            /// </remarks>
+            public bool RateCorroborated;
+
+            /// <summary>Fits that failed to reproduce over a doubled baseline.</summary>
+            /// <inheritdoc cref="RateCorroborated"/>
+            public int FitsUncorroborated;
+
+            /// <summary>Fits claiming the two clocks differ by more than one percent.</summary>
+            /// <inheritdoc cref="RateCorroborated"/>
+            public int FitsExtraordinary;
+
             /// <summary>Rate correction the predictor's base-tick clock is running with.</summary>
             /// <remarks>1.0 means none is applied — the pre-fix behaviour.</remarks>
             public float ClockRateScale;
@@ -1890,6 +1911,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
             run.SkewPpm = binder.Staleness.SkewPpm;
+            run.RateCorroborated = binder.Staleness.RateCorroborated;
+            run.FitsUncorroborated = binder.Staleness.FitsUncorroborated;
+            run.FitsExtraordinary = binder.Staleness.FitsExtraordinary;
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
             run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
@@ -2080,6 +2104,23 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         ? "   <<< the two clocks run at materially different rates\n" +
                           "                             (a few hundred ppm is two crystals; this is the machine)"
                         : "   (a few hundred is two ordinary crystals)") + "\n" +
+                $"  rate corroborated        {(run.RateCorroborated ? "yes" : "NO")}" +
+                    (run.RateCorroborated
+                        ? "   (reproduced over a doubled baseline, so it is a rate and\n" +
+                          "                             not a delay floor that moved — this is what lets it\n" +
+                          "                             reach the clock)"
+                        : "   <<< THE RATE ABOVE DID NOT REACH THE CLOCK. It did not\n" +
+                          "                             reproduce when the baseline doubled, so it is a\n" +
+                          "                             displacement divided by a baseline, not a rate. Early in\n" +
+                          "                             a session this is simply 'not yet'.") + "\n" +
+                $"  fits uncorroborated      {run.FitsUncorroborated}   " +
+                    "(fits refused for the clock; the AGE still uses the line)\n" +
+                $"  fits extraordinary       {run.FitsExtraordinary}" +
+                    (run.FitsExtraordinary > 0
+                        ? "   <<< a fit claimed the clocks differ by over 1% — either a\n" +
+                          "                             remarkable machine or a measurement across something\n" +
+                          "                             that moved, and both are worth seeing\n"
+                        : "   (no fit claimed more than a 1% clock difference)\n") +
                 $"  clock rate correction    {run.ClockRateScale:F4}x" +
                     (Math.Abs(run.ClockRateScale - 1f) < 1e-4f
                         ? "   (none applied — the clock runs at the client's own rate)"

@@ -117,7 +117,7 @@ height above a running unit-rate floor. `HasEstimate` is true for either strengt
 `IsUsable` still means only "fitted".
 
 **The provisional reading is trusted downwards only.** An unfitted rate drifts the
-residual upward — the 1.103 client/server clock ratio above would read as tens of
+residual upward — a 10% client/server clock ratio would read as tens of
 ticks of "age" inside the warm-up — so the binder takes `min(provisional, derived)`.
 Below the derived figure the reading is evidence; above it, it is drift. That makes
 the warm-up lead never worse than the old fallback and, on the measured localhost
@@ -274,6 +274,35 @@ actually diverged, each with its own counter beside it:
   has not reaped, which `ack floor ack-ahead` names;
 - the estimator **above** the harness: a phase lock, in which case nothing should be offered at
   all and `ACK FLOOR (estimator) … NOT OFFERED` is what prints.
+
+### The fitted rate, and the assumption underneath it
+
+`SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and rate* — by
+drawing a line through two anchors, each the lowest sample of its epoch. The rate is fed to the
+base-tick clock through `LocalMovePredictor.SetClockRateScale`, which is what stops the
+proportional steer drooping against a real clock difference.
+
+**That line is a rate only if the minimum achievable delay is the same at both anchors.** It is
+the whole of the envelope argument and it is not free: if the delay floor rises between them — a
+starved frame loop, a machine that got busy — the later anchor sits above the true line and the
+slope absorbs the displacement as rate. The same machine measured minutes apart read 220 ppm
+idle and **90 636 ppm** inside a loaded test suite; over the 4 s minimum baseline that is a floor
+step of 362 ms, and the client ran its clock 8.3% slow on the strength of it.
+
+The discriminator is baseline, not magnitude. A rate reads the same over any span; a floor step
+fakes `step / baseline` and halves when the baseline doubles. So `RateCorroborated` is true only
+once the reading has reproduced over a **doubled** baseline, and only then does the rate reach
+the clock. Comparing consecutive fits does not work — a decay's change between neighbours falls
+under any fixed tolerance once the baseline is long enough, and a 300 ms step self-corroborates
+at about 25 s on a reading still 12 000 ppm wrong.
+
+Note the split: `IsUsable` gates the **age**, `RateCorroborated` gates the **rate**. A wrong
+slope perturbs a residual slightly, once per snapshot; it perturbs a clock rate every second,
+forever. Those are different evidence bars and they used to share one gate.
+
+In the measurement report, read `rate corroborated` before `clock rate difference`. `NO` beside a
+large ppm is the artefact being caught; `NO` beside a small one, early in a session, is simply a
+baseline that has not doubled yet.
 
 ### Reading a correction figure
 

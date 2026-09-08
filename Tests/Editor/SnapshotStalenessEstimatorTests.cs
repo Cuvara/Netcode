@@ -147,7 +147,9 @@ namespace Cuvara.Netcode.Tests.Editor
         /// <remarks>
         /// This is the property <see cref="WorldViewBinderLeadTests"/> relies on: the caller
         /// takes <c>min(provisional, derived)</c>, so below the derived figure the reading is
-        /// evidence and above it it is drift. The 1.103 ratio here is the real one from
+        /// evidence and above it it is drift. The 1.103 ratio here is a synthetic one, driven
+        /// directly, and exercises the fit at a 10% difference; it was once believed to be this
+        /// machine's real ratio, which it is not — see
         /// <see cref="SnapshotStalenessEstimator.MinimumSkew"/>'s remarks, where an unfitted
         /// rate is at its most dangerous.
         /// </remarks>
@@ -426,15 +428,20 @@ namespace Cuvara.Netcode.Tests.Editor
         /// </summary>
         /// <remarks>
         /// <para>
-        /// The bounds were originally 0.90 and 1.10. The machine this was developed on sits at
-        /// about <b>1.103</b> — the Windows performance counter runs fast against the Linux
-        /// clock the server ticks on — so every fit was refused, <c>IsUsable</c> stayed false
-        /// for a whole session, and the steering fell back to the derived figure with nothing
-        /// reporting it.
+        /// The bounds were originally 0.90 and 1.10 and every fit was refused: <c>IsUsable</c>
+        /// stayed false for a whole session and the steering fell back to the derived figure
+        /// with nothing reporting it. That was attributed to the machine sitting at about
+        /// <b>1.103</b> — the Windows performance counter running fast against the Linux clock
+        /// the server ticks on — and the bounds were widened to admit it.
         /// </para>
         /// <para>
-        /// This is the case that was failing in the field while every test passed, which is
-        /// why it is pinned at a value taken from a real machine rather than at a round number.
+        /// <b>The 1.103 attribution has since been falsified.</b> The same machine, idle,
+        /// measures <b>220 ppm</b> — a ratio of 1.0002 — and only reads 90 000 ppm under load,
+        /// which is a delay-floor step being absorbed as rate rather than a clock difference.
+        /// See <c>SnapshotStalenessEstimator.MinimumSkew</c>. The ratios below are therefore
+        /// SYNTHETIC: they exercise the band at values a machine could in principle sit at, and
+        /// 1.103 is kept because the band still has to admit it, not because anything measured
+        /// it.
         /// </para>
         /// </remarks>
         [TestCase(1.103)]
@@ -520,6 +527,109 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(e2.StalenessTicks, Is.LessThan(1f),
                 "a fresh estimator on a 200 ms link read it as stale rather than as its own " +
                 "baseline, which is what carrying a line across a session boundary does");
+        }
+
+        /// <summary>
+        /// Run a link at a fixed clock ratio for <paramref name="seconds"/>, optionally raising
+        /// the DELAY FLOOR partway through — the failure the envelope fit cannot see by itself.
+        /// </summary>
+        private static SnapshotStalenessEstimator Run(
+            double seconds, double rate = 1.0, double floorStep = 0.0, double stepAt = 0.0)
+        {
+            var e = new SnapshotStalenessEstimator();
+            long tick = 1000;
+            double t0 = ClockOffset + tick / (double)BaseHz;
+            double elapsed = 0;
+
+            while (elapsed < seconds)
+            {
+                double floor = (stepAt > 0 && elapsed >= stepAt) ? floorStep : 0.0;
+                e.Sample(tick, t0 + rate * elapsed + 0.002 + floor, BaseHz);
+                tick += SnapshotEvery;
+                elapsed += Interval;
+            }
+
+            return e;
+        }
+
+        /// <summary>
+        /// A delay floor that rises between the two anchors is not a rate, and must not reach a
+        /// clock as one.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This is the assumption the whole fit rests on, and it went unchecked for three
+        /// releases.</b> A line through two best-case samples is a rate only if the MINIMUM
+        /// ACHIEVABLE DELAY is the same at both. When it is not — a starved frame loop, a
+        /// machine that got busy — the later anchor sits above the true line and the slope
+        /// absorbs the displacement as rate. The estimator documented the assumption in its own
+        /// remarks and then fed the result straight to <c>SetClockRateScale</c>.
+        /// </para>
+        /// <para>
+        /// Live, on one machine minutes apart: idle it read <b>220 ppm</b>, and inside a loaded
+        /// test suite <b>90 636 ppm</b> — a number that cannot be a crystal ratio, because
+        /// crystal ratios do not move 90 000 ppm in ten minutes. The client then ran its
+        /// base-tick clock 8.3% slow on purpose, sat at a three-tick standing error, and
+        /// corrected by three whole steps at every transition. Over the 4 s minimum baseline
+        /// that slope is a delay-floor step of 362 ms, which is an ordinary hitch.
+        /// </para>
+        /// <para>
+        /// What separates the two is baseline. A rate is constant and reads the same over any
+        /// span; a step fakes <c>step / baseline</c> and decays as the baseline grows. So the
+        /// fit may still land — the AGE it reports is still worth having — but
+        /// <see cref="SnapshotStalenessEstimator.RateCorroborated"/> must not.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ADelayFloorStepIsNotARateAndMustNotCorroborate()
+        {
+            // Two clocks that genuinely agree, with a 300 ms delay floor arriving at 6 s.
+            var e = Run(seconds: 30.0, rate: 1.0, floorStep: 0.300, stepAt: 6.0);
+
+            Assert.That(e.IsUsable, Is.True,
+                "precondition: the fit still lands — this is not about refusing to measure");
+
+            Assert.That(e.RateCorroborated, Is.False,
+                "the slope here is a 300 ms displacement divided by whatever baseline it was "
+                + "measured over, so it reads differently every time the baseline grows. A rate "
+                + "does not do that, and nothing that does may reach a clock.");
+        }
+
+        /// <summary>
+        /// A real rate difference reads the same over every baseline, so it corroborates and is
+        /// believed — the guard must not have bought safety by refusing to measure at all.
+        /// </summary>
+        [TestCase(1.0002)]     // the measured truth on the development machine: two crystals
+        [TestCase(1.005)]      // half a percent, an unusual but real pair
+        public void ARealRateDifferenceCorroboratesAndIsBelieved(double rate)
+        {
+            var e = Run(seconds: 30.0, rate: rate);
+
+            Assert.That(e.IsUsable, Is.True, "precondition: a line must be fitted");
+            Assert.That(e.RateCorroborated, Is.True,
+                "a constant rate reads the same over a 4 s baseline and an 8 s one, so "
+                + "successive fits agree and the reading is evidence. Refusing this would "
+                + "reintroduce the failure the 0.90/1.10 bounds produced, by another door.");
+
+            Assert.That(e.SkewPpm, Is.EqualTo((rate - 1.0) * 1e6).Within(CorroborationPpmTolerance),
+                "and the rate it corroborated on must be the real one");
+        }
+
+        private const double CorroborationPpmTolerance = 1500.0;
+
+        /// <summary>
+        /// A rate beyond one percent is counted, because it is either a remarkable machine or a
+        /// measurement taken across something that moved, and both are worth seeing.
+        /// </summary>
+        [Test]
+        public void AnExtraordinaryRateIsCountedRatherThanPassingSilently()
+        {
+            var e = Run(seconds: 30.0, rate: 1.05);
+
+            Assert.That(e.FitsExtraordinary, Is.GreaterThan(0),
+                "SkewPpm's remarks have always said tens of thousands is not skew and is worth "
+                + "an error rather than a correction. Nothing enforced it and the correction "
+                + "was issued anyway; now at least it is visible.");
         }
     }
 }

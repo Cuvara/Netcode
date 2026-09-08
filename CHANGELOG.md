@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fitted clock rate no longer reaches the clock unless it reproduces over a doubled
+  baseline.** `SnapshotStalenessEstimator` fits a line through two best-case samples, and that
+  line is a *rate* only if the **minimum achievable delay was the same at both anchors**. The
+  class documented that assumption and never tested it, and `WorldViewBinder` handed the result
+  straight to `LocalMovePredictor.SetClockRateScale`. When a starved frame loop raises the delay
+  floor, the later anchor sits above the true line and the slope absorbs the displacement **as
+  rate**. Measured on one machine minutes apart: idle, **220 ppm** (a ratio of 1.0002 — two
+  ordinary crystals); inside a loaded PlayMode suite, **90 636 ppm**. A crystal ratio does not
+  move 90 000 ppm in ten minutes. Over the 4 s minimum baseline that slope is a delay-floor step
+  of 362 ms, which is an ordinary hitch — and the client obediently ran its base-tick clock
+  **8.3% slow**, sat at a three-tick standing error, and corrected by three whole steps at every
+  transition. A rate reads the same over any baseline; a floor step fakes `step / baseline` and
+  halves when the baseline doubles, so the new `RateCorroborated` gate requires the reading to
+  reproduce once the baseline has **doubled** — scale-invariant, and needing no threshold on
+  magnitude. `IsUsable` still gates the *age*, which is the right evidence bar for a residual
+  read once per snapshot and the wrong one for a rate applied every second forever.
+
+- **Comparing consecutive fits was not enough, and the guard's own test caught it.** A decaying
+  slope changes by `step * epoch / baseline²` between neighbours, which falls under any fixed
+  tolerance once the baseline is long enough — a 300 ms floor step self-corroborates at about
+  25 s on a reading still 12 000 ppm wrong. Requiring the baseline to double makes a pure decay
+  disagree by half of itself at every scale.
+
+- **A rate beyond one percent is counted rather than passing silently.** `SkewPpm` has always
+  said a few hundred ppm is two crystals and that tens of thousands "is worth an error rather
+  than a correction"; nothing enforced it. `FitsExtraordinary` now counts them and the
+  measurement reports them. It is a counter and not an unconditional refusal on purpose: refusing
+  outright would permanently disable rate correction on a machine whose ratio genuinely is
+  extraordinary, which is the failure the original 0.90/1.10 bounds produced, arriving by another
+  door. Such a reading still has to corroborate like every other.
+
+### Changed
+
+- **`MinimumSkew`/`MaximumSkew` are left at 0.75/1.33, and the reasoning recorded with them is
+  corrected.** They were widened from 0.90/1.10 on the belief that the development machine's true
+  clock ratio is **1.103**; that figure is now believed to have been this same delay-floor
+  artefact, since the same Windows-Editor/Linux-container pair measures 1.0002 when idle. The
+  mass refusals that justified widening were most likely the clamp working. The bounds are
+  **not** narrowed back, because narrowing would not have caught the artefact that prompted this
+  — the live skew was **0.9169**, comfortably inside the old bounds — and because an artefact and
+  a rate are not distinguished by magnitude at all, but by whether the reading survives a change
+  of baseline. `LocalMovePredictor`'s rate-scale clamps are the reciprocals of these two and are
+  therefore also unchanged; no behaviour changes for a client on a genuinely odd clock beyond the
+  corroboration requirement above. Every comment and test remark claiming 1.103 as a *measured*
+  ratio has been rewritten to say where the figure came from and why it is not trusted — the
+  `[TestCase(1.103)]` cases are kept and relabelled as synthetic, because the band still has to
+  admit such a ratio.
+
+
 ### Added
 
 - **`AckLatencyEstimator` — the pipeline constant the staleness envelope absorbs.** The client

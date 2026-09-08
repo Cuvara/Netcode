@@ -707,7 +707,23 @@ namespace Cuvara.Netcode.View
                         // carries no rate at all, and a rate wired into this clock from a
                         // short baseline is the failure SnapshotStalenessEstimator's remarks
                         // record twice, once reaching 613 ticks.
-                        if (Staleness.IsUsable)
+                        //
+                        // AND GATED ON RateCorroborated, WHICH IS THE FIX FOR A THIRD.
+                        //
+                        // The envelope fit is only a rate if the minimum achievable delay was
+                        // the same at both anchors. That assumption was documented and never
+                        // tested, and the fit resting on it was handed straight to a clock. A
+                        // starved frame loop raises the delay floor, the later anchor sits
+                        // above the true line, and the slope absorbs the rise AS RATE: one
+                        // machine minutes apart read 220 ppm idle and 90 636 ppm inside a
+                        // loaded suite, and the client obediently ran its clock 8.3% slow and
+                        // sat at a three-tick standing error.
+                        //
+                        // IsUsable is the right gate for the AGE and the wrong one for the
+                        // RATE. A wrong slope perturbs a residual slightly, once per snapshot;
+                        // it perturbs a clock rate every second, forever. Different evidence
+                        // requirements, and they used to share one gate.
+                        if (Staleness.IsUsable && Staleness.RateCorroborated)
                         {
                             _predictor.SetClockRateScale(
                                 (float)(1.0 / (1.0 + Staleness.SkewPpm / 1e6)));

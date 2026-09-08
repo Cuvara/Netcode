@@ -91,7 +91,8 @@ namespace Cuvara.Netcode.Tests.Editor
             long tick = 1000;
             double t0 = ClockOffset + tick / (double)BaseHz;
 
-            // The 1.103 client/server clock ratio from MinimumSkew's remarks. With no fit
+            // A synthetic 1.103 client/server clock ratio — see MinimumSkew's remarks, which
+            // record that this figure was once believed measured and was an artefact. With no fit
             // the residual drifts upward without bound; the clamp is what stops the steering
             // target from following it.
             for (var i = 0; i < 40; i++)

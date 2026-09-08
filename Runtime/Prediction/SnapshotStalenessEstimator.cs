@@ -129,14 +129,37 @@ namespace Cuvara.Netcode.Prediction
         /// impossible has to be chosen against what is merely unusual, and the first attempt
         /// got that wrong.
         ///
-        /// <para><b>These were 0.90 and 1.10, and that was too tight to be useful.</b> On the
-        /// machine this was developed on the true ratio is about <b>1.103</b> — the Windows
-        /// performance counter runs fast against the Linux clock the server ticks on, and the
-        /// snapshot stream the client observes advances at 54.4 base ticks per client second
-        /// against a nominal 60. So every fit was refused, <c>IsUsable</c> stayed false for a
-        /// whole session, and the steering silently fell back to the derived figure. Nothing
-        /// reported it: <c>SkewPpm</c> reads 0 when there is no fit, which is indistinguishable
-        /// from two clocks that agree.</para>
+        /// <para><b>These were 0.90 and 1.10, and every fit was refused.</b> <c>IsUsable</c>
+        /// stayed false for a whole session and the steering silently fell back to the derived
+        /// figure, with nothing reporting it: <c>SkewPpm</c> reads 0 when there is no fit,
+        /// which is indistinguishable from two clocks that agree. The refusals were read at the
+        /// time as the bounds being too tight against a machine whose true ratio was believed
+        /// to be about <b>1.103</b> — the Windows performance counter running fast against the
+        /// Linux clock the server ticks on, with the observed snapshot stream advancing at 54.4
+        /// base ticks per client second against a nominal 60 — and the bounds were widened to
+        /// admit it.</para>
+        ///
+        /// <para><b>THAT 1.103 FIGURE WAS AN ARTEFACT, AND THE BOUNDS REST ON IT.</b> The same
+        /// Windows-Editor/Linux-container pair, measured twice minutes apart on one machine,
+        /// read <b>220 ppm</b> — a ratio of 1.0002, two ordinary crystals — when the Editor was
+        /// idle, and <b>90 636 ppm</b> when it was inside a loaded test suite. A crystal ratio
+        /// does not move 90 000 ppm in ten minutes. What moves is the DELAY FLOOR: this fit is
+        /// a line through two best-case samples and is a rate only if the minimum achievable
+        /// delay was the same at both, and a starved frame loop raises that floor so the later
+        /// anchor sits above the true line and the slope absorbs the displacement as rate. Over
+        /// the 4 s minimum baseline, 90 636 ppm is a floor step of 362 ms — an ordinary hitch.
+        /// So the mass refusals that justified widening these bounds were most likely the
+        /// clamp working: artefact slopes being correctly rejected, on a machine whose real
+        /// ratio is 1.0002.</para>
+        ///
+        /// <para><b>The bounds are left where they are anyway, and that is deliberate.</b>
+        /// Narrowing them back to 0.90/1.10 would not have caught the artefact that prompted
+        /// this: the live reading was a skew of <b>0.9169</b>, comfortably inside the old
+        /// bounds. A clamp on the magnitude was never the right instrument, because an artefact
+        /// and a rate are not told apart by size. They are told apart by whether the reading
+        /// survives a change of baseline, which is what <see cref="CorroborationPpm"/> now
+        /// tests and what gates the rate reaching a clock. Changing these numbers would be
+        /// motion without evidence; the figure they were justified by is what was wrong.</para>
         ///
         /// <para>A third either way still rejects what this is for. A client predicting at the
         /// wrong tick rate — 60 against a 15 Hz server, the failure the clamp exists to catch —
@@ -148,6 +171,77 @@ namespace Cuvara.Netcode.Prediction
 
         /// <inheritdoc cref="MinimumSkew"/>
         public const double MaximumSkew = 1.33;
+
+        /// <summary>
+        /// How closely two successive fits must agree, in ppm, before the rate is believed
+        /// enough to run a clock on.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The assumption this checks, and why it needed checking.</b> The envelope fit is
+        /// valid only if the MINIMUM ACHIEVABLE DELAY is the same at both anchors — that is
+        /// what makes a line through two best-case samples a rate rather than an accident. The
+        /// class documented that assumption and never tested it, and a fit built on it was fed
+        /// straight to a clock.
+        /// </para>
+        /// <para>
+        /// When the assumption fails the failure is not small and it does not look like noise.
+        /// If the delay floor rises between the anchors — a starved frame loop, a machine that
+        /// got busy — the later anchor sits above the true line and the slope absorbs the rise
+        /// as RATE. Measured on one machine minutes apart: idle, <b>220 ppm</b>, which is two
+        /// ordinary crystals; inside a loaded test suite, <b>90 636 ppm</b>, which is nothing,
+        /// because a crystal ratio cannot move 90 000 ppm in ten minutes. Over the 4 s minimum
+        /// baseline that slope is a delay-floor step of 362 ms, which is an ordinary hitch.
+        /// The client then ran its base-tick clock <b>8.3% slow on purpose</b> and sat at a
+        /// three-tick standing error.
+        /// </para>
+        /// <para>
+        /// <b>What separates the two.</b> A rate is constant, so it reads the same over any
+        /// baseline. A floor step is a fixed displacement, so the slope it fakes is
+        /// <c>step / baseline</c> and SHRINKS as the baseline grows. The anchors here are kept
+        /// until <see cref="MaximumBaselineSeconds"/>, so the baseline grows between fits for
+        /// free: requiring two successive fits to agree is therefore the same test as
+        /// requiring the slope to survive a change of baseline, and it needs no new threshold
+        /// to say what "too big" means.
+        /// </para>
+        /// <para>
+        /// A thousand ppm is roughly four times the fit noise the minimum baseline admits — a
+        /// millisecond of residual jitter over 4 s reads as 250 ppm — so a real rate
+        /// corroborates comfortably while a slope decaying as 1/baseline cannot.
+        /// </para>
+        /// <para>
+        /// <b>The comparison is against a baseline at least twice as long, and that is not a
+        /// detail.</b> Comparing consecutive fits is not enough: a decaying slope
+        /// <c>D / baseline</c> changes by <c>D * epoch / baseline²</c> between neighbours, which
+        /// falls below any fixed tolerance once the baseline is long enough — a 300 ms floor
+        /// step self-corroborates at about 25 s, on a reading still 12 000 ppm wrong. The
+        /// first version of this guard did exactly that and its own test caught it.
+        /// Requiring the baseline to DOUBLE makes the test scale-invariant instead: a pure
+        /// decay always disagrees by half of itself, whatever the baseline, while a constant
+        /// rate agrees at every scale.
+        /// </para>
+        /// </remarks>
+        public const double CorroborationPpm = 1000.0;
+
+        /// <summary>
+        /// Beyond this, a fitted rate is extraordinary and is counted as such.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="SkewPpm"/> has always said that a few hundred ppm is two crystals and
+        /// that tens of thousands "is not skew — it is a tick rate that does not match what
+        /// the server is actually running, and it is worth an error rather than a correction".
+        /// Nothing enforced it and the correction was issued anyway. One percent is an order
+        /// of magnitude above any real oscillator pair and an order of magnitude below the
+        /// artefact above, which is what makes it a useful place to draw the line.
+        ///
+        /// <para><b>It is counted, not refused outright, and that is deliberate.</b> An
+        /// unconditional refusal here would permanently disable rate correction on a machine
+        /// whose ratio genuinely is extraordinary — which is exactly the failure the original
+        /// 0.90/1.10 bounds produced, arriving through a different door. A reading this large
+        /// still has to CORROBORATE before it reaches the clock, like every other, and it is
+        /// reported so a run that hits it says so rather than quietly steering on it.</para>
+        /// </remarks>
+        public const double ExtraordinarySkewPpm = 10_000.0;
 
         private double _offset;
         private double _skew = 1.0;
@@ -163,6 +257,12 @@ namespace Cuvara.Netcode.Prediction
         // baseline the rate is fitted over.
         private double _anchorX, _anchorY;
         private bool _haveAnchor;
+
+        // The reference fit the next corroboration is judged against: its rate and the
+        // baseline it was measured over. See CorroborationPpm for why the baseline matters.
+        private double _referenceFitPpm;
+        private double _referenceFitBaseline;
+        private bool _haveReferenceFit;
 
         // The current epoch's lowest sample so far.
         private double _bestX, _bestY, _bestResidual;
@@ -212,7 +312,7 @@ namespace Cuvara.Netcode.Prediction
         /// <para>
         /// <b>The provisional reading is deliberately only trusted downwards.</b> An unfitted
         /// rate drifts the residual, and it drifts it UPWARD when the client's clock runs fast
-        /// — the 1.103 ratio in <see cref="MinimumSkew"/>'s remarks would read as tens of ticks
+        /// — a 10% ratio, of the kind <see cref="MinimumSkew"/>'s remarks discuss, would read as tens of ticks
         /// of "age" within the warm-up. So the caller must clamp the provisional reading by the
         /// guess it replaces and take the smaller: below the guess the reading is evidence,
         /// above it it is drift, and the clamp makes this strictly safer than the old fallback
@@ -233,6 +333,30 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public double SkewPpm => _haveFit ? (_skew - 1.0) * 1e6 : 0.0;
 
+        /// <summary>
+        /// Whether the fitted rate has been reproduced by a second fit over a longer baseline,
+        /// and is therefore safe to run a clock on. See <see cref="CorroborationPpm"/>.
+        /// </summary>
+        /// <remarks>
+        /// <b>Separate from <see cref="IsUsable"/> on purpose.</b> A single fit is good enough
+        /// to report an AGE with — the residual above the line, which a wrong slope perturbs
+        /// only slightly over one snapshot — and not good enough to set a clock's RATE with,
+        /// where the same wrong slope is applied every second forever. The two readings have
+        /// different evidence requirements and used to share one gate.
+        /// </remarks>
+        public bool RateCorroborated { get; private set; }
+
+        /// <summary>Fits accepted but not yet reproduced by a second one. See <see cref="CorroborationPpm"/>.</summary>
+        public int FitsUncorroborated { get; private set; }
+
+        /// <summary>Fits whose rate exceeded <see cref="ExtraordinarySkewPpm"/>.</summary>
+        /// <remarks>
+        /// Nonzero is worth reading even when the fit later corroborates: it means the two
+        /// clocks are claimed to differ by more than one percent, which is either a remarkable
+        /// machine or a measurement taken across something that moved.
+        /// </remarks>
+        public int FitsExtraordinary { get; private set; }
+
         /// <summary>Wall-clock span the current rate estimate was fitted over, in seconds.</summary>
         public double BaselineSeconds { get; private set; }
 
@@ -247,8 +371,9 @@ namespace Cuvara.Netcode.Prediction
         /// Reported because a refusal is otherwise invisible: <see cref="SkewPpm"/> reads 0
         /// without a fit, which looks exactly like two clocks that agree. A bound set too
         /// tightly therefore disables the measurement for a whole session and says nothing —
-        /// which is what happened at the original 0.90/1.10, against a machine whose true
-        /// ratio is 1.103.
+        /// which is what happened at the original 0.90/1.10. Note that the 1.103 ratio that
+        /// episode was attributed to is now believed to have been a delay-floor artefact
+        /// rather than a real clock difference; see <see cref="MinimumSkew"/>.
         /// </remarks>
         public int FitsRefused { get; private set; }
 
@@ -377,6 +502,41 @@ namespace Cuvara.Netcode.Prediction
                     _haveFit = true;
                     BaselineSeconds = span;
                     Fits++;
+
+                    double ppm = (skew - 1.0) * 1e6;
+                    if (Math.Abs(ppm) > ExtraordinarySkewPpm)
+                    {
+                        FitsExtraordinary++;
+                    }
+
+                    // CORROBORATION. A rate reads the same over any baseline; a delay-floor
+                    // step fakes a slope of step/baseline, which halves when the baseline
+                    // doubles. So the reference is only re-examined once the baseline has
+                    // doubled, and a decay then disagrees by half of itself at every scale.
+                    // See CorroborationPpm for the measurement that made this necessary and
+                    // for why comparing consecutive fits is not enough.
+                    if (!_haveReferenceFit)
+                    {
+                        _referenceFitPpm = ppm;
+                        _referenceFitBaseline = span;
+                        _haveReferenceFit = true;
+                        RateCorroborated = false;
+                    }
+                    else if (span >= _referenceFitBaseline * 2.0)
+                    {
+                        if (Math.Abs(ppm - _referenceFitPpm) <= CorroborationPpm)
+                        {
+                            RateCorroborated = true;
+                        }
+                        else
+                        {
+                            FitsUncorroborated++;
+                            RateCorroborated = false;
+                        }
+
+                        _referenceFitPpm = ppm;
+                        _referenceFitBaseline = span;
+                    }
                 }
                 else
                 {
