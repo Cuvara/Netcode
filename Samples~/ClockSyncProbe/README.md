@@ -33,6 +33,9 @@ made refusals a counter; this scene makes them a colour.
 | jitter up to 100 ms | the envelope fit shrugs it off — the lower envelope is exactly the samples jitter cannot push down |
 | **Stall a frame** | one 250 ms `deltaTime`; `ClampedFrames` ticks up instead of the clock burst-advancing |
 | **Step server clock +5 s** | a restart on a new tick origin; `HardResyncs` moves, `Snaps` does not |
+| **drag Send Hz to 15** | the phase histogram collapses to one bar and the sweep verdict flips to REFUSED — the send cadence now equals the snapshot rate |
+| **drag Send Hz back to 13** | all eight buckets fill within about a second and a floor is offered again |
+| **drag Send Hz to 12** | it still sweeps, but only four phases are ever visited: `gcd(12, 15) = 3`. At 60 fps the frame period hides the difference; above it, it shows |
 
 ## What is real and what is synthetic
 
@@ -44,10 +47,48 @@ so a number seen here is directly comparable with one seen there.
 
 ## Files
 
-- `Scripts/ClockSyncProbe.cs` — the two clocks, the delivery queue, the readout.
-- `UI/ClockSyncProbeView.uxml` / `.uss` — UI Toolkit panel; the meter is the one picture.
+- `Scripts/ClockSyncProbe.cs` — the two clocks, the delivery queue, the send loop, the readout.
+- `UI/ClockSyncProbeView.uxml` / `.uss` — UI Toolkit panel; the meter and the phase histogram are the two pictures.
 - `UI/ClockSyncProbePanel.asset` — PanelSettings, shared theme.
 - `Scenes/ClockSyncProbe.unity` — a camera and a `UIDocument`; everything else is script.
+
+## Send cadence — why the client does not send at 15 Hz
+
+The second panel is about a different measurement: `AckLatencyEstimator` recovers the
+pipeline constant `uplink + snapshot age` by timing an input to the first snapshot that
+acknowledges it. That interval is `uplink + wait-for-the-next-snapshot + age`, and since the
+wait is the only term that varies, its **minimum** converges on the constant.
+
+That argument holds only while the wait sweeps. A client sending at exactly the snapshot rate
+locks the two cadences in phase: every observation carries the same fixed wait, and the
+minimum reads high by up to a whole snapshot interval. The estimator detects this and refuses
+to offer anything — correctly, because a lead that is too large is worse than one that is too
+small, and a phase-locked client holds no evidence about its own constant.
+
+**Refusing correctly is not the same as being finished.** With the fallback rounding to zero
+on a fast link, the term was unobtainable in principle for such a client. No statistic or
+guard could have closed it: they all describe a distribution that was never generated. The
+only fix is to generate it, by offsetting the cadence — which is what `InputCadence` does, and
+what the slider here lets you undo.
+
+**The nominal-vs-achieved line is the one to watch.** The cadence you set and the cadence that
+goes out are different numbers whenever the send loop re-derives its deadline from whenever it
+woke: `await Delay(period)` discards the frame-quantisation remainder every iteration, and at
+60 fps that collapses every nominal rate in (12, 15] onto 12 Hz. `LocalMovePredictor` has always
+measured the achieved interval and nothing read it. This panel reads it, next to the nominal, and
+says so loudly when they disagree.
+
+**The frame rate can be the binding constraint, not the cadence.** Acknowledgements are read on a
+render frame, so the wait resolves only to a frame period: `k = fps / snapshotHz` caps how many
+phases can be *told apart*, however many the cadence *visits*. Against a 15 Hz snapshot rate that
+means **45 fps minimum** — below it the occupancy test cannot reach three buckets and no cadence
+passes. At 30 fps, 11, 12, 13 and 14 Hz are all refused. The panel says which constraint is
+binding rather than leaving you to infer it from a bare REFUSED.
+
+The histogram divides the snapshot interval into the same eight buckets
+`AckLatencyEstimator.SweepBuckets` counts occupancy over, so what is on screen is the shape
+the guard is judging rather than a restatement of its verdict. Empty buckets are drawn dim
+rather than omitted: "three of eight" should be legible as a picture.
 
 ## Raise delivery floor — the defect v0.34.0 closes
 

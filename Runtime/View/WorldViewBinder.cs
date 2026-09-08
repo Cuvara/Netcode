@@ -334,6 +334,65 @@ namespace Cuvara.Netcode.View
         public AckLatencyEstimator AckLatency { get; } = new AckLatencyEstimator();
 
         /// <summary>
+        /// The rate the acknowledgement floor's seconds-to-ticks conversion uses: the measured
+        /// one where there is a measurement, the advertised one until then.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The measured rate is the correct factor, not merely the safer one.</b>
+        /// <see cref="AckLatencyEstimator"/> uses this only to turn a duration in CLIENT seconds
+        /// into base ticks, and <see cref="TickRateEstimator.EstimatedHz"/> is "server ticks per
+        /// client second" — the two units match by construction. Converting with the advertised
+        /// rate instead makes a client whose clock runs fast by <c>e</c> report a floor
+        /// <c>(1+e)</c> too large, and the steering lead over-lead by <c>e × floor</c>.
+        /// </para>
+        /// <para>
+        /// <b>The fallback is guarded and counted, not silent.</b> Until the estimator has a
+        /// measurement there is nothing to convert with but the advertised rate — and a fallback
+        /// is another claim about the same quantity, not an absence of one. Every fallback in
+        /// this area that went wrong went wrong by being invisible: a floor truncated to whole
+        /// ticks contributing zero while still taking its branch, a round trip rounding to zero
+        /// on a fast link, a clamp saturating and delivering its bound on every call. So the
+        /// substitution is visible in <see cref="AckFloorRateIsFallback"/> and countable in
+        /// <see cref="AckFloorRateFallbacks"/>, and a consumer is expected to report it.
+        /// </para>
+        /// <para>
+        /// Zero when there is neither — no predictor and no estimate — which
+        /// <c>RecordAck</c> refuses outright rather than converting with a made-up rate.
+        /// </para>
+        /// </remarks>
+        public float AckFloorConversionHz
+        {
+            get
+            {
+                if (TickRate.HasEstimate && TickRate.EstimatedHz > 0f)
+                {
+                    return TickRate.EstimatedHz;
+                }
+
+                return _predictor?.TickRateHz ?? 0f;
+            }
+        }
+
+        /// <summary>
+        /// Whether <see cref="AckFloorConversionHz"/> is currently the advertised rate standing
+        /// in for a measurement that does not exist yet.
+        /// </summary>
+        public bool AckFloorRateIsFallback => !(TickRate.HasEstimate && TickRate.EstimatedHz > 0f);
+
+        /// <summary>
+        /// Acknowledgements folded in using the advertised rate because no measured one was
+        /// available. Counted so a fallback that never stops being one is visible.
+        /// </summary>
+        /// <remarks>
+        /// A handful at the start of a session is the normal case — the tick rate estimator
+        /// needs snapshots before it can report. A count that keeps climbing means the estimator
+        /// never reached an estimate, and every floor on that session was converted with a rate
+        /// nobody measured.
+        /// </remarks>
+        public int AckFloorRateFallbacks { get; private set; }
+
+        /// <summary>
         /// Tells the binder an input has just been sent, so its acknowledgement can be timed.
         /// </summary>
         /// <param name="inputTick">The tick stamped on the input, as handed to <c>SendInput</c>.</param>
@@ -529,11 +588,14 @@ namespace Cuvara.Netcode.View
             // second step of the live 2.00 against a floor of 1.00 -- so truncation did not
             // merely cost accuracy here, it was the reason the term stayed open.
             //
-            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it in the
-            // units that are actually uncertain: the part of the wait's range never swept,
-            // measured rather than assumed. The reading still cannot exceed the evidence held,
-            // and it now goes to zero only when nothing swept, instead of whenever the link is
-            // fast enough that the constant is under one base tick.
+            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it where the
+            // bias actually IS: the floor is the tenth percentile of `constant + wait`, so on a
+            // swept link it sits 0.1 * S above the constant BY CONSTRUCTION, on every clean run.
+            // That measured offset is what it subtracts, using the ladder slope fitted from the
+            // run's own observations. It reads zero -- and says so, via FloorCorrectionRefusals
+            // -- only when the ladder is not straight and the model predicting the bias is
+            // therefore false, instead of whenever the link is fast enough that the constant is
+            // under one base tick.
             float ackLead = AckLatency.HasEstimate ? AckLatency.ConservativeFloorTicks : 0f;
 
             // THE FLOOR DISPLACES THE ROUND TRIP RATHER THAN ADDING TO IT, BECAUSE THEY
@@ -723,13 +785,45 @@ namespace Cuvara.Netcode.View
                         // old the snapshot is when the client acts on it, and it is the part
                         // that varies with a client's join phase.
                         // The ADVERTISED rate, not the one measured off the wire. The
-                        // measurement converts a tick to a time, so it has to use the rate the
-                        // server stamped that tick at; an estimate's error becomes a drift
-                        // against the wall clock, and a 57.7 Hz reading of a 60 Hz server took
-                        // this from a stable figure to 613 ticks and climbing in under a
+                        // measurement converts a TICK NUMBER to a time -- `snapshotTick /
+                        // baseHz` -- so it has to use the rate the server stamped that tick
+                        // at; an estimate's error becomes a drift against the wall clock that
+                        // grows with the tick counter, and a 57.7 Hz reading of a 60 Hz server
+                        // took this from a stable figure to 613 ticks and climbing in under a
                         // minute, dragging the steering with it.
                         Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
-                        AckLatency.RecordAck(world.AckTick, nowSeconds, _predictor.TickRateHz);
+
+                        // THE MEASURED RATE, AND THAT IS NOT A CONTRADICTION OF THE COMMENT
+                        // ABOVE -- these two lines convert different things and want different
+                        // rates, which is why they no longer share a justification.
+                        //
+                        // AckLatencyEstimator uses baseHz for exactly one purpose: turning a
+                        // DURATION in client seconds into a number of base ticks
+                        // (`FloorSeconds * baseHz`). It never converts a tick number to a time,
+                        // so the drift that broke the staleness fit cannot arise here -- there
+                        // is no growing tick counter for an error to accumulate against, only a
+                        // few tens of milliseconds.
+                        //
+                        // And for a duration the measured rate is the CORRECT one, not merely
+                        // the safer one. EstimatedHz is "server ticks per CLIENT second", which
+                        // is exactly the factor a duration measured on the client's clock needs.
+                        // With the advertised rate instead, a client whose clock runs fast by
+                        // `e` reports a floor `(1+e)` too large and the steering lead -- which
+                        // is compared against the server's own tick numbers -- over-leads by
+                        // `e * floor`. Bounded at 0.02 * floor on any run the validity gate
+                        // admits, and measured at 0.068 base ticks on a refused arm: small,
+                        // real, and in the over-lead direction this estimator exists to avoid.
+                        //
+                        // It also does not matter whether the disagreement is a fast client or
+                        // a slow server. Both produce an error of `advertised/measured - 1` and
+                        // both take this same correction, so the fix does not depend on
+                        // attributing it -- which is fortunate, because nothing here can.
+                        //
+                        // The round-trip term at TargetLeadTicks already converts with the
+                        // measured rate. This was the same kind of quantity converted two ways
+                        // in one class.
+                        if (AckFloorRateIsFallback) AckFloorRateFallbacks++;
+                        AckLatency.RecordAck(world.AckTick, nowSeconds, AckFloorConversionHz);
 
                         // RATE FIRST, THEN PHASE. The steering below is proportional and
                         // has no integral term, so any rate difference it is left to absorb

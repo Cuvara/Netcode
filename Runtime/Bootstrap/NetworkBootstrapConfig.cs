@@ -1,4 +1,5 @@
 using UnityEngine;
+using Cuvara.Netcode.Prediction;
 using Shared.GameLogic.Components;
 
 namespace Cuvara.Netcode.Bootstrap
@@ -43,8 +44,11 @@ namespace Cuvara.Netcode.Bootstrap
         [SerializeField] private string mapId = "map_01";
 
         [Header("Input")]
-        [Tooltip("Input sends per second. Matches the server's simulation rate; GameConstants.DefaultTickRate is 15.")]
-        [SerializeField] private int inputRateHz = GameConstants.DefaultTickRate;
+        [Tooltip("Input sends per second. Deliberately OFFSET from the snapshot rate, not equal to it: " +
+                 "sending at the snapshot rate phase-locks the two and makes the acknowledgement floor " +
+                 "unmeasurable. Default is InputCadence.RecommendedSendHz(15) = 13. See InputCadence.")]
+        [SerializeField] private int inputRateHz =
+            InputCadence.RecommendedSendHz(GameConstants.DefaultTickRate);
 
         [Tooltip("Send a slow circular movement direction so positions visibly change. " +
                  "Off sends a zero vector, which the server treats as 'no movement'.")]
@@ -69,7 +73,34 @@ namespace Cuvara.Netcode.Bootstrap
 
         public string MapId => mapId;
 
-        public int InputRateHz => inputRateHz < 1 ? GameConstants.DefaultTickRate : inputRateHz;
+        /// <summary>
+        /// Input sends per second.
+        /// </summary>
+        /// <remarks>
+        /// <b>This is a send cadence, not a tick rate, and it must not equal the snapshot
+        /// rate.</b> The tooltip here used to read "matches the server's simulation rate",
+        /// which was wrong twice over: the server advertises <c>tick_rate = 60</c>
+        /// (<c>MovementHz</c>), and <c>GameConstants.DefaultTickRate</c> is 15, the World
+        /// group rate — which is the rate SNAPSHOTS go out at. Anchoring sends to it locked
+        /// the two cadences in phase and made the pipeline constant unmeasurable. See
+        /// <see cref="InputCadence"/>.
+        /// <para>
+        /// An existing config asset still holds whatever was serialised into it, so changing
+        /// the default above does not change an asset already on disk. <c>NetworkBootstrap</c>
+        /// therefore reports the cadence it is actually using and whether it sweeps, rather
+        /// than overriding a value somebody chose on purpose.
+        /// </para>
+        /// </remarks>
+        public int InputRateHz =>
+            inputRateHz < 1
+                ? InputCadence.RecommendedSendHz(GameConstants.DefaultTickRate)
+                : inputRateHz;
+
+        /// <summary>
+        /// The rate snapshots are expected at, which the send cadence must stay offset from.
+        /// The server's <c>WorldHz</c>, NOT the <c>tick_rate</c> it advertises.
+        /// </summary>
+        public int SnapshotRateHz => GameConstants.DefaultTickRate;
 
         public bool SendSyntheticInput => sendSyntheticInput;
 

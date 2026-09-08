@@ -2,9 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Sockets;
 using System.Threading;
-using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
 using Cuvara.Netcode.Client;
@@ -390,13 +388,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// With <see cref="ReplayedSteps"/>, this is the evidence that the loop closed.
             /// A high hit rate is the HEALTHY reading — the history path is the accurate one
             /// and replaying is its fallback — so a run of all hits and no replays says the
-            /// client's clock is tracking, not that nothing happened.
+            /// client's clock is tracking, not that nothing happened. Misses, on the other
+            /// hand, are not all replays: read <see cref="Adoptions"/> beside this, because
+            /// a miss with nothing to replay drops the lead instead.
             /// </remarks>
             public int HistoryHits;
 
             /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
             /// <inheritdoc cref="HistoryHits"/>
             public int HistoryMisses;
+
+            /// <summary>
+            /// Reconciles that took the server's position wholesale — the fallback ran and
+            /// rebuilt nothing on top of it. <c>LocalMovePredictor.Adoptions</c>.
+            /// </summary>
+            /// <remarks>
+            /// The third outcome, and the one that used to be invisible: a miss with
+            /// nothing left to replay discards the client's whole prediction lead, which is
+            /// the largest correction the predictor can make, while
+            /// <see cref="ReplayedSteps"/> and <see cref="HistoryHits"/> both stand still.
+            /// This is the counter that makes a low <see cref="ReplayedSteps"/> beside a
+            /// nonzero <see cref="HistoryMisses"/> readable rather than reassuring.
+            /// </remarks>
+            public int Adoptions;
 
             /// <summary>Round trip the session reported, milliseconds.</summary>
             public long RoundTripMs;
@@ -405,12 +419,38 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float AckFloorMeasuredTicks;
 
             /// <summary>
-            /// What the lead actually received from it: the floor less its own unswept
-            /// uncertainty. Printed beside the raw floor because the gap between them is the
-            /// measurement's own error bar, and reading only one of the two is how the
+            /// What the lead actually received from it: the floor less the tenth percentile's
+            /// own construction bias. Printed beside the raw floor because the gap between them
+            /// is exactly what was subtracted, and reading only one of the two is how the
             /// truncated version looked healthy while contributing nothing.
             /// </summary>
             public float AckFloorContributionTicks;
+
+            /// <summary>
+            /// The bias removed from the floor, in base ticks — <c>FloorPercentile × slope</c>,
+            /// with the slope fitted from the run's own ladder.
+            /// </summary>
+            public float AckFloorBiasTicks;
+
+            /// <summary>The fitted ladder slope the correction was computed from, base ticks.</summary>
+            public float AckFloorLadderSlopeTicks;
+
+            /// <summary>The worst ladder residual on the estimator's own fit, base ticks.</summary>
+            public float AckFloorLadderResidualTicks;
+
+            /// <summary>Whether the last acknowledgement's contribution is corrected or refused.</summary>
+            public bool AckFloorCorrected;
+
+            /// <summary>
+            /// Acknowledgements that offered a floor whose ladder was refused, so the lead got
+            /// NOTHING from the estimator.
+            /// </summary>
+            /// <remarks>
+            /// <b>Printed whether it is zero or not.</b> A contribution of zero reads identically
+            /// to "the link is instant" in every other figure on this report, and an invisible
+            /// fallback is how three defects reached this package.
+            /// </remarks>
+            public int AckFloorCorrectionRefusals;
 
             /// <summary>Inputs an acknowledgement drained without timing. See AckLatencyEstimator.</summary>
             public int AckFloorSuperseded;
@@ -518,6 +558,57 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="AckObservations"/>
             public float AckObservationMedian;
 
+            /// <summary>The rate the floor's seconds-to-ticks conversion actually used.</summary>
+            public float AckFloorConversionHz;
+
+            /// <summary>Acknowledgements converted with the advertised rate for want of a measured one.</summary>
+            public int AckFloorRateFallbacks;
+
+            /// <summary>
+            /// The quantiles <see cref="AckObservationLadderQuantiles"/> of the estimator's own
+            /// observation ring, in base ticks — read as a LINE, not as a set of candidates.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>Why six points and not the two that were here before.</b> One observation is
+            /// <c>constant + wait</c>, and the wait sweeps uniformly across a snapshot interval
+            /// once the send cadence is offset from the snapshot cadence. If that model holds,
+            /// the quantiles are AFFINE in <c>q</c>: <c>quantile(q) = C + q · S</c>, with
+            /// <c>S</c> the snapshot interval in base ticks. So the ladder answers two
+            /// questions that no single statistic can:
+            /// </para>
+            /// <list type="bullet">
+            /// <item><description>
+            /// the <b>slope</b> says whether the sweep really covers a whole snapshot interval.
+            /// A slope near <c>S</c> means the wait swept; a slope well under it means the
+            /// observations occupy only part of the range and the floor is measuring something
+            /// narrower than advertised.
+            /// </description></item>
+            /// <item><description>
+            /// the <b>intercept</b> is the pipeline constant, recovered independently of any
+            /// one quantile — which is the whole point. <c>FloorPercentile</c> is the tenth,
+            /// so the floor reads <c>C + 0.1 · S</c> and is biased UP by <c>0.1 · S</c> by
+            /// construction on a uniformly swept link. On the first live run to offer a floor
+            /// at all, that predicted <c>C ≈ 0.07</c> from p10 and <c>C ≈ 0.15</c> from the
+            /// median against a measured floor of 0.47 — agreeing to 1.3 ms, and implicating
+            /// the statistic rather than the route.
+            /// </description></item>
+            /// </list>
+            /// <para>
+            /// <b>Two points were not enough, and that is the reason this exists.</b> The
+            /// reading above is a two-point fit, and a span between two order statistics has
+            /// been silent about the distribution it stood for three separate times in this
+            /// work. A regression through six is not a stronger statistic; it is a different
+            /// kind of claim — it can be INCONSISTENT, and an inconsistent ladder falsifies the
+            /// model rather than returning a plausible number from it.
+            /// </para>
+            /// </remarks>
+            public float[] AckObservationLadder;
+
+            /// <summary>The quantiles <see cref="AckObservationLadder"/> is sampled at.</summary>
+            public static readonly double[] AckObservationLadderQuantiles =
+                { 0.00, 0.10, 0.25, 0.50, 0.75, 0.90 };
+
             /// <summary>Fits that failed to reproduce over a doubled baseline.</summary>
             /// <inheritdoc cref="RateCorroborated"/>
             public int FitsUncorroborated;
@@ -597,7 +688,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             /// <summary>Base ticks between consecutive snapshots, measured off the wire.</summary>
             /// <remarks>
-            /// Measured, not <c>LiveBackendConfig.TickRate</c>. That constant is the harness's
+            /// Measured, not <c>LiveBackendConfig.FallbackTickRate</c>. That constant is the harness's
             /// SEND cadence and its own fallback, and this file already carries the lesson
             /// about printing a configured constant in a slot where a measurement belongs —
             /// see the <c>effective speed</c> line. The two happen to coincide at 60/15 and
@@ -1118,7 +1209,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // report and names what is missing. A test that quietly goes green by doing
             // nothing is the failure this repository has spent two days eliminating, and
             // it is not being reintroduced in the one place whose job is honest numbers.
-            string unreachable = await FirstUnreachableAsync();
+            string unreachable = await LiveBackendProbe.FirstUnreachableAsync();
             if (unreachable != null)
             {
                 Assert.Ignore(
@@ -1127,6 +1218,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "by its 'LiveBackend' category. " + LiveBackendConfig.Describe());
             }
 
+            Debug.Log("[Measure] config provenance: " + LiveBackendConfig.DescribeProvenance());
             Debug.Log("[Measure] endpoints: " + LiveBackendConfig.Describe() +
                       "\n[Measure] NOTE: the tickRate above is only a FALLBACK. The rate " +
                       "actually predicted with comes from the server and is reported per run below.");
@@ -1217,6 +1309,54 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // silently annotated one gets quoted six months later. Inconclusive rather than
             // failed, because nothing here says the code is wrong -- only that this run cannot
             // say whether it is.
+            // THE RUN MUST HAVE MEASURED THE SERVER IT WAS CONFIGURED FOR, AND THIS IS
+            // CHECKED RATHER THAN PRINTED.
+            //
+            // Three times in one day an experiment ran to completion against the wrong object
+            // and produced internally consistent numbers: a game server that never registered
+            // in Redis so the gateway routed elsewhere; a `dotnet test` that re-ran a stale
+            // assembly; and an S-halving run whose environment never crossed the WSL/Windows
+            // boundary, so it measured the 15 Hz server while the 30 Hz one sat idle. In every
+            // case the output looked exactly as a SUCCESSFUL run was predicted to look, which
+            // is precisely why a human reading the log is not a sufficient check.
+            //
+            // The comparison is in TICKS, deliberately, because a tick count is skew-invariant.
+            // Comparing measured Hz against configured Hz would false-fail on a client whose
+            // clock is fast -- the very arm where the ladder is still readable -- since a 9%
+            // fast clock makes a healthy stream look 9% slow. The gap between snapshots in base
+            // ticks is a property of the server's own schedule and is unaffected by how fast
+            // the observer's clock runs.
+            if (withPrediction.SnapshotGapTicks > 0 &&
+                withPrediction.TickRateInUse > 0 &&
+                LiveBackendConfig.SnapshotRateHz > 0)
+            {
+                int expectedGap = (int)Math.Round(
+                    withPrediction.TickRateInUse / (double)LiveBackendConfig.SnapshotRateHz);
+
+                // A QUARTER OF THE EXPECTED GAP, not exact equality. The gap is an estimate off
+                // the wire and can wobble by a tick; failing a healthy run for that would make
+                // this gate the thing people disable. A routing error is not a wobble -- it is
+                // the gap doubling or halving -- so a tolerance of 25% separates the two
+                // cleanly: at an expected 4 it admits 3..5, and still catches the 2 that a
+                // 30 Hz configuration landing on a 15 Hz server produces.
+                if (expectedGap > 0 &&
+                    Math.Abs(withPrediction.SnapshotGapTicks - expectedGap) > expectedGap * 0.25)
+                {
+                    Assert.Inconclusive(
+                        "WRONG SERVER, not a result: this run was configured for a " +
+                        $"{LiveBackendConfig.SnapshotRateHz} Hz snapshot rate, which at " +
+                        $"{withPrediction.TickRateInUse} Hz base is {expectedGap} base ticks " +
+                        $"between snapshots — but it measured {withPrediction.SnapshotGapTicks}, " +
+                        $"i.e. about {withPrediction.TickRateInUse / (double)withPrediction.SnapshotGapTicks:F1} Hz. " +
+                        "The gateway routed this client somewhere other than the server the " +
+                        "configuration names. Every figure below is internally consistent and " +
+                        "about the wrong object. Check that the intended game server is " +
+                        "registered in Redis for this map, and that the environment actually " +
+                        "reached the process — on Windows launched from WSL that needs WSLENV. " +
+                        "Provenance for this run: " + LiveBackendConfig.DescribeProvenance());
+                }
+            }
+
             if (withPrediction.MeasuredTickRate > 0f && withPrediction.TickRateInUse > 0)
             {
                 double wireGap = (withPrediction.MeasuredTickRate - withPrediction.TickRateInUse)
@@ -1257,11 +1397,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
             //
             // It was written when replaying was the only thing a reconcile could do, and it
             // asked the right question — did the loop close? — through the only counter that
-            // then answered it. Reconcile now has two paths. The history path compares the
+            // then answered it. Reconcile now has THREE outcomes. The history path compares the
             // client's own recorded position AT THE SNAPSHOT'S TICK against the authoritative
             // one, applies the difference, and returns: like for like, so there is nothing
             // left to replay and ReplayedSteps stays at zero. Replaying is the FALLBACK, for
-            // when the history does not reach back far enough.
+            // when the history does not reach back far enough. And a miss with nothing left
+            // to replay ADOPTS: it takes the server's position outright, which is not a
+            // comparison at all — so Adoptions is deliberately NOT added to the sum below.
+            // A run made entirely of adoptions HAS run its reconcile loop and has still
+            // never tested prediction against the server, which is what this guard asks.
             //
             // So the old guard reads "the fallback fired at least once", and a client whose
             // clock tracks the server perfectly hits the history path every time and trips
@@ -1278,7 +1422,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "replayed. Prediction ran open-loop, so its agreement with the server is " +
                 "untested and this measurement proves nothing about reconciliation. " +
                 "(Zero REPLAYED steps alone is not that: it is the normal reading when the " +
-                "history reaches every snapshot, which is what a client in step produces.)");
+                "history reaches every snapshot, which is what a client in step produces. " +
+                $"Adoptions: {withPrediction.Adoptions} — those are misses that compared " +
+                "nothing, and they do not count towards this guard.)");
 
             // NOT asserted: MaxCorrection > 0 on the healthy run.
             //
@@ -1539,68 +1685,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "healthy run above is meaningless rather than reassuring.");
         });
 
-        /// <summary>
-        /// Names the first backend endpoint that cannot be reached, or null when both can.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// <b>Cheap and bounded on purpose</b> — a TCP connect with a short timeout, not
-        /// the auth flow. The point is to decide whether to run at all, and a probe that
-        /// took as long as the thing it guards would be its own problem.
-        /// </para>
-        /// <para>
-        /// <b>Any exception here is treated as "unreachable", never as a failure.</b> A
-        /// throw from the probe is the same situation as a refused connection — no
-        /// backend — and surfacing it as a test failure would recreate exactly the bug
-        /// this method exists to fix.
-        /// </para>
-        /// </remarks>
-        private static async UniTask<string> FirstUnreachableAsync()
-        {
-            string gateway = await ProbeAsync(
-                LiveBackendConfig.GatewayHost, LiveBackendConfig.GatewayPort, "gateway");
-            if (gateway != null) return gateway;
-
-            // Nakama is contacted first by the run, so an unreachable one fails earlier
-            // and more confusingly than the gateway. Both are checked.
-            return await ProbeAsync(
-                LiveBackendConfig.NakamaHost, LiveBackendConfig.NakamaPort, "Nakama");
-        }
-
-        private const int ProbeTimeoutMs = 1500;
-
-        private static async UniTask<string> ProbeAsync(string host, int port, string what)
-        {
-            try
-            {
-                using (var client = new TcpClient())
-                {
-                    Task connect = client.ConnectAsync(host, port);
-                    Task finished = await Task.WhenAny(connect, Task.Delay(ProbeTimeoutMs)).AsUniTask();
-
-                    if (finished != connect)
-                    {
-                        return $"no {what} at {host}:{port} — connect timed out after {ProbeTimeoutMs} ms";
-                    }
-
-                    if (connect.IsFaulted)
-                    {
-                        // Observed deliberately: an unobserved faulted Task would surface
-                        // later as an unrelated error in whatever test runs next.
-                        string why = connect.Exception?.GetBaseException().Message ?? "connect failed";
-                        return $"no {what} at {host}:{port} — {why}";
-                    }
-
-                    return client.Connected
-                        ? null
-                        : $"no {what} at {host}:{port} — the socket did not open";
-                }
-            }
-            catch (Exception ex)
-            {
-                return $"no {what} at {host}:{port} — {ex.Message}";
-            }
-        }
+        // The reachability probe lives in LiveBackendProbe (Tests/Runtime/LiveBackend.cs).
+        // This file used to carry a private copy; the copy here was the stricter of the two
+        // and is what was promoted, so the verdict this gate reads is unchanged.
 
         /// <param name="forceDivergence">
         /// Send a zero vector while predicting a non-zero one, so the server acknowledges
@@ -1659,7 +1746,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             var settings = PredictionSettings.FromServer(
                 client.TickRate,
-                fallbackTickRate: LiveBackendConfig.TickRate,
+                fallbackTickRate: LiveBackendConfig.FallbackTickRate,
                 LiveBackendConfig.PlayerSpeed,
                 MapBounds.Default);
 
@@ -1734,7 +1821,21 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             // The SEND cadence, which is a client choice and deliberately not the server's
             // integration rate. Conflating the two is what produced the defect above.
-            float dt = 1f / LiveBackendConfig.TickRate;
+            // PINNED, and offset from the snapshot rate. Two separate fixes in one line:
+            //
+            // 1. The cadence is InputSendHz (13 Hz against a 15 Hz snapshot rate), not the
+            //    prediction fallback it used to share a constant with. Sending at the
+            //    snapshot rate phase-locks the two and AckLatencyEstimator refuses to offer
+            //    a floor -- which is what this harness measured live at median 61.9 ms.
+            //
+            // 2. The schedule is pinned. PumpAsync spins to an ABSOLUTE deadline and returns
+            //    on the first frame at or past it, so a fixed per-send `dt` was ceil-
+            //    quantised to the frame grid and the remainder discarded every iteration.
+            //    At 60 fps a nominal 13 Hz would have arrived as 12 Hz -- coprime lost,
+            //    four phases instead of thirteen -- and the cadence change would have
+            //    measured something other than what it configured.
+            var schedule = new InputSendSchedule();
+            schedule.Start(LiveBackendConfig.InputSendHz, Time.realtimeSinceStartupAsDouble);
 
             // Let the world arrive and the local entity spawn before measuring.
             // Deliberately NOT sampled for corrections: measurement starts when the
@@ -1756,7 +1857,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
                     binder.NoteInputSent(tick);
-                    await PumpAsync(client, binder, localId, dt, ct, corrections);
+
+                    schedule.NoteSent(Time.realtimeSinceStartupAsDouble);
+                    var wait = (float)Math.Max(
+                        0.0, schedule.SecondsUntilDue(Time.realtimeSinceStartupAsDouble));
+
+                    await PumpAsync(client, binder, localId, wait, ct, corrections);
                     lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
 
@@ -2079,6 +2185,17 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckObservations = binder.AckLatency.Samples;
             run.AckObservationP10 = binder.AckLatency.ObservationQuantileTicks(0.10);
             run.AckObservationMedian = binder.AckLatency.ObservationQuantileTicks(0.50);
+            run.AckFloorConversionHz = binder.AckFloorConversionHz;
+            run.AckFloorRateFallbacks = binder.AckFloorRateFallbacks;
+
+            // The whole ladder off the SAME ring, in one pass, so the six points describe one
+            // distribution rather than six moments of a moving one.
+            run.AckObservationLadder = new float[Run.AckObservationLadderQuantiles.Length];
+            for (var q = 0; q < Run.AckObservationLadderQuantiles.Length; q++)
+            {
+                run.AckObservationLadder[q] =
+                    binder.AckLatency.ObservationQuantileTicks(Run.AckObservationLadderQuantiles[q]);
+            }
             run.StalenessTicks = binder.Staleness.StalenessTicks;
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
@@ -2092,6 +2209,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
             run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
+            run.AckFloorBiasTicks = binder.AckLatency.FloorBiasTicks;
+            run.AckFloorLadderSlopeTicks = binder.AckLatency.LadderSlopeTicks;
+            run.AckFloorLadderResidualTicks = binder.AckLatency.LadderWorstResidualTicks;
+            run.AckFloorCorrected = binder.AckLatency.FloorCorrectionApplied;
+            run.AckFloorCorrectionRefusals = binder.AckLatency.FloorCorrectionRefusals;
             run.AckFloorSuperseded = binder.AckLatency.Superseded;
             run.AckFloorAhead = binder.AckLatency.AckAheadOfSend;
             run.AckFloorOffered = binder.AckLatency.HasEstimate;
@@ -2114,6 +2236,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.SmoothedCorrections = predictor.SmoothedCorrections;
                 run.HistoryHits = predictor.HistoryHits;
                 run.HistoryMisses = predictor.HistoryMisses;
+                run.Adoptions = predictor.Adoptions;
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
                 run.IntegrationTimestepMs = predictor.IntegrationTimestep * 1000f;
                 run.SmoothingSpanMs = predictor.EffectiveSmoothingSpan * 1000f;
@@ -2147,7 +2270,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
             double until = Time.realtimeSinceStartupAsDouble + seconds;
             double last = Time.realtimeSinceStartupAsDouble;
 
-            while (Time.realtimeSinceStartupAsDouble < until)
+            // AT LEAST ONE FRAME, ALWAYS. With a pinned send schedule the caller can ask for
+            // a wait of zero -- it is already due, because the previous frame overran the
+            // period -- and a plain `while` would return without pumping, so the caller's
+            // loop would send again with no frame in between. That is a burst at the server's
+            // input drain and it collapses the phase relationship the acknowledgement floor
+            // is measured from: every input in the burst lands inside one snapshot interval
+            // and is superseded. Pumping one frame keeps the loop a loop.
+            do
             {
                 binder.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
                 binder.Tick(client.World, localId);
@@ -2163,9 +2293,190 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                 await UniTask.Yield(PlayerLoopTiming.Update, ct);
             }
+            while (Time.realtimeSinceStartupAsDouble < until);
         }
 
         // ---- reporting ----
+
+        /// <summary>
+        /// The client's own frame rate, and what it does to the resolution of every
+        /// acknowledgement observation on this run.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This number was already being computed and was not printed, which made every
+        /// quantile below it uninterpretable.</b> Acknowledgements are read on a render frame,
+        /// so an observation cannot be finer than a frame period — the frame rate is not a
+        /// nuisance parameter here, it decides whether the pipeline constant is measurable at
+        /// all.
+        /// </para>
+        /// <para>
+        /// <b>The degenerate case is exactly 60 fps against a 60 Hz base tick.</b> A frame is
+        /// then 16.67 ms, which is precisely ONE base tick; sends and acknowledgement reads
+        /// both land on frames, so every observation is an integer number of base ticks and
+        /// the constant is unrecoverable at any value. Simulated, that run returns quantiles
+        /// of 2.00 / 2.00 / 4.00 whatever constant is injected. A PlayMode run with no vsync
+        /// is usually far above 60 and therefore resolves fractional ticks — the first live
+        /// run to offer a floor showed a p10 of 0.47 t = 7.83 ms, which is itself proof the
+        /// client was above 128 fps, since no shorter observation can exist than one frame.
+        /// </para>
+        /// <para>
+        /// So a reading is quoted with the frame rate it was taken at, or it is not a reading.
+        /// </para>
+        /// </remarks>
+        private static string DescribeClientFrameRate(Run run)
+        {
+            if (run.ObservedFps <= 0f)
+            {
+                return "  client frame rate        not measured\n";
+            }
+
+            float frameMs = 1000f / run.ObservedFps;
+            float frameTicks = run.TickRateInUse > 0 ? run.TickRateInUse / run.ObservedFps : 0f;
+
+            // One base tick per frame is the case where the ladder cannot resolve anything.
+            bool degenerate = frameTicks > 0.95f && frameTicks < 1.05f;
+
+            return
+                $"  client frame rate        {run.ObservedFps:F0} fps ({frameMs:F2} ms/frame" +
+                    (frameTicks > 0f ? $" = {frameTicks:F2} base ticks)" : ")") +
+                    "   <<< the resolution limit of every ack\n" +
+                "                             observation below: acknowledgements are read on a frame, so\n" +
+                "                             nothing finer than one frame can be measured\n" +
+                    (degenerate
+                        ? "                             *** ONE FRAME == ONE BASE TICK: every observation is an\n" +
+                          "                             integer number of ticks and the pipeline constant is NOT\n" +
+                          "                             recoverable from this run at any value. ***\n"
+                        : string.Empty);
+        }
+
+        /// <summary>
+        /// The acknowledgement-observation quantiles as a LINE: the six points, the slope
+        /// fitted through them, and the intercept that slope implies.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This exists because choosing between two statistics is not a measurement.</b>
+        /// One observation is <c>constant + wait</c> and the wait sweeps a snapshot interval,
+        /// so the quantiles should be <c>C + q · S</c> — a straight line whose slope is the
+        /// swept range and whose intercept is the pipeline constant. Reading it that way
+        /// recovers <c>C</c> without trusting any single quantile, which is what the argument
+        /// over <c>FloorPercentile</c> actually needs.
+        /// </para>
+        /// <para>
+        /// <b>Read the slope first.</b> If it is near the snapshot interval the sweep is real
+        /// and the intercept means something. If it is well under, the observations cover only
+        /// part of the range: the floor is then measuring a narrower distribution than the
+        /// model assumes and the intercept is not the constant. A ladder that is not straight
+        /// falsifies the model instead of returning a number from it, which is the property
+        /// two points could never have.
+        /// </para>
+        /// <para>
+        /// The fit is an ordinary least squares through the six <c>(q, quantile)</c> pairs.
+        /// Deliberately not weighted and deliberately not clever: the point is to see whether
+        /// the points lie on a line, and a residual is more informative here than a better
+        /// estimator would be.
+        /// </para>
+        /// </remarks>
+        private static string DescribeAckLadder(Run run)
+        {
+            float[] ladder = run.AckObservationLadder;
+            double[] quantiles = Run.AckObservationLadderQuantiles;
+
+            if (ladder == null || ladder.Length != quantiles.Length || run.AckObservations == 0)
+            {
+                return "  ack quantile ladder      not sampled (no observations were timed)\n";
+            }
+
+            var points = new System.Text.StringBuilder();
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                if (i > 0) points.Append("  ");
+                points.Append($"q{quantiles[i] * 100:00}={ladder[i]:F2}");
+            }
+
+            // Ordinary least squares through (q, ticks).
+            double meanQ = 0, meanY = 0;
+            for (var i = 0; i < ladder.Length; i++) { meanQ += quantiles[i]; meanY += ladder[i]; }
+            meanQ /= ladder.Length;
+            meanY /= ladder.Length;
+
+            double sxy = 0, sxx = 0;
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                double dq = quantiles[i] - meanQ;
+                sxy += dq * (ladder[i] - meanY);
+                sxx += dq * dq;
+            }
+
+            double slope = sxx > 0 ? sxy / sxx : 0.0;
+            double intercept = meanY - slope * meanQ;
+
+            // How far the points stray from the line: a straight ladder is the evidence that
+            // the sweep model applies at all.
+            double worst = 0;
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                double residual = Math.Abs(ladder[i] - (intercept + slope * quantiles[i]));
+                if (residual > worst) worst = residual;
+            }
+
+            // The interval the wait is supposed to sweep, from the estimator's own measurement
+            // of it rather than from a configured rate.
+            double intervalTicks = run.SnapshotGapTicks;
+            string slopeVerdict = intervalTicks <= 0
+                ? "(no snapshot interval measured to compare against)"
+                : slope >= intervalTicks * 0.75
+                    ? $"~ the {intervalTicks} t snapshot interval: the wait swept it"
+                    : $"WELL UNDER the {intervalTicks} t snapshot interval: the wait covered only\n" +
+                      "                             part of the range, so the intercept is NOT the constant";
+
+            return
+                $"  ack quantile ladder      {points}   (base ticks, one ring, one pass)\n" +
+                $"  ladder slope             {slope:F2} t per unit q   {slopeVerdict}\n" +
+                $"  ladder intercept         {intercept:F2} base ticks   " +
+                    "<<< the pipeline constant implied by the LINE,\n" +
+                "                             independent of any single quantile. FloorPercentile is the\n" +
+                $"                             tenth, so the RAW floor above should read about this + {slope * 0.10:F2},\n" +
+                "                             and the CORRECTED one — `ack floor in the lead` — should read\n" +
+                "                             about the intercept itself. That is the whole of the floor\n" +
+                "                             correction, stated as a falsifiable comparison rather than a\n" +
+                "                             claim: if the two disagree, the correction is not doing what\n" +
+                "                             this line says it does.\n" +
+                // q00's DISTANCE FROM THE LINE -- REPORTED AS A DATUM, NOT AS A DETECTOR.
+                //
+                // It is natural to read this as the left-tail test: a spurious short observation
+                // drags q00 down, and a left tail is what makes a minimum unusable. IT DOES NOT
+                // WORK, and the number is printed with that written next to it so nobody
+                // re-derives the idea and trusts it.
+                //
+                // Measured over 300 seeds against the real distribution: clean runs give
+                // +0.01..+0.05, and a run with ONE spurious observation in 128 gives
+                // -0.11..+0.11. The ranges overlap almost entirely, and no threshold separates
+                // them -- at -0.10 it catches 3% of contaminated runs, and at -0.12 or beyond,
+                // none. The reason is the same mechanism that defeats the residual and defeats a
+                // leave-one-out variant: q00 is one of the six fitted points, so when it drops
+                // the least-squares line follows it down and the DIFFERENCE barely moves.
+                //
+                // So there is currently NO test here for sparse left-tail contamination. The one
+                // known cause is counted directly by `ack floor ack-ahead`; an unknown cause
+                // would be invisible to everything this harness prints. That is a real gap and
+                // it is stated rather than papered over with a statistic that looks like a test.
+                $"  ladder q00 vs the line   {ladder[0] - intercept:+0.00;-0.00} base ticks   " +
+                    "(a datum, NOT a left-tail test — see the note in\n" +
+                "                             DescribeAckLadder: clean and contaminated runs overlap\n" +
+                "                             and no threshold separates them)\n" +
+                $"  ladder worst residual    {worst:F2} base ticks   " +
+                    // Scale-free rather than a magic number: a straight ladder should not
+                    // stray by more than a tenth of the range it spans. Tying the tolerance
+                    // to the fitted slope keeps it meaningful at any snapshot rate, and
+                    // stops it being a constant somebody later tunes to make a run look good.
+                    (worst > Math.Abs(slope) * 0.10
+                        ? "<<< the points are NOT on a line; the sweep model does\n" +
+                          "                             not describe this distribution and the intercept above is\n" +
+                          "                             not a constant. Read the ladder, not the fit.\n"
+                        : "(the points lie on a line, so the model holds here)\n");
+        }
 
         private static void Report(Run run)
         {
@@ -2182,12 +2493,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  pending peak             {run.PendingPeak}\n" +
                 $"  reconciles               {run.Reconciles}\n" +
                 $"  replayed steps           {run.ReplayedSteps}   " +
-                    "(zero is the HEALTHY reading — replaying is the fallback for when the\n" +
-                "                             history does not reach the snapshot's tick; see the next line)\n" +
+                    "(zero is healthy ONLY WHEN 'missed' below is zero. This line USED to\n" +
+                "                             say zero was healthy outright, and that was wrong: a miss\n" +
+                "                             with nothing left to replay does not replay, it ADOPTS —\n" +
+                "                             read the two lines below together, never this one alone)\n" +
                 $"  reconciles from history  {run.HistoryHits} hit, {run.HistoryMisses} missed" +
                     ((run.HistoryHits + run.ReplayedSteps) == 0 && run.Reconciles > 0
                         ? "   <<< NOTHING closed the loop"
                         : "   <<< THE LOOP CLOSING — compared at the snapshot's own tick") + "\n" +
+                $"  adopted wholesale        {run.Adoptions} of {run.HistoryMisses} misses" +
+                    (run.Adoptions > 0
+                        ? "   <<< THE LEAD THROWN AWAY, not corrected — the\n" +
+                          "                             biggest move the predictor makes, and it moves no\n" +
+                          "                             other counter. Nonzero means the clock is behind the\n" +
+                          "                             snapshots: read TARGET LEAD and SNAPSHOT AGE"
+                        : "   (zero — every miss rebuilt something on top of the\n" +
+                          "                             server's answer)") + "\n" +
                 $"  corrections smoothed     {run.SmoothedCorrections}" +
                     "   (ANY nonzero error, over every reconcile — a floor, not a fault:\n" +
                 "                             ~2 per sample is what two free-running clocks cost\n" +
@@ -2222,6 +2543,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     HoldWindowNote(run) + "\n" +
                 $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
+                DescribeClientFrameRate(run) +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
                     WireRateNote(run) + "\n" +
                 // ── THE CLOCK OFFSET ────────────────────────────────────────────────────
@@ -2274,6 +2596,21 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "(the estimator's OWN distribution — the\n" +
                 "                             harness floor below is 20 samples at a different phase and is\n" +
                 "                             not a reference for it)\n" +
+                DescribeAckLadder(run) +
+                // WHICH RATE THE FLOOR WAS CONVERTED WITH, AND HOW OFTEN THAT WAS A FALLBACK.
+                //
+                // The floor is a duration in client seconds; turning it into base ticks needs
+                // server-ticks-per-client-second, which is the MEASURED rate. The advertised
+                // rate stands in until the estimator has a measurement, and that substitution
+                // is printed rather than left silent -- every fallback in this area that went
+                // wrong went wrong by being invisible. A handful at the start of a session is
+                // normal; a count that keeps climbing means no measured rate ever arrived and
+                // every floor on this run was converted with a rate nobody measured.
+                $"  ack floor converted at   {run.AckFloorConversionHz:F2} Hz   " +
+                    (run.AckFloorRateFallbacks > 0
+                        ? $"({run.AckFloorRateFallbacks} acknowledgement(s) used the ADVERTISED\n" +
+                          "                             rate because no measured one was available yet)\n"
+                        : "(the measured wire rate throughout; no fallback)\n") +
                 $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
                     (run.AckFloorOffered
                         ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +
@@ -2283,10 +2620,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
                             : "   <<< NOT OFFERED: the wait never swept, so the\n" +
                               "                             minimum is not evidence about the floor. The lead keeps\n" +
                               "                             the round-trip fallback.") + "\n" +
+                $"  ack floor bias removed   {run.AckFloorBiasTicks:F2} base ticks   " +
+                    $"(= FloorPercentile {AckLatencyEstimator.FloorPercentile:F2} x the\n" +
+                $"                             estimator's own ladder slope {run.AckFloorLadderSlopeTicks:F2} t. The floor is a\n" +
+                "                             QUANTILE of `constant + wait`, so on a swept link it sits that\n" +
+                "                             far above the constant BY CONSTRUCTION, on every clean run.)\n" +
                 $"  ack floor in the lead    {run.AckFloorContributionTicks:F2} base ticks   " +
-                    "(the floor less its unswept uncertainty — what the\n" +
-                "                             lead actually received. Fractional on purpose: truncating\n" +
-                "                             this to whole ticks is what left the term open.)\n" +
+                    (run.AckFloorCorrected
+                        ? "<<< the CORRECTED floor — what the lead actually\n" +
+                          "                             received. Fractional on purpose: truncating this to whole\n" +
+                          "                             ticks is what left the term open.\n"
+                        : "<<< CORRECTION REFUSED — the lead got NOTHING\n" +
+                          "                             from the estimator. The ladder is not straight, so the\n" +
+                          "                             affine model that predicts the bias does not describe this\n" +
+                          "                             distribution and there is nothing to subtract. Refused\n" +
+                          "                             rather than handed to a statistic chosen to survive it.\n") +
+                "  ack floor correction     " +
+                    (run.AckFloorCorrected ? "applied" : "REFUSED") + ", " +
+                    $"{run.AckFloorCorrectionRefusals} refusal(s), ladder worst residual " +
+                    $"{run.AckFloorLadderResidualTicks:F2} t\n" +
+                    $"                             (tolerance is {AckLatencyEstimator.LadderStraightnessFraction:F2} x the fitted slope = " +
+                    $"{run.AckFloorLadderSlopeTicks * (float)AckLatencyEstimator.LadderStraightnessFraction:F2} t;\n" +
+                    "                             printed whether or not it fired, because a zero contribution\n" +
+                    "                             reads exactly like an instant link everywhere else here)\n" +
                 $"  ack floor refused        {run.AckFloorRefused}   " +
                     "(observations too long to be a floor — stalls, not routes)\n" +
                 $"  ack floor ack-ahead      {run.AckFloorAhead}" +

@@ -291,8 +291,58 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Reconciles answered by comparing at the snapshot's own tick.</summary>
         public int HistoryHits { get; private set; }
 
-        /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
+        /// <summary>Reconciles that fell back to replaying, the history not having answered.</summary>
+        /// <remarks>
+        /// Counts every reconcile that did not take the history path, for whatever reason:
+        /// the ring not reaching back to the snapshot's tick, a tick of zero, or a caller on
+        /// the two-argument <see cref="Reconcile(Vec2,long)"/> that supplied no tick at all.
+        /// With <see cref="HistoryHits"/> it partitions <see cref="Reconciles"/> exactly,
+        /// which is what makes either one readable on its own.
+        /// </remarks>
         public int HistoryMisses { get; private set; }
+
+        /// <summary>
+        /// Reconciles that took the authoritative position <b>wholesale</b> — the fallback
+        /// ran and rebuilt nothing on top of it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The third reconcile outcome, and the largest correction this class can
+        /// make.</b> A history HIT compares like for like and moves the prediction by the
+        /// disagreement alone. A history MISS normally replays the base ticks the server
+        /// has not seen, which keeps everything the client did after the snapshot's tick.
+        /// An ADOPTION does neither: the fallback found nothing to replay — an empty
+        /// pending buffer, and a snapshot tick that is not behind the client's clock, so
+        /// the held-forward branch (#53) does not fire either — and the prediction is set
+        /// to the server's position with the client's entire lead thrown away.
+        /// </para>
+        /// <para>
+        /// <b>A nonzero value means the prediction was reset that many times, not
+        /// corrected.</b> It reads on a live server as a backward tug at the snapshot rate
+        /// whose size is the lead — the artefact #53 named — but where #53 was the motion
+        /// being dropped, this is the drop itself going uncounted:
+        /// <see cref="ReplayedSteps"/> does not move, <see cref="HistoryHits"/> does not
+        /// move, and only <see cref="HistoryMisses"/> hints that anything happened at all.
+        /// A run measured at 115 hits and 34 misses reported <c>replayed steps 2</c>; the
+        /// other 32 misses were adoptions, and no counter in the class showed them.
+        /// </para>
+        /// <para>
+        /// <b>Zero is the healthy reading, and it is implied by
+        /// <see cref="HistoryMisses"/> being zero</b> — a hit can never adopt. Nonzero
+        /// therefore always comes with misses, and says the client's clock has not reached
+        /// the tick the snapshot describes, so the history cannot answer for a moment the
+        /// client has not lived through yet. Read it against the lead and the snapshot age,
+        /// not against the correction magnitudes: the correction here is not a
+        /// disagreement about position, it is the lead being discarded.
+        /// </para>
+        /// <para>
+        /// Counted by comparing <see cref="ReplayedSteps"/> across the fallback rather than
+        /// by testing the branch conditions, so a replay that runs its loop and produces no
+        /// step — a lapsed hold, a movement model that refuses every step — is counted as
+        /// the adoption it is. What is counted is the outcome, not the route to it.
+        /// </para>
+        /// </remarks>
+        public int Adoptions { get; private set; }
 
         private Vec2 _tickStart;
         private long _tickStartTick;
@@ -980,12 +1030,34 @@ namespace Cuvara.Netcode.Prediction
                 return;
             }
 
-            if (serverBaseTick != NoServerTick && serverBaseTick > 0)
-            {
-                HistoryMisses++;
-            }
+            // EVERY RECONCILE THAT REACHES HERE IS A MISS, including the ones that could not
+            // have been anything else.
+            //
+            // This counted only when a usable snapshot tick had been supplied, which mirrored
+            // the hit's gate -- and the mirror is wrong. The hit needs the tick because there
+            // is nothing to compare AT without one; the miss needs nothing, because it is the
+            // statement that the history did not answer, and an absent tick is a reason for
+            // that rather than an exemption from it.
+            //
+            // What the gate produced: a two-argument caller with an empty pending buffer took
+            // the authoritative position wholesale and moved neither HistoryHits, nor
+            // HistoryMisses, nor ReplayedSteps. Adoptions saw it -- it is measured off the
+            // fallback's outcome, below, and has no such gate -- but the pair a reader
+            // consults first reported that no reconcile had happened at all. That caller is
+            // the one that cannot supply a tick, and therefore the one least able to work out
+            // why its readings stood still.
+            //
+            // The invariant now holds for both overloads: after seeding,
+            // HistoryHits + HistoryMisses == Reconciles.
+            HistoryMisses++;
 
             DropAcknowledged(ackTick);
+
+            // What the fallback rebuilds is measured, not assumed: if neither branch below
+            // runs a single step, `replayed` is still exactly `authoritative` and this
+            // reconcile ADOPTED the server's position rather than correcting towards it.
+            // See Adoptions for why that outcome needs a name of its own.
+            int stepsBeforeReplay = ReplayedSteps;
 
             // Rewind to what the server says, then re-run the base-tick timeline it has
             // not seen. Not one step per pending input: the server integrates the held
@@ -1144,6 +1216,11 @@ namespace Cuvara.Netcode.Prediction
                         ReplayedSteps++;
                     }
                 }
+            }
+
+            if (ReplayedSteps == stepsBeforeReplay)
+            {
+                Adoptions++;
             }
 
             // Same reasoning as the history path: a tick-start marker captured before this
@@ -1673,6 +1750,16 @@ namespace Cuvara.Netcode.Prediction
             Snaps = 0;
             SmoothedCorrections = 0;
             ReplayedSteps = 0;
+            Adoptions = 0;
+            // Cleared with the rest, and the asymmetry mattered: `adopted wholesale N of M
+            // misses` takes N from Adoptions and M from HistoryMisses, so leaving the pair
+            // standing while the numerator restarted made that ratio meaningless across a
+            // reconnect. Resolved this way rather than by leaving the others alone because
+            // Reset is a session boundary -- it already returns the position, the clock, the
+            // hold and the seeding to a fresh session -- and a counter that outlives it
+            // describes a different connection.
+            HistoryHits = 0;
+            HistoryMisses = 0;
             CoalescedInputs = 0;
             Reconciles = 0;
             DroppedInputs = 0;

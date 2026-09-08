@@ -37,6 +37,31 @@
                 <engine:Label name="jitter-value" class="cuvara-probe__control-value" />
             </engine:VisualElement>
 
+            <!-- The send cadence against the snapshot cadence. Drag it to 15 (the snapshot
+                 rate) and the phase histogram collapses to one bar: that is the lock, and
+                 the sweep verdict flips to REFUSED with it. -->
+            <engine:Label text="Send cadence vs the 15 Hz snapshot rate"
+                          class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="Send Hz" class="cuvara-probe__control-label" />
+                <engine:SliderInt name="send-hz" class="cuvara-probe__slider" />
+                <engine:Label name="send-hz-value" class="cuvara-probe__control-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement name="phase-histogram" class="cuvara-probe__histogram">
+                <engine:VisualElement name="phase-0" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-1" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-2" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-3" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-4" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-5" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-6" class="cuvara-probe__histogram-bar" />
+                <engine:VisualElement name="phase-7" class="cuvara-probe__histogram-bar" />
+            </engine:VisualElement>
+
+            <engine:Label name="cadence-line" class="cuvara-probe__readout" />
+            <engine:Label name="cadence-verdict" class="cuvara-probe__verdict" />
+
             <engine:Label text="Inject one perturbation" class="cuvara-probe__section" />
             <engine:VisualElement class="cuvara-probe__row">
                 <engine:Button name="stall" text="Stall a frame (250 ms)" class="cuvara-probe__button" />

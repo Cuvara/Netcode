@@ -151,6 +151,67 @@ namespace Cuvara.Netcode.Prediction
         public const double SweepHighQuantile = 0.90;
 
         /// <summary>
+        /// Observations required before the span half of <see cref="SweptEnough"/> means
+        /// anything: the smallest count at which BOTH sweep quantiles land strictly inside the
+        /// sorted observations rather than on an extremum.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Below this the span test is <c>max - min</c> again — the exact statistic the
+        /// guard was rewritten to stop being.</b> <see cref="Quantile"/> truncates
+        /// <c>q * n</c> to an index, so at <c>n = 8</c> the tenth percentile is index 0 and the
+        /// ninetieth is index 7: the minimum and the maximum. The low end escapes the minimum
+        /// at <c>n = 10</c> and the high end escapes the maximum only at <c>n = 11</c>
+        /// (<c>(int)(0.9 * 10) = 9</c>, which is still the last index of ten), so the whole of
+        /// <c>8 .. 10</c> is a window in which the guard's own remarks do not describe what it
+        /// computes.
+        /// </para>
+        /// <para>
+        /// <b>Measured consequence, and why this is a refusal rather than a statistic change.</b>
+        /// A body at 30-44 ms of a 67 ms interval with one near-instant observation — the
+        /// gather-catch shape <see cref="FloorPercentile"/> already documents — occupies three
+        /// buckets, so occupancy passes, and reads a span of 39 ms against a 33 ms requirement
+        /// at <c>n = 8</c> where the same data reads 14 ms and is refused from <c>n = 10</c> on.
+        /// Certified as swept, its floor is taken at index 0 as well: <b>0.20 base ticks against
+        /// a body minimum of 1.81</b>, which is the ten-times under-read this estimator's
+        /// history is made of. And a floor is not merely added when it appears —
+        /// <c>WorldViewBinder.TargetLeadTicks</c> makes it DISPLACE the round-trip fallback — so
+        /// a verdict inside this window does reach the lead, and reaches it twice.
+        /// </para>
+        /// <para>
+        /// <b>Why the floor and not an interpolated quantile.</b> Interpolating would make the
+        /// index meaningful at every count, but it changes <see cref="FloorSeconds"/> as well as
+        /// the span, and <see cref="FloorPercentile"/> is under a deliberately isolated
+        /// measurement — shipping a new quantile estimator underneath it would confound exactly
+        /// the reading that constant's remarks say must be read rather than argued. Leaning on
+        /// occupancy alone in the window was the other candidate and is worse: it drops the
+        /// extent test in the one window where the extent test is wrong, when the two are kept
+        /// precisely because neither implies the other. Refusing until the arithmetic is honest
+        /// costs three observations — about 0.2 s at a 15 Hz send rate, against the 120-140
+        /// observations a live arm collects — and it can only withhold a floor, never invent
+        /// one, which is the only safe direction here.
+        /// </para>
+        /// <para>
+        /// Derived from the quantiles rather than written as 11, so that changing either
+        /// constant cannot silently reopen the window.
+        /// </para>
+        /// </remarks>
+        public static readonly int MinimumSweepSamples = SmallestInteriorSampleCount();
+
+        private static int SmallestInteriorSampleCount()
+        {
+            for (var n = MinimumSamples; n <= ObservationCapacity; n++)
+            {
+                if ((int)(SweepLowQuantile * n) > 0 && (int)(SweepHighQuantile * n) < n - 1)
+                {
+                    return n;
+                }
+            }
+
+            return ObservationCapacity;
+        }
+
+        /// <summary>
         /// Buckets the snapshot interval is divided into, and how many of them the observations
         /// must occupy.
         /// </summary>
@@ -209,11 +270,25 @@ namespace Cuvara.Netcode.Prediction
         /// So the sweep fix ships alone and this constant is measured, not argued about.
         /// </para>
         /// <para>
-        /// If the floor tracks the harness with the sweep guard working, the tenth percentile
-        /// stays and its bimodal-under-load justification stands as one regime of three. If the
-        /// floor is still inflated, the statistic is implicated on its own evidence and the
-        /// minimum returns — for the original reason, that a quantile above the minimum biases
-        /// the lead UPWARD, which is the over-lead direction.
+        /// <b>MEASURED, AND THE PRE-REGISTERED REVERT WAS NOT EXECUTED.</b> The floor WAS still
+        /// inflated — across eight live arms at two snapshot rates it tracked
+        /// <c>intercept + 0.1 × slope</c> to two decimals, against a true pipeline constant of
+        /// 0.14–0.28 base ticks. So the rule's CONDITION was met. Its PREMISE was not: it
+        /// assumed a working sweep guard makes the minimum safe, and the guard cannot see the
+        /// sparse left-tail contamination that halves a minimum. <b>A pre-registered rule whose
+        /// premise is falsified by later evidence must not be executed on the strength of its
+        /// condition alone</b> — pre-registration protects against reading numbers backwards, not
+        /// against the reasoning that set the rule being wrong, and the two look identical from
+        /// inside the rule.
+        /// </para>
+        /// <para>
+        /// So the percentile stays and its measured bias is subtracted instead. The
+        /// bimodal-under-load justification of record is NOT what keeps it — that regime was
+        /// looked for under an 8-player load and did not appear, and a constant defended by a
+        /// regime nobody can produce is not defended. What keeps it is a claim about DIRECTION
+        /// that needs no contamination rate: the raw tenth percentile over-leads on every clean
+        /// run, and corrected it is unbiased on clean data and under-reads under contamination —
+        /// safe on clean data and safe when wrong. See <see cref="ConservativeFloorTicks"/>.
         /// </para>
         /// <para>
         /// Either way the lesson does not depend on the outcome: <b>a statistic cannot repair a
@@ -236,6 +311,22 @@ namespace Cuvara.Netcode.Prediction
         private readonly double[] _observations = new double[ObservationCapacity];
         private readonly double[] _sortScratch = new double[ObservationCapacity];
         private int _obsHead, _obsCount;
+
+        /// <summary>
+        /// The quantiles the floor's bias correction is fitted through — the same six the
+        /// measurement harness prints its ladder at, so the runtime correction and the reported
+        /// ladder are the same line rather than two lines that happen to agree.
+        /// </summary>
+        public static readonly double[] LadderQuantiles = { 0.00, 0.10, 0.25, 0.50, 0.75, 0.90 };
+
+        /// <summary>
+        /// How far a ladder point may stray from the fitted line, as a fraction of the fitted
+        /// slope, before the affine sweep model is treated as falsified. See
+        /// <see cref="TryFitLadder"/> for why it is a fraction rather than a constant.
+        /// </summary>
+        public const double LadderStraightnessFraction = 0.10;
+
+        private readonly double[] _ladderScratch = new double[LadderQuantiles.Length];
 
         private double _epochMin = double.MaxValue;
         private double _epochMax = double.MinValue;
@@ -330,7 +421,13 @@ namespace Cuvara.Netcode.Prediction
             get
             {
                 if (_ackIntervalMin == double.MaxValue) return false;
-                if (_obsCount < MinimumSamples) return false;
+
+                // NOT MinimumSamples. Below MinimumSweepSamples the two quantiles below ARE
+                // the minimum and the maximum, so the span test is max - min and this guard
+                // silently becomes the thing it was rewritten to stop being. See that
+                // constant for the distribution that gets through the window and for why the
+                // answer is a refusal rather than a better statistic.
+                if (_obsCount < MinimumSweepSamples) return false;
 
                 double lo = Quantile(SweepLowQuantile);
                 double hi = Quantile(SweepHighQuantile);
@@ -408,13 +505,131 @@ namespace Cuvara.Netcode.Prediction
         {
             if (_obsCount == 0) return 0.0;
 
+            SortObservations();
+            return _sortScratch[QuantileIndex(q, _obsCount)];
+        }
+
+        /// <summary>
+        /// Copies the observation ring into <c>_sortScratch</c> in ascending order and returns
+        /// how many entries are live. One sort serves every order statistic taken from it, so
+        /// the ladder below reads six points off ONE ring in ONE pass — the same property the
+        /// harness's ladder was given, and for the same reason: six points taken across
+        /// separate sorts of a ring that is still filling do not describe one distribution.
+        /// </summary>
+        private int SortObservations()
+        {
             Array.Copy(_observations, _sortScratch, _obsCount);
             Array.Sort(_sortScratch, 0, _obsCount);
+            return _obsCount;
+        }
 
-            int index = (int)(q * _obsCount);
-            if (index >= _obsCount) index = _obsCount - 1;
+        /// <summary>The index the quantile <paramref name="q"/> reads at, over sorted data.</summary>
+        private static int QuantileIndex(double q, int count)
+        {
+            int index = (int)(q * count);
+            if (index >= count) index = count - 1;
             if (index < 0) index = 0;
-            return _sortScratch[index];
+            return index;
+        }
+
+        /// <summary>
+        /// Fits the observation quantiles as a LINE and returns whether the fit is usable.
+        /// </summary>
+        /// <param name="slopeSeconds">
+        /// The fitted slope, seconds per unit q — the range the wait term actually swept.
+        /// </param>
+        /// <param name="worstResidualSeconds">
+        /// The furthest any ladder point strays from the fitted line.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// One observation is <c>constant + wait</c> and the wait sweeps a snapshot interval,
+        /// so the quantiles are affine in <c>q</c>: <c>quantile(q) = C + q · S</c>. The slope
+        /// is therefore the swept range, measured from this run's own observations rather than
+        /// assumed from a configured snapshot rate — which is what makes the floor correction
+        /// in <see cref="ConservativeFloorTicks"/> self-correcting.
+        /// </para>
+        /// <para>
+        /// <b>The fit is a guard before it is an estimate.</b> A ladder that is not straight
+        /// falsifies the affine model instead of returning a number from it, which is the
+        /// property a single order statistic can never have. So this returns FALSE rather than
+        /// a best effort, and the caller refuses to correct rather than correcting by a slope
+        /// that describes nothing. That is the package's own rule — a statistic cannot repair a
+        /// guard — applied to the correction rather than to the statistic.
+        /// </para>
+        /// <para>
+        /// <b>The straightness tolerance is scale-free on purpose.</b> A tenth of the fitted
+        /// slope, not a constant in ticks: tying it to the range the ladder spans keeps it
+        /// meaningful at any snapshot rate and stops it becoming a number somebody later tunes
+        /// to make a run look good. It is the same rule the measurement harness already prints
+        /// its ladder verdict with, and the eight live arms measured against it read worst
+        /// residuals of 0.03–0.11 base ticks against slopes near 2.1, so a clean run clears it
+        /// by a factor of two or more without the tolerance having been chosen to let it.
+        /// </para>
+        /// <para>
+        /// <b>The six quantiles must land on six distinct samples.</b> A quantile is an index
+        /// into sorted data, so on a short ring two of them collide and the "six-point" fit is
+        /// really a five-point fit with one point double-weighted at the bottom — which tilts
+        /// the very end the correction is read from. This is a property of the data held, not a
+        /// threshold: it is checked directly rather than encoded as a minimum sample count.
+        /// </para>
+        /// </remarks>
+        private bool TryFitLadder(out double slopeSeconds, out double worstResidualSeconds)
+        {
+            slopeSeconds = 0.0;
+            worstResidualSeconds = 0.0;
+
+            int count = SortObservations();
+            if (count < LadderQuantiles.Length) return false;
+
+            // Six points off ONE sorted ring, and only if they are six DIFFERENT observations.
+            double[] y = _ladderScratch;
+            int previousIndex = -1;
+            for (var i = 0; i < LadderQuantiles.Length; i++)
+            {
+                int index = QuantileIndex(LadderQuantiles[i], count);
+                if (index <= previousIndex) return false;
+                previousIndex = index;
+                y[i] = _sortScratch[index];
+            }
+
+            // Ordinary least squares through (q, seconds). Deliberately not weighted and
+            // deliberately not clever: the point is to see whether the points lie on a line.
+            double meanQ = 0.0, meanY = 0.0;
+            for (var i = 0; i < y.Length; i++) { meanQ += LadderQuantiles[i]; meanY += y[i]; }
+            meanQ /= y.Length;
+            meanY /= y.Length;
+
+            double sxy = 0.0, sxx = 0.0;
+            for (var i = 0; i < y.Length; i++)
+            {
+                double dq = LadderQuantiles[i] - meanQ;
+                sxy += dq * (y[i] - meanY);
+                sxx += dq * dq;
+            }
+
+            if (sxx <= 0.0) return false;
+
+            double slope = sxy / sxx;
+            if (double.IsNaN(slope) || double.IsInfinity(slope) || slope <= 0.0)
+            {
+                // A flat or descending ladder is not a swept wait. Nothing to subtract.
+                return false;
+            }
+
+            double intercept = meanY - slope * meanQ;
+
+            double worst = 0.0;
+            for (var i = 0; i < y.Length; i++)
+            {
+                double residual = Math.Abs(y[i] - (intercept + slope * LadderQuantiles[i]));
+                if (residual > worst) worst = residual;
+            }
+
+            slopeSeconds = slope;
+            worstResidualSeconds = worst;
+
+            return worst <= slope * LadderStraightnessFraction;
         }
 
         /// <summary>The snapshot interval as measured from acknowledgement arrivals, seconds.</summary>
@@ -494,16 +709,92 @@ namespace Cuvara.Netcode.Prediction
         /// second step of the live residual, and truncation is what left it there.
         /// </para>
         /// <para>
-        /// So the bias is kept and moved into the right units: units of what is actually
-        /// uncertain. The floor is a minimum over <c>constant + wait</c>, so it reads high by
-        /// however much of the wait's range was never sampled — which is
-        /// <see cref="UnsweptSeconds"/>, and is measured rather than assumed. Subtracting it
-        /// gives the low end of the bracket the observations actually support: still biased
-        /// low, still incapable of over-leading on the evidence held, and it goes to zero only
-        /// when nothing was swept rather than whenever the link is fast.
+        /// <b>What is subtracted, and why it is no longer <see cref="UnsweptSeconds"/>.</b> The
+        /// floor is not a minimum — it is the <see cref="FloorPercentile"/> quantile — and on a
+        /// swept link the quantiles are affine in <c>q</c>, so the tenth percentile sits
+        /// <c>0.1 · S</c> ABOVE the constant BY CONSTRUCTION, on every clean run, whether or not
+        /// anything is contaminated. That is a measured, systematic bias in the over-lead
+        /// direction, which is the original defect arriving from the other side. So this
+        /// subtracts exactly that: <c>quantile(0.10) − 0.10 × slope</c>, with the slope fitted
+        /// from this run's own ladder (<see cref="TryFitLadder"/>) rather than assumed from a
+        /// configured snapshot rate. The correction therefore follows the link instead of
+        /// trusting a constant, and on clean data it lands on the pipeline constant rather than
+        /// a tenth of a snapshot interval above it.
+        /// </para>
+        /// <para>
+        /// The previous version subtracted <see cref="UnsweptSeconds"/> — about <c>S / phases</c>
+        /// on a swept link — from a floor inflated by <c>0.1 · S</c>. <b>Those are unrelated
+        /// quantities</b> that nearly cancelled only because the shipped cadences visit 13 and 23
+        /// phases, either side of the 10 at which <c>1/phases</c> equals
+        /// <see cref="FloorPercentile"/> and the cancellation would be exact. The remainder was
+        /// <c>S · (0.1 − 1/phases)</c>, whose SIGN FLIPS below ten phases — a cadence
+        /// recommendation selecting 8 phases would have inverted it with nothing in any counter
+        /// changing. Subtracting the bias that is actually there removes the reason to subtract
+        /// something else that happens to be about the same size. <c>UnsweptSeconds</c> remains
+        /// as a diagnostic — it is still a true statement about how much of the range was seen —
+        /// and is no longer part of this term. The arithmetic is preserved in the changelog.
+        /// </para>
+        /// <para>
+        /// <b>When the ladder is not straight this reads ZERO, and says so.</b> A fallback is
+        /// another claim about the same quantity and gets the same scrutiny as the estimate it
+        /// replaces. The two candidates were the raw percentile — which is the known over-lead
+        /// bias, i.e. the defect — and nothing. Nothing wins: an under-lead merely leaves
+        /// residual in place, and a distribution the affine model does not describe should be
+        /// REFUSED rather than handed to a statistic chosen to survive it. It is not the
+        /// total-loss guard <c>Math.Floor</c> was, which fired on every healthy fast link; this
+        /// fires only when the model itself is falsified. And it is never silent:
+        /// <see cref="FloorCorrectionApplied"/> carries the state,
+        /// <see cref="FloorCorrectionRefusals"/> counts it, and
+        /// <see cref="FloorBiasTicks"/> is what was actually subtracted.
         /// </para>
         /// </remarks>
         public float ConservativeFloorTicks { get; private set; }
+
+        /// <summary>
+        /// Whether the last acknowledgement's <see cref="ConservativeFloorTicks"/> is a
+        /// corrected floor (true) or the refusal (false).
+        /// </summary>
+        /// <remarks>
+        /// False whenever there is no estimate at all, and false when there is one but the
+        /// ladder could not be fitted straight. Read it beside <see cref="HasEstimate"/> to
+        /// tell those apart.
+        /// </remarks>
+        public bool FloorCorrectionApplied { get; private set; }
+
+        /// <summary>
+        /// Acknowledgements that offered a floor but whose ladder was refused, so no correction
+        /// could be made and <see cref="ConservativeFloorTicks"/> fell back to zero.
+        /// </summary>
+        /// <remarks>
+        /// <b>Counted because an invisible fallback is how three defects reached this package.</b>
+        /// A non-zero reading here on an otherwise healthy run means the estimator is
+        /// contributing nothing to the lead, which reads identically to "the estimator is
+        /// contributing correctly and the link is instant" in every other counter.
+        /// </remarks>
+        public int FloorCorrectionRefusals { get; private set; }
+
+        /// <summary>
+        /// The bias removed from the floor by the last correction, in base ticks — that is
+        /// <c>FloorPercentile × slope</c>. Zero when the correction was refused.
+        /// </summary>
+        public float FloorBiasTicks { get; private set; }
+
+        /// <summary>
+        /// The fitted ladder slope in base ticks per unit q — the range the wait term swept, as
+        /// this run measured it. Zero when the ladder was refused.
+        /// </summary>
+        /// <remarks>
+        /// On a fully swept link this should read near the snapshot interval in base ticks. It
+        /// is exposed so a reader can see the quantity the correction was computed from rather
+        /// than infer it from the difference between two printed floors.
+        /// </remarks>
+        public float LadderSlopeTicks { get; private set; }
+
+        /// <summary>
+        /// The furthest a ladder point strayed from the fitted line on the last fit, in base
+        /// ticks — the straightness evidence itself, reported whether the fit passed or not.
+        /// </summary>
+        public float LadderWorstResidualTicks { get; private set; }
 
         /// <summary>
         /// Remembers that an input was sent, so its acknowledgement can be timed.
@@ -582,14 +873,28 @@ namespace Cuvara.Netcode.Prediction
             // actually advanced. Minimum rather than mean for the same reason as everywhere else
             // here: a gap can be stretched by a late frame, never shortened below the cadence.
             //
-            // KNOWN LENIENCE, recorded rather than fixed here. A gap can be shortened below the
-            // cadence, by one arrival being late and the next on time: the minimum therefore
-            // reads the interval LESS the arrival jitter, and every requirement scaled by it --
-            // SweptEnough's, above all -- is weakened in proportion. On a 66 ms cadence with a
-            // frame of jitter that is about a quarter. It is the same shape as the two defects
-            // this guard has already had (a minimum standing in for a quantity it is silent
-            // about) and it deserves its own measurement rather than a fix folded in behind
-            // one.
+            // KNOWN LENIENCE, now MEASURED and still deliberately not fixed here. A gap can be
+            // shortened below the cadence, by one arrival being late and the next on time: the
+            // minimum therefore reads the interval LESS the arrival jitter, and every
+            // requirement scaled by it -- SweptEnough's, above all -- is weakened in
+            // proportion. It is the same shape as the two defects this guard has already had:
+            // a minimum standing in for a quantity it is silent about.
+            //
+            // MEASURED: on a 66.667 ms cadence with one 60 fps frame of jitter this reads
+            // 50.000 ms, exactly the cadence less the whole jitter range -- 25% low. See
+            // AckLatencyEstimatorTests.TheSnapshotIntervalReadsLowByTheArrivalJitter.
+            //
+            // WHY IT IS STILL NOT FIXED, which is a measurement and not a preference. The
+            // obvious correction is the smallest mean of two ADJACENT gaps: they telescope, so
+            // a single arrival's delay cancels exactly, and the result can never fall below
+            // this minimum. It was implemented and driven, and on a link losing one snapshot in
+            // three it read 99.999 ms against the same 66.667 ms cadence -- 50% HIGH -- because
+            // no adjacent pair of gaps is then free of a drop. The present error is LENIENT and
+            // cannot cause an over-lead; that one is STRICT and can. A correct fix needs a
+            // robust statistic over a ring of gaps rather than a running scalar, which is a
+            // larger change than this line. The drop case is pinned as a test --
+            // AnIdealCadenceIsMeasuredExactly_DropsOrNot -- so the next attempt is measured
+            // against loss before it is believed rather than after.
             if (ackTick > _lastAckTick)
             {
                 if (_lastAckTick > 0)
@@ -672,13 +977,45 @@ namespace Cuvara.Netcode.Prediction
             {
                 FloorTicks = (float)(FloorSeconds * baseHz);
 
-                double conservative = (FloorSeconds - UnsweptSeconds) * baseHz;
-                ConservativeFloorTicks = conservative > 0.0 ? (float)conservative : 0f;
+                // THE FLOOR IS A QUANTILE, SO IT IS BIASED UP BY 0.1 * S BY CONSTRUCTION.
+                //
+                // Subtract that, measured from this run's own ladder rather than assumed from
+                // a configured snapshot rate. If the ladder is not straight the affine model
+                // that predicts the bias does not describe this distribution, and there is no
+                // bias to subtract because there is no model to subtract it from -- so the
+                // reading is refused, not repaired. See ConservativeFloorTicks.
+                bool straight = TryFitLadder(out double slopeSeconds, out double worstSeconds);
+
+                LadderWorstResidualTicks = (float)(worstSeconds * baseHz);
+
+                if (straight)
+                {
+                    double bias = FloorPercentile * slopeSeconds;
+
+                    LadderSlopeTicks = (float)(slopeSeconds * baseHz);
+                    FloorBiasTicks = (float)(bias * baseHz);
+                    FloorCorrectionApplied = true;
+
+                    double conservative = (FloorSeconds - bias) * baseHz;
+                    ConservativeFloorTicks = conservative > 0.0 ? (float)conservative : 0f;
+                }
+                else
+                {
+                    LadderSlopeTicks = 0f;
+                    FloorBiasTicks = 0f;
+                    FloorCorrectionApplied = false;
+                    FloorCorrectionRefusals++;
+                    ConservativeFloorTicks = 0f;
+                }
             }
             else
             {
                 FloorTicks = 0f;
                 ConservativeFloorTicks = 0f;
+                FloorCorrectionApplied = false;
+                FloorBiasTicks = 0f;
+                LadderSlopeTicks = 0f;
+                LadderWorstResidualTicks = 0f;
             }
         }
 
@@ -709,6 +1046,11 @@ namespace Cuvara.Netcode.Prediction
             AckAheadOfSend = 0;
             FloorTicks = 0f;
             ConservativeFloorTicks = 0f;
+            FloorCorrectionApplied = false;
+            FloorCorrectionRefusals = 0;
+            FloorBiasTicks = 0f;
+            LadderSlopeTicks = 0f;
+            LadderWorstResidualTicks = 0f;
         }
     }
 }

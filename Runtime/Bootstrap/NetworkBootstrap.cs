@@ -5,6 +5,7 @@ using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Diagnostics;
+using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.Snapshot;
 using Cuvara.Netcode.Transport;
 using Shared.GameLogic.Components;
@@ -198,24 +199,53 @@ namespace Cuvara.Netcode.Bootstrap
         }
 
         /// <summary>
-        /// Sends one input per simulation tick for as long as the session lives.
+        /// Streams input at the configured send cadence for as long as the session lives.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// The direction is synthetic — a slow circle — purely so positions move and
         /// the snapshot stream is visibly doing something. No integration, clamping,
         /// normalisation or cooldown check happens here: those are the server's rules
-        /// and live in <c>Shared.GameLogic</c>. The cadence and the timestep come from
-        /// <c>GameConstants</c> / <c>MovementSystem</c> rather than from a number typed
-        /// into this file, so client and server cannot drift apart on the tick rate.
+        /// and live in <c>Shared.GameLogic</c>.
+        /// </para>
+        /// <para>
+        /// <b>The cadence is held on a pinned schedule rather than by delaying one period
+        /// after each send, and that is load-bearing.</b> <c>UniTask.Delay</c> starts its
+        /// stopwatch when the delay is constructed — after the send — and resumes on the
+        /// first Update frame at or past the period, discarding the remainder every
+        /// iteration. At 60 fps that collapsed every nominal rate in (12, 15] onto 12 Hz, so
+        /// the configured number was not the number sent and choosing a cadence here would
+        /// have done nothing at all. <see cref="InputSendSchedule"/> keeps the schedule so
+        /// the quantisation error cancels instead of accumulating.
+        /// </para>
         /// </remarks>
         private async UniTask SendInputLoopAsync(CancellationToken cancellationToken)
         {
-            var dt = MovementSystem.DeltaTimeForTickRate(config.InputRateHz);
-            var period = TimeSpan.FromSeconds(dt);
+            int sendHz = config.InputRateHz;
+            int snapshotHz = config.SnapshotRateHz;
+            var dt = MovementSystem.DeltaTimeForTickRate(sendHz);
             var angle = 0f;
 
-            Debug.Log($"[bootstrap] step 5/5 — streaming input at {config.InputRateHz} Hz (dt {dt:F4}s), " +
-                      $"logging every {config.SnapshotLogInterval}th snapshot");
+            var schedule = new InputSendSchedule();
+            schedule.Start(sendHz, Time.realtimeSinceStartupAsDouble);
+
+            Debug.Log($"[bootstrap] step 5/5 — streaming input at {sendHz} Hz against a {snapshotHz} Hz " +
+                      $"snapshot rate (dt {dt:F4}s), logging every {config.SnapshotLogInterval}th snapshot");
+
+            // A CONFIGURED CADENCE THAT CANNOT BE MEASURED THROUGH IS REPORTED, NOT
+            // OVERRIDDEN. An asset serialised before this change still holds the old rate,
+            // and silently replacing a value somebody chose is how a config stops meaning
+            // what it says. Saying so is the actionable half.
+            if (!InputCadence.Sweeps(sendHz, snapshotHz))
+            {
+                Debug.LogWarning(
+                    $"[bootstrap] the send cadence ({sendHz} Hz) does not sweep against the snapshot " +
+                    $"rate ({snapshotHz} Hz): it visits only " +
+                    $"{InputCadence.DistinctPhases(sendHz, snapshotHz)} distinct phase(s), so " +
+                    "AckLatencyEstimator will refuse to offer a floor and the prediction lead loses " +
+                    $"its uplink term. Recommended: {InputCadence.RecommendedSendHz(snapshotHz)} Hz. " +
+                    "See InputCadence.");
+            }
 
             while (!cancellationToken.IsCancellationRequested && _client.Session != null && _client.Session.IsConnected)
             {
@@ -229,10 +259,23 @@ namespace Cuvara.Netcode.Bootstrap
 
                 _inputTick++;
                 _client.Session.SendInput(_inputTick, moveX, moveY);
+                schedule.NoteSent(Time.realtimeSinceStartupAsDouble);
+
+                double wait = schedule.SecondsUntilDue(Time.realtimeSinceStartupAsDouble);
 
                 try
                 {
-                    await UniTask.Delay(period, DelayType.Realtime, PlayerLoopTiming.Update, cancellationToken);
+                    if (wait > 0.0)
+                    {
+                        await UniTask.Delay(
+                            TimeSpan.FromSeconds(wait), DelayType.Realtime,
+                            PlayerLoopTiming.Update, cancellationToken);
+                    }
+                    else
+                    {
+                        // Already due. Yield rather than spin, so a frame still happens.
+                        await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -240,7 +283,8 @@ namespace Cuvara.Netcode.Bootstrap
                 }
             }
 
-            Debug.Log("[bootstrap] input loop stopped — the session is no longer connected");
+            Debug.Log($"[bootstrap] input loop stopped — the session is no longer connected " +
+                      $"({schedule.Sends} sends, {schedule.Resyncs} schedule resyncs)");
         }
 
         private void OnStateChanged(NetworkClientState state)

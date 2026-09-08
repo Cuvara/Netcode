@@ -121,7 +121,10 @@ namespace Cuvara.Netcode.Tests.Editor
             // at `now + latency` instead would let the latency spread shrink the measured
             // snapshot interval -- the estimator takes it as the smallest gap between
             // acknowledgements -- and with it the sweep requirement that interval scales.
-            for (var i = 1; i <= AckLatencyEstimator.MinimumSamples - 1; i++)
+            // Up to MinimumSweepSamples, not MinimumSamples: a sweep verdict below that count
+            // is read from the extremes and is not evidence of anything. See
+            // TheFirstVerdictIsNotTakenFromTheExtremes.
+            for (var i = 1; i <= AckLatencyEstimator.MinimumSweepSamples - 1; i++)
             {
                 now += SnapshotPeriod;
                 e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
@@ -134,7 +137,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 Assert.That(e.FloorTicks, Is.EqualTo(0f), "and it must read zero, not a guess");
             }
 
-            for (var i = AckLatencyEstimator.MinimumSamples; i <= AckLatencyEstimator.MinimumSamples + 4; i++)
+            for (var i = AckLatencyEstimator.MinimumSweepSamples;
+                 i <= AckLatencyEstimator.MinimumSweepSamples + 4;
+                 i++)
             {
                 now += SnapshotPeriod;
                 e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
@@ -316,31 +321,161 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// The contribution is the floor less the part of the wait's range never sampled, so it
-        /// is bounded by the evidence rather than by a rounding rule.
+        /// The contribution is the floor less the quantile's OWN construction bias, so it lands
+        /// on the pipeline constant instead of a tenth of a snapshot interval above it.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This is the discriminating test for the floor-statistic change, and it replaces
+        /// the one that pinned <c>FloorSeconds - UnsweptSeconds</c>.</b> That term subtracted
+        /// the unsampled remainder of the wait's range — about <c>S / phases</c> — from a floor
+        /// inflated by <c>0.1 · S</c>. Those are unrelated quantities and they nearly cancelled
+        /// only because the shipped cadences visit 13 and 23 phases, either side of the 10 that
+        /// would make it exact; the remainder <c>S · (0.1 − 1/phases)</c> changes SIGN below ten
+        /// phases. A term that is correct for its current inputs is not a working term.
+        /// </para>
+        /// <para>
+        /// <b>Every number here is derived from the run, not chosen.</b> The bias asserted is
+        /// <c>FloorPercentile · S</c> with <c>S</c> the estimator's own measured snapshot
+        /// interval, and the tolerance is HALF that bias — so the test separates the corrected
+        /// reading from the uncorrected one by construction, at any snapshot rate, rather than
+        /// by a constant that could be widened until a run passed. Against the uncorrected term
+        /// the second assertion fails by the full <c>0.1 · S</c>.
+        /// </para>
+        /// </remarks>
         [TestCase(0.0)]
         [TestCase(0.0083)]     // half a base tick
         [TestCase(0.0167)]     // one base tick
         [TestCase(0.0333)]     // two base ticks
-        public void TheContributionIsTheFloorLessItsOwnUncertainty(double uplinkPlusAge)
+        public void TheContributionRemovesTheQuantilesOwnConstructionBias(double uplinkPlusAge)
         {
             var e = Drive(uplinkPlusAge, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
 
-            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.HasEstimate, Is.True, "precondition: the sweep must have been verified");
+
+            double intervalTicks = e.AckIntervalSeconds * BaseHz;
+            Assert.That(intervalTicks, Is.GreaterThan(1.0),
+                "precondition: the snapshot interval must have been measured, since the bias "
+                + "under test is a fraction of it");
+
+            double trueTicks = uplinkPlusAge * BaseHz;
+            double bias = AckLatencyEstimator.FloorPercentile * intervalTicks;
+            double tolerance = bias * 0.5;
+
+            // THE DEFECT ITSELF, read off the real estimator rather than assumed.
+            Assert.That(e.FloorTicks - trueTicks, Is.EqualTo(bias).Within(tolerance),
+                "one observation is `constant + wait` and the wait sweeps a snapshot interval, "
+                + "so the tenth percentile sits 0.1 * S above the constant BY CONSTRUCTION — on "
+                + "every clean run, contamination or not. That is the inflation, measured.");
+
+            Assert.That(e.ConservativeFloorTicks, Is.EqualTo((float)trueTicks).Within(tolerance),
+                "and the contribution must have that bias removed, landing on the pipeline "
+                + "constant. `FloorSeconds - UnsweptSeconds` does not: on a fully swept link "
+                + "the unswept remainder goes to zero and the whole 0.1 * S inflation survives "
+                + "into the lead, which is the over-lead direction this estimator exists to "
+                + "avoid.");
+
+            Assert.That(e.FloorTicks - e.ConservativeFloorTicks, Is.EqualTo(bias).Within(tolerance),
+                "and WHAT IS REMOVED must be that bias, independently of the constant — this is "
+                + "the claim stated directly rather than through the answer. `UnsweptSeconds` "
+                + "removes about S/phases instead, which is a different quantity that merely "
+                + "resembles it at the two cadences this package ships.");
+
             Assert.That(e.ConservativeFloorTicks, Is.LessThanOrEqualTo(e.FloorTicks),
                 "biased low, never high: an over-lead is the defect this exists to remove, "
                 + "arriving from the other side.");
+        }
 
-            double expected = Math.Max(0.0, (e.FloorSeconds - e.UnsweptSeconds) * BaseHz);
-            Assert.That(e.ConservativeFloorTicks, Is.EqualTo((float)expected).Within(1e-4),
-                "the bias is the measured unswept remainder and nothing else — no tuned "
-                + "fraction, no rounding rule, so it shrinks to zero as the sweep completes.");
+        /// <summary>
+        /// What was subtracted is reported, and it is the fitted slope's tenth — so a reader can
+        /// check the correction rather than infer it from two printed floors.
+        /// </summary>
+        [Test]
+        public void TheSubtractedBiasIsReportedAndIsTheLaddersOwnSlope()
+        {
+            var e = Drive(0.0167, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
 
-            Assert.That(e.ConservativeFloorTicks,
-                Is.LessThanOrEqualTo((float)(uplinkPlusAge * BaseHz) + 0.5f),
-                "and it must not exceed the true constant by more than the residual "
-                + "uncertainty, or it is over-leading on evidence it does not have.");
+            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.FloorCorrectionApplied, Is.True,
+                "a cleanly swept link must produce a straight ladder and an applied correction");
+            Assert.That(e.FloorCorrectionRefusals, Is.EqualTo(0),
+                "and must never have fallen back on the way there");
+
+            Assert.That(e.FloorTicks - e.ConservativeFloorTicks,
+                Is.EqualTo(e.FloorBiasTicks).Within(1e-3f),
+                "what the floor lost must equal what is reported as subtracted, or the reported "
+                + "figure is decoration");
+
+            Assert.That(e.FloorBiasTicks,
+                Is.EqualTo((float)(AckLatencyEstimator.FloorPercentile * e.LadderSlopeTicks))
+                    .Within(1e-3f),
+                "the bias is the run's OWN slope times the percentile — self-correcting, rather "
+                + "than an assumed snapshot interval");
+
+            Assert.That(e.LadderSlopeTicks,
+                Is.EqualTo((float)(e.AckIntervalSeconds * BaseHz)).Within(e.AckIntervalSeconds * BaseHz * 0.25),
+                "and on a swept link that slope IS the snapshot interval, which is the check "
+                + "that the line describes the quantity it is supposed to");
+        }
+
+        /// <summary>
+        /// A distribution the affine sweep model does not describe is REFUSED, visibly, rather
+        /// than corrected by a slope that means nothing.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The bias subtracted above exists only because the quantiles are affine in <c>q</c>.
+        /// Where they are not, there is no <c>0.1 · S</c> to remove and a fitted slope is a
+        /// number from a falsified model. <b>A fallback is another claim about the same
+        /// quantity</b>, and the two available here were the raw percentile — which is the known
+        /// over-lead bias, the defect — and nothing. Nothing wins, because an under-lead merely
+        /// leaves residual in place.
+        /// </para>
+        /// <para>
+        /// What this test really pins is that the refusal is NOT SILENT. A contribution of zero
+        /// reads identically to "the link is instant" in every other counter, so
+        /// <c>FloorCorrectionRefusals</c> and <c>FloorCorrectionApplied</c> have to move.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ALadderThatIsNotStraightRefusesTheCorrectionVisibly()
+        {
+            // A BIMODAL distribution: two swept bands with a gap between them. Each band on
+            // its own is affine in q, and the pair is not — the ladder steps across the gap
+            // instead of rising through it, which is exactly the model being false rather than
+            // the data being noisy. Both bands sweep a whole snapshot interval, so the sweep
+            // guard is satisfied and a floor IS offered; the refusal under test therefore comes
+            // from the ladder's shape and from nothing else.
+            //
+            // This is not a hypothetical shape. A bimodal-under-load regime is the one the
+            // percentile's original justification of record appealed to.
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 160; i++)
+            {
+                double phase = (i % 40) / 40.0;
+                latencies.Add(i % 2 == 0
+                    ? 0.0050 + phase * SnapshotPeriod                        // the near band
+                    : 0.0050 + SnapshotPeriod * 3.0 + phase * SnapshotPeriod); // the far band
+            }
+
+            var e = DriveDistribution(latencies.ToArray());
+
+            Assert.That(e.HasEstimate, Is.True,
+                "precondition: a floor IS offered here, so the refusal under test is about the "
+                + "ladder's shape and not about the sweep guard");
+            Assert.That(e.FloorTicks, Is.GreaterThan(0f), "precondition");
+
+            Assert.That(e.FloorCorrectionApplied, Is.False,
+                "the points are not on a line, so the model that predicts the bias does not "
+                + "describe this distribution and there is nothing to subtract");
+            Assert.That(e.FloorCorrectionRefusals, Is.GreaterThan(0),
+                "and the substitution must be COUNTED. An invisible fallback is how three "
+                + "defects reached this package this month.");
+            Assert.That(e.ConservativeFloorTicks, Is.EqualTo(0f),
+                "refused, not repaired: a distribution the model does not describe is not "
+                + "handed to a statistic chosen to survive it.");
+            Assert.That(e.FloorBiasTicks, Is.EqualTo(0f),
+                "and nothing may be reported as subtracted when nothing was");
         }
 
         /// <summary>
@@ -562,6 +697,215 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(e.HasEstimate, Is.False,
                 "so no floor is offered, and the lead keeps the round-trip fallback rather than "
                 + "taking a reading ten times the observed minimum.");
+        }
+
+        /// <summary>
+        /// The guard's FIRST verdict must not be its weakest one: a distribution that is
+        /// refused once there are enough observations must not be certified while there are
+        /// few.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>Quantile</c> truncates <c>q * n</c> to an index, so at <c>n = 8</c> the tenth
+        /// percentile is index 0 and the ninetieth is index 7 — the minimum and the maximum.
+        /// The span half of the guard is therefore <c>max - min</c> in that window, which is
+        /// precisely the statistic the guard was rewritten to stop being, and the occupancy
+        /// half does not cover for it: three buckets is a low bar for a body that is merely
+        /// narrow rather than locked.
+        /// </para>
+        /// <para>
+        /// This is the gather-catch shape the class already documents, widened to a body of
+        /// 30-44 ms so that it occupies three buckets of a 67 ms interval. It reads a span of
+        /// 39 ms at <c>n = 8</c> and 14 ms once the quantiles are interior — one is above the
+        /// 33 ms requirement and the other is well below it, from the same distribution. The
+        /// floor it would have offered in the window is taken at index 0 as well:
+        /// <b>0.20 base ticks against a body minimum of 1.81</b>.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheFirstVerdictIsNotTakenFromTheExtremes()
+        {
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 140; i++)
+            {
+                // One in forty caught a gather; the rest are a narrow body that never swept.
+                latencies.Add(i % 40 == 0 ? 0.0034 : 0.0301 + (i % 9) * 0.0018);
+            }
+
+            var all = latencies.ToArray();
+
+            Assert.That(DriveDistribution(all).SweptEnough, Is.False,
+                "precondition: with the quantiles interior this distribution spans about 14 ms "
+                + "of a 67 ms interval and is correctly refused.");
+
+            for (var n = AckLatencyEstimator.MinimumSamples;
+                 n < AckLatencyEstimator.MinimumSweepSamples + 4;
+                 n++)
+            {
+                var prefix = new double[n];
+                Array.Copy(all, prefix, n);
+                var e = DriveDistribution(prefix);
+
+                Assert.That(e.SweptEnough, Is.False,
+                    $"at n = {n} the same refused distribution certified itself as swept. A "
+                    + "guard whose first verdict is its weakest one is worse than no guard: it "
+                    + "passes in exactly the window — the first fraction of a second after a "
+                    + "join or a reset — where nothing else has evidence to contradict it.");
+
+                Assert.That(e.HasEstimate, Is.False,
+                    $"and at n = {n} a floor followed from it. It is taken at index 0 there too, "
+                    + "so it is the minimum of the gather catches rather than of the pipeline, "
+                    + "and WorldViewBinder.TargetLeadTicks would let it DISPLACE the round-trip "
+                    + "fallback rather than merely add to it.");
+            }
+        }
+
+        /// <summary>
+        /// The sample floor for a span verdict is derived from the quantiles, not written down,
+        /// so changing either constant cannot silently reopen the window.
+        /// </summary>
+        [Test]
+        public void TheSweepFloorIsWhereBothQuantilesBecomeInterior()
+        {
+            int n = AckLatencyEstimator.MinimumSweepSamples;
+
+            Assert.That(n, Is.GreaterThanOrEqualTo(AckLatencyEstimator.MinimumSamples),
+                "a sweep verdict can never be offered on fewer observations than a floor needs.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepLowQuantile * n), Is.GreaterThan(0),
+                "at the floor the low quantile must not be the minimum.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepHighQuantile * n), Is.LessThan(n - 1),
+                "at the floor the high quantile must not be the maximum. Note this is 11 for "
+                + "0.10/0.90 and not 10: (int)(0.9 * 10) is 9, which is still the last index "
+                + "of ten.");
+
+            Assert.That((int)(AckLatencyEstimator.SweepLowQuantile * (n - 1)) == 0
+                        || (int)(AckLatencyEstimator.SweepHighQuantile * (n - 1)) >= n - 2,
+                Is.True,
+                "and it must be the SMALLEST such count — one fewer observation must still put "
+                + "a quantile on an extremum, or the floor is costing evidence for nothing.");
+        }
+
+        /// <summary>
+        /// Feeds acknowledgements on a fixed <paramref name="cadence"/> whose ARRIVALS are
+        /// delayed by a bounded, non-negative jitter, and optionally drops some snapshots.
+        /// </summary>
+        /// <remarks>
+        /// A jitter that only ever delays is the physical case: an arrival is observed on a
+        /// render frame, so it can be seen late and never early. The delays cycle
+        /// deterministically rather than randomly, so a reading is a property of the
+        /// arithmetic and not of a seed.
+        /// </remarks>
+        private static AckLatencyEstimator DriveArrivals(
+            double cadence, double jitter, int count, int dropEvery = 0)
+        {
+            var e = new AckLatencyEstimator();
+            long tick = 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                tick++;
+                // Delays ramp 0 -> jitter over four arrivals and then reset, so every cycle
+                // contains the pair the defect is made of: one arrival maximally late followed
+                // by one on time, which shortens the gap between them by the whole jitter
+                // range. A pattern that never puts the extremes adjacent never shortens a gap
+                // by more than part of the range and understates the defect it is measuring.
+                double delay = jitter * (i % 4) / 3.0;
+                double at = ClockOffset + i * cadence + delay;
+
+                e.RecordSent(tick, at - 0.005);
+                if (dropEvery > 0 && i % dropEvery == dropEvery - 1) continue;
+                e.RecordAck(tick, at, BaseHz);
+            }
+
+            return e;
+        }
+
+        /// <summary>
+        /// PINS A KNOWN, DELIBERATELY UNFIXED DEFECT, with the measurement that sizes it.
+        /// <c>AckIntervalSeconds</c> is the cadence every sweep requirement is scaled by, and
+        /// taking it as the smallest gap between arrivals reads the cadence LESS the full
+        /// arrival jitter — here 50.0 ms against a true 66.7 ms, a quarter low.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a minimum is the wrong statistic here specifically.</b> Everywhere else in
+        /// this class a minimum is right because the quantity can only be inflated — a wait is
+        /// the constant plus something non-negative. A GAP is not that quantity. One arrival
+        /// late and the next on time shortens the gap between them by the whole of the first
+        /// arrival's delay, so the gap distribution straddles the cadence rather than sitting
+        /// above it, and its minimum is biased low by the jitter range rather than converging
+        /// on the cadence.
+        /// </para>
+        /// <para>
+        /// <b>The direction, which is what bounds the risk and why this can wait.</b> A
+        /// cadence that reads low makes <see cref="AckLatencyEstimator.SweptEnough"/>'s span
+        /// requirement and <c>OccupiedBuckets</c>' bucket width smaller, so the guard admits
+        /// data it should refuse. It is LENIENT, never strict, and therefore cannot produce an
+        /// over-lead on its own — asserted below rather than assumed, because that assertion
+        /// is the whole reason this is a recorded defect and not an incident.
+        /// </para>
+        /// <para>
+        /// <b>Why it is not fixed here.</b> The obvious correction — take the smallest mean of
+        /// two ADJACENT gaps, which telescope so that a single arrival's delay cancels exactly
+        /// — was implemented and measured rather than reasoned about. It fixes this case, and
+        /// on the drop case below it reads <b>99.999 ms against a true 66.667 ms</b>, because
+        /// at one snapshot in three lost no adjacent pair of gaps is free of a drop and every
+        /// pair mean is inflated by the missing arrival. That is 50% HIGH: it converts a
+        /// lenient guard into a strict one, which is the single direction this term is not
+        /// allowed to be wrong in. A correct fix needs a robust statistic over a ring of
+        /// gaps — the same minimum-to-percentile move this class has already made twice — and
+        /// that is a larger change than this was recorded as, deserving its own measurement
+        /// rather than being folded in behind one.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheSnapshotIntervalReadsLowByTheArrivalJitter()
+        {
+            const double Cadence = 4.0 / BaseHz;       // 66.7 ms, the 15 Hz snapshot rate
+            const double Jitter = 1.0 / BaseHz;        // one 60 fps frame
+
+            var e = DriveArrivals(Cadence, Jitter, count: 120);
+
+            Assert.That(e.AckIntervalSeconds, Is.LessThanOrEqualTo(Cadence + 1e-9),
+                "THE SAFETY PROPERTY. The estimate must stay on the lenient side of the true "
+                + "cadence: reading it HIGH would tighten every requirement scaled by it and "
+                + "could produce an over-lead. Any future fix must keep this assertion.");
+
+            Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence - Jitter).Within(1e-6),
+                "THE MEASUREMENT. The reading is the cadence less the WHOLE jitter range, not "
+                + "part of it, because the minimum finds the one adjacent pair where a "
+                + "maximally late arrival is followed by an on-time one. 50.0 ms against a "
+                + "66.7 ms cadence — 25% low — and every requirement scaled by it is weakened "
+                + "in the same proportion. Pinned so that a change to the statistic has to "
+                + "come here and say what it did.");
+        }
+
+        /// <summary>
+        /// The case that disqualified the obvious fix, kept as the standing requirement any
+        /// replacement statistic must meet: on a jitter-free cadence the estimate is exactly
+        /// the cadence, with or without dropped snapshots.
+        /// </summary>
+        /// <remarks>
+        /// A dropped snapshot doubles one gap. The present minimum ignores it, which is the
+        /// one thing the present minimum gets right. The adjacent-pair mean does not: at
+        /// <c>dropEvery = 3</c> every pair contains a drop and the reading goes 50% HIGH. This
+        /// fixture exists so that the next attempt at the jitter bias is measured against loss
+        /// before it is believed, rather than after.
+        /// </remarks>
+        [TestCase(0)]
+        [TestCase(5)]
+        [TestCase(3)]
+        public void AnIdealCadenceIsMeasuredExactly_DropsOrNot(int dropEvery)
+        {
+            const double Cadence = 4.0 / BaseHz;
+
+            var e = DriveArrivals(Cadence, jitter: 0.0, count: 120, dropEvery: dropEvery);
+
+            Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence).Within(1e-9),
+                "with no jitter there is nothing to correct, so the reading must not move — "
+                + "including when one snapshot in " + dropEvery + " is lost.");
         }
     }
 }
