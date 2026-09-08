@@ -116,11 +116,16 @@ namespace Cuvara.Netcode.Tests.Editor
             double now = ClockOffset;
 
             // Latencies that do sweep, so only the sample count is under test here.
+            //
+            // Acknowledgements on the snapshot cadence, the SEND time moving. Stamping the acks
+            // at `now + latency` instead would let the latency spread shrink the measured
+            // snapshot interval -- the estimator takes it as the smallest gap between
+            // acknowledgements -- and with it the sweep requirement that interval scales.
             for (var i = 1; i <= AckLatencyEstimator.MinimumSamples - 1; i++)
             {
-                e.RecordSent(i, now);
                 now += SnapshotPeriod;
-                e.RecordAck(i, now + (i % 4) * SnapshotPeriod * 0.3, BaseHz);
+                e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
+                e.RecordAck(i, now, BaseHz);
 
                 Assert.That(e.HasEstimate, Is.False,
                     "this number ADDS lead, so a floor from too little evidence steers the " +
@@ -129,11 +134,11 @@ namespace Cuvara.Netcode.Tests.Editor
                 Assert.That(e.FloorTicks, Is.EqualTo(0f), "and it must read zero, not a guess");
             }
 
-            for (var i = AckLatencyEstimator.MinimumSamples; i <= AckLatencyEstimator.MinimumSamples + 2; i++)
+            for (var i = AckLatencyEstimator.MinimumSamples; i <= AckLatencyEstimator.MinimumSamples + 4; i++)
             {
-                e.RecordSent(i, now);
                 now += SnapshotPeriod;
-                e.RecordAck(i, now + (i % 4) * SnapshotPeriod * 0.3, BaseHz);
+                e.RecordSent(i, now - (i % 4) * SnapshotPeriod * 0.3);
+                e.RecordAck(i, now, BaseHz);
             }
 
             Assert.That(e.HasEstimate, Is.True, "and it must arrive as soon as it does mean something");

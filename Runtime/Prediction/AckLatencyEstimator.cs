@@ -151,6 +151,34 @@ namespace Cuvara.Netcode.Prediction
         public const double SweepHighQuantile = 0.90;
 
         /// <summary>
+        /// Buckets the snapshot interval is divided into, and how many of them the observations
+        /// must occupy.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The property that matters here is that this cannot be satisfied by a small number
+        /// of samples, and it must not be weakened into something that can.</b> The span between
+        /// two order statistics is an improvement on <c>max - min</c> — it takes a tenth of the
+        /// observations to move each end rather than one — but it is still a statement about two
+        /// points. Occupancy is a statement about the whole distribution: <see cref="MinimumOccupiedBuckets"/>
+        /// samples in distinct buckets are needed at minimum, and no arrangement of two
+        /// observations can produce it.
+        /// </para>
+        /// <para>
+        /// <b>Do not replace this with a comparison of two quantiles, however wide.</b> That is
+        /// the simplification this guard has already been through once: it began as
+        /// <c>max - min</c>, which one outlier satisfied, and the whole defect it then certified
+        /// — a phase-locked link floored at ten times its own observed minimum — followed from a
+        /// span standing in for a distribution. Both tests are kept deliberately; the span
+        /// bounds the extent, the occupancy bounds the shape, and neither implies the other.
+        /// </para>
+        /// </remarks>
+        public const int SweepBuckets = 8;
+
+        /// <inheritdoc cref="SweepBuckets"/>
+        public const int MinimumOccupiedBuckets = 3;
+
+        /// <summary>
         /// Where in the observation distribution the floor is taken from: the minimum.
         /// </summary>
         /// <remarks>
@@ -171,15 +199,29 @@ namespace Cuvara.Netcode.Prediction
         /// at all, and there is nothing left for a percentile to protect against.
         /// </para>
         /// <para>
-        /// So the minimum returns, and on a genuinely swept distribution it is the right
-        /// estimator for the original reason: a mean measures the jitter sitting on top of the
-        /// floor, and a quantile above the minimum biases the lead UPWARD, which is the
-        /// over-lead direction. The lesson is not about which statistic — it is that a
-        /// statistic cannot repair a guard, and reaching for a more robust one is a sign the
-        /// guard above it is admitting data it should not.
+        /// <b>The revert to the minimum is prepared and deliberately NOT applied here.</b> The
+        /// expectation is that the sweep fix makes this choice moot — a genuinely swept
+        /// distribution has its tenth percentile a hair above its minimum, and the distributions
+        /// where they diverge are now refused before any statistic is taken. But "expectation"
+        /// is the word that has cost this investigation the most: if the sweep fix and the
+        /// statistic change ship together and the floor comes back correct, nothing distinguishes
+        /// which one did the work, and the answer would have to be reasoned rather than read.
+        /// So the sweep fix ships alone and this constant is measured, not argued about.
+        /// </para>
+        /// <para>
+        /// If the floor tracks the harness with the sweep guard working, the tenth percentile
+        /// stays and its bimodal-under-load justification stands as one regime of three. If the
+        /// floor is still inflated, the statistic is implicated on its own evidence and the
+        /// minimum returns — for the original reason, that a quantile above the minimum biases
+        /// the lead UPWARD, which is the over-lead direction.
+        /// </para>
+        /// <para>
+        /// Either way the lesson does not depend on the outcome: <b>a statistic cannot repair a
+        /// guard</b>, and reaching for a more robust one is a sign the guard above it is
+        /// admitting data it should not.
         /// </para>
         /// </remarks>
-        public const double FloorPercentile = 0.0;
+        public const double FloorPercentile = 0.10;
 
         /// <summary>
         /// Observations the quantile is taken over. A ring, oldest dropped.
@@ -289,8 +331,52 @@ namespace Cuvara.Netcode.Prediction
                 double lo = Quantile(SweepLowQuantile);
                 double hi = Quantile(SweepHighQuantile);
 
-                return hi - lo >= _ackIntervalMin * MinimumSweepFraction;
+                if (hi - lo < _ackIntervalMin * MinimumSweepFraction)
+                {
+                    return false;
+                }
+
+                // EXTENT IS NOT SHAPE. The span above says the observations reach across the
+                // interval; it does not say they are spread through it, and two order statistics
+                // cannot. See SweepBuckets.
+                return OccupiedBuckets() >= MinimumOccupiedBuckets;
             }
+        }
+
+        /// <summary>
+        /// How many of <see cref="SweepBuckets"/> equal divisions of the snapshot interval hold
+        /// at least one observation, measured from the smallest observation upward.
+        /// </summary>
+        private int OccupiedBuckets()
+        {
+            if (_obsCount == 0 || _ackIntervalMin == double.MaxValue) return 0;
+
+            double lo = double.MaxValue;
+            for (var i = 0; i < _obsCount; i++)
+            {
+                if (_observations[i] < lo) lo = _observations[i];
+            }
+
+            double width = _ackIntervalMin / SweepBuckets;
+            if (width <= 0) return 0;
+
+            int mask = 0;
+            for (var i = 0; i < _obsCount; i++)
+            {
+                int bucket = (int)((_observations[i] - lo) / width);
+                if (bucket < 0) bucket = 0;
+                if (bucket >= SweepBuckets) bucket = SweepBuckets - 1;
+                mask |= 1 << bucket;
+            }
+
+            int count = 0;
+            while (mask != 0)
+            {
+                count += mask & 1;
+                mask >>= 1;
+            }
+
+            return count;
         }
 
         /// <summary>
@@ -472,6 +558,15 @@ namespace Cuvara.Netcode.Prediction
             // The snapshot interval, measured as the smallest gap between acknowledgements that
             // actually advanced. Minimum rather than mean for the same reason as everywhere else
             // here: a gap can be stretched by a late frame, never shortened below the cadence.
+            //
+            // KNOWN LENIENCE, recorded rather than fixed here. A gap can be shortened below the
+            // cadence, by one arrival being late and the next on time: the minimum therefore
+            // reads the interval LESS the arrival jitter, and every requirement scaled by it --
+            // SweptEnough's, above all -- is weakened in proportion. On a 66 ms cadence with a
+            // frame of jitter that is about a quarter. It is the same shape as the two defects
+            // this guard has already had (a minimum standing in for a quantity it is silent
+            // about) and it deserves its own measurement rather than a fix folded in behind
+            // one.
             if (ackTick > _lastAckTick)
             {
                 if (_lastAckTick > 0)

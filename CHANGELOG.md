@@ -230,19 +230,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   produced before, straight into the steering lead, which reached 8 and pushed the reconcile's
   compare point past the retained history (**39 hits against 120 misses**, where a healthy run
   had 138 against 3). Between quantiles, one outlier moves nothing and the same data is refused.
-  A second flaw in the same guard is fixed with it: the snapshot interval the requirement is
-  scaled by is itself the smallest gap between acknowledgements, so latency spread was shrinking
-  the requirement it was supposed to set.
+  The span is paired with a **bucket-occupancy** test, because extent is not shape: a span
+  between two order statistics still describes two points, while occupancy of at least three of
+  eight divisions of the interval cannot be produced by any arrangement of two observations. Both
+  are kept — the span bounds the extent, the occupancy bounds the shape, and neither implies the
+  other. A **third** flaw in the same guard is recorded rather than fixed: the snapshot interval
+  every requirement is scaled by is itself the smallest gap between acknowledgements, so it reads
+  the interval *less the arrival jitter* and weakens the sweep requirement in proportion — about
+  a quarter on a 66 ms cadence. Same shape again, and it deserves its own measurement rather than
+  a fix folded in behind this one.
 
-- **The tenth-percentile floor introduced earlier in this cycle is reverted to the minimum.** It
-  was added because an extremum reported 0.17 base ticks on a loaded run whose observed minimum
-  was 1.39. That reasoning was sound and aimed at the wrong layer: the distribution it was
-  solving for is one whose wait never swept, and the guard should have refused it outright rather
-  than being asked to floor it well. With the sweep measured between quantiles that distribution
-  *is* refused, no floor is offered, and there is nothing left for a percentile to protect
-  against — while a quantile above the minimum biases the lead upward, which is the over-lead
-  direction. **A statistic cannot repair a guard, and reaching for a more robust one is a sign
-  the guard above it is admitting data it should not.**
+- **The tenth-percentile floor is deliberately NOT changed in the same commit.** The expectation
+  is that the sweep fix makes the choice moot — a genuinely swept distribution has its tenth
+  percentile a hair above its minimum, and the distributions where they diverge are now refused
+  before any statistic is taken. But if both shipped together and the floor came back correct,
+  nothing would distinguish which one did the work, and the answer would have to be reasoned
+  rather than read. The revert is written and held. Either way the lesson does not depend on the
+  outcome: **a statistic cannot repair a guard**, and reaching for a more robust one is a sign the
+  guard above it is admitting data it should not.
 
 - **An acknowledgement naming a tick the client never sent is discarded rather than timed.**
   `ack_tick` is defined as *this client's* newest accepted input tick, so one greater than the
