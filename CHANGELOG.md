@@ -30,6 +30,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >   reported as "the server was fine". Sampled finer, it dips to 54.23 Hz and drops 38 ticks.
 >   **A window with no drops is not a run with no drops.**
 >
+> **Three sibling failure modes, with different defences.** Not every mistake here was a reading
+> believed for the wrong property, and the ones that were not need different answers.
+>
+> *An aggregate read once is a claim about the moment you read it, not about the run.* The
+> server's drop counter was sampled at 20-second intervals against a transient lasting seconds,
+> read as flat, and reported as "the server was fine". The counter was never at fault and reading
+> it **more carefully** would not have helped — only reading it **more often**. Defence: match the
+> sampling interval to the lifetime of the thing being excluded, and say what window a claim
+> covers.
+>
+> *A fixture written from the code's model of the wire can only confirm it.* Twice in this work a
+> test passed against a defect because it shared the defect's assumption: one stamped
+> acknowledgements at `now + latency`, reproducing the very interval-shrinking flaw it was meant
+> to catch, and two others warmed up long enough to *fit* but not to *corroborate*, so they pinned
+> a branch that was no longer taken. Defence: **derive the fixture from the wire's behaviour, not
+> from the code's model of it** — acknowledgements arrive on the snapshot cadence and the send
+> time moves, because that is what actually happens.
+>
+> *Some defects cannot be found before a release by construction.* Importing a sample twice is a
+> hard compile error, and the second copy only exists after a **version bump** — so it lands on
+> the first person to update and never on the person who imported. Pre-release testing imports
+> into a tree with no older copy, so no amount of it finds this. Defence: for anything keyed by
+> version, the acceptance test is "does it work **on top of the previous version**", not "does it
+> work".
+>
 > Two rules come out of it, and they are worth more than any single fix here. **Never read a zero
 > as evidence without the counter beside it that says a measurement happened** — hence
 > `staleness fit` printing fits/refused/baseline, the wire-rate gap printing a percentage instead
