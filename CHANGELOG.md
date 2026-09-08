@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **The failure mode behind this release: a reading that is silent about the thing it is being
+> trusted for.**
+>
+> Four separate readings in this investigation were believed, and each was true of something
+> adjacent to what it was being used to prove. `SkewPpm` returns **0** when no line has been
+> fitted, which is byte-identical to what two perfectly matched clocks produce — a
+> prediction-OFF arm reading "0 ppm" was taken for a control. A **1.103** clock ratio was
+> recorded as this machine's measured truth and used to widen `MinimumSkew`/`MaximumSkew`; it
+> was this same delay-floor artefact, and the same machine measures 1.0002 when idle. The live
+> measurement was `[Ignore]`d on one named term, and an ignored test reads as "not applicable"
+> rather than "unverified", so nothing downstream of it was checked for three releases. And
+> *"a physical constant cannot take two values in one run"* was sound about a crystal ratio and
+> was applied to a loaded server tick loop, which is not one.
+>
+> None of these were wrong statements. Each was a **true statement about the wrong object**,
+> holding a place where evidence was assumed to be. The defence is not more counters — it is
+> making a counter distinguish *"nothing happened"* from *"nothing is wrong"*, which is why
+> `fits 0` now prints in as many words that it must not be read as a control, why the wire-rate
+> gap prints as a number instead of "(agrees)", and why the fitted rate must now reproduce
+> before anything acts on it.
+
 ### Fixed
 
 - **The binder's rate gate now has a test of its own** (`WorldViewBinderRateGateTests`). The

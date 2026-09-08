@@ -275,6 +275,26 @@ actually diverged, each with its own counter beside it:
 - the estimator **above** the harness: a phase lock, in which case nothing should be offered at
   all and `ACK FLOOR (estimator) … NOT OFFERED` is what prints.
 
+### Reading the diagnostics: what a zero means here
+
+Several counters in this system return **0** both when the quantity is genuinely zero and when
+it was never measured, and every prediction defect found so far has hidden behind one of them
+at some point.
+
+| Reading | Means "all is well" | Also means |
+|---|---|---|
+| `clock rate difference 0 ppm` | the two clocks agree | **no line was ever fitted** — check `staleness fit` |
+| `clock error 0` | the clock is in step | **the predictor is off**, so the steer never ran |
+| `ACK FLOOR (estimator) 0.00` | — | not offered: too few observations, or the wait never swept |
+| `tick rate ... (agrees)` | the rates match | they differ by up to 15%, which is the tolerance |
+| `max correction 0.0000` | prediction and server agree | nothing moved, so nothing could disagree |
+
+The rule that follows: **never read a zero as evidence without the counter beside it that says a
+measurement happened.** `staleness fit` prints fits/refused/baseline for that reason, the
+wire-rate gap prints as a percentage rather than a verdict, and the clock error prints a band
+rather than a latched sample. A run that failed to measure and a run that measured agreement
+must not print the same thing.
+
 ### The fitted rate, and the assumption underneath it
 
 `SnapshotStalenessEstimator` fits the server's clock to the client's — offset *and rate* — by
