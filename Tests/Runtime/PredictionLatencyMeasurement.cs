@@ -2460,6 +2460,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "<<< the pipeline constant implied by the LINE,\n" +
                 "                             independent of any single quantile. FloorPercentile is the\n" +
                 $"                             tenth, so the floor above should read about this + {slope * 0.10:F2}.\n" +
+                // q00's DISTANCE FROM THE LINE -- REPORTED AS A DATUM, NOT AS A DETECTOR.
+                //
+                // It is natural to read this as the left-tail test: a spurious short observation
+                // drags q00 down, and a left tail is what makes a minimum unusable. IT DOES NOT
+                // WORK, and the number is printed with that written next to it so nobody
+                // re-derives the idea and trusts it.
+                //
+                // Measured over 300 seeds against the real distribution: clean runs give
+                // +0.01..+0.05, and a run with ONE spurious observation in 128 gives
+                // -0.11..+0.11. The ranges overlap almost entirely, and no threshold separates
+                // them -- at -0.10 it catches 3% of contaminated runs, and at -0.12 or beyond,
+                // none. The reason is the same mechanism that defeats the residual and defeats a
+                // leave-one-out variant: q00 is one of the six fitted points, so when it drops
+                // the least-squares line follows it down and the DIFFERENCE barely moves.
+                //
+                // So there is currently NO test here for sparse left-tail contamination. The one
+                // known cause is counted directly by `ack floor ack-ahead`; an unknown cause
+                // would be invisible to everything this harness prints. That is a real gap and
+                // it is stated rather than papered over with a statistic that looks like a test.
+                $"  ladder q00 vs the line   {ladder[0] - intercept:+0.00;-0.00} base ticks   " +
+                    "(a datum, NOT a left-tail test — see the note in\n" +
+                "                             DescribeAckLadder: clean and contaminated runs overlap\n" +
+                "                             and no threshold separates them)\n" +
                 $"  ladder worst residual    {worst:F2} base ticks   " +
                     // Scale-free rather than a magic number: a straight ladder should not
                     // stray by more than a tenth of the range it spans. Tying the tolerance

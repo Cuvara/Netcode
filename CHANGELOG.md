@@ -418,8 +418,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distribution is refused rather than handed to a statistic chosen to survive it. In the class's
   own words, *a statistic cannot repair a guard*.
 
-  Not decided here, and deliberately: the load run has not been done, and choosing now would be
-  choosing on the one regime where the candidates agree.
+  **PROPOSAL, WITH ITS DECIDING MEASUREMENT STILL UNRUN — do not read this as settled.**
+  `floor = quantile(0.10) − 0.10 × measured_slope`. The percentile stays; its now-measured bias is
+  subtracted using the ladder's own slope per run, so the correction is self-correcting rather
+  than assuming `S`. On clean data it lands within 0.05 of the constant.
+
+  *Why the minimum is not proposed — and the case against it is weaker than it first looks.*
+  Contamination makes the minimum **under**-read, and this package's stated asymmetry is that an
+  under-lead "merely leaves residual in place" while an over-lead is the original defect arriving
+  from the other side. So the minimum's failure mode is in the *tolerable* direction, and
+  "disqualified" was too strong. What survives against it is narrower and still real: it is an
+  extremum over a ring, driven by a single sample, so it carries run-to-run variance into the
+  steering lead even on clean data. Meanwhile the **raw** tenth percentile is systematically
+  biased by `0.1 · S` in the *dangerous* direction — which is the whole finding of this section,
+  and the reason the proposal subtracts that bias rather than keeping or replacing the statistic.
+  Corrected, it is unbiased on clean data and under-reads under contamination: safe in both.
+  Uncorrected, it over-leads on every healthy run.
+
+  *The porosity of a straightness guard, which is why the guard does not settle the choice.* A straightness
+  guard set at 0.12 from the six clean arms (residuals 0.03–0.11) is **porous to sparse left-tail
+  contamination**. Simulated over 200 seeds at a true constant of 0.25:
+
+  | contamination | mean residual | passes the guard | minimum reads |
+  |---|---|---|---|
+  | none | 0.03 | 100% | 0.26 |
+  | right tail 10% | 0.11 | 80% | 0.26 |
+  | **left tail — one observation in 128** | **0.07** | **98%** | **0.13** |
+  | left tail 2% | 0.09 | 90% | 0.05 |
+
+  **One spurious short observation halves the minimum and the guard does not see it**, because
+  `q00` moves to the contaminant while the fitted line follows it down, so the residual understates
+  the displacement. The asymmetry is the whole point: a right tail is both *detected* and *harmless*
+  to the minimum; a left tail is neither. A leave-one-out test on `q00` — the obvious fix — is not
+  usable either: its sign **flips** at higher contamination, because the remaining points are
+  themselves contaminated and the line follows them down.
+
+  **AND THERE IS NO TEST HERE FOR SPARSE LEFT-TAIL CONTAMINATION — INCLUDING THE ONE THIS ENTRY
+  ORIGINALLY NAMED.** `q00`'s distance from the fitted line was proposed as the sufficient shape
+  test, on the reasoning that a spurious short observation drags `q00` below the line. Measured
+  over 300 seeds, it does not: clean runs give +0.01..+0.05 and a run with **one** contaminant in
+  128 gives −0.11..+0.11, ranges that overlap almost entirely. At a −0.10 threshold it catches 3%
+  of contaminated runs; at −0.12 or beyond, none. The mechanism is the one that defeats the
+  residual and the leave-one-out variant too: **`q00` is one of the six fitted points, so when it
+  drops the line follows it down and the difference barely moves.** The number is still reported,
+  labelled as a datum and not a test, so the idea is not re-derived and trusted.
+
+  Two consequences, both narrowing what earlier entries here claimed. **The load run rules out
+  gross contamination of either kind and cannot rule out the sparse left tail** — no instrument
+  present would have seen it. And **the only left-tail cause with a detector is the one
+  `AckAheadOfSend` counts**; an unknown cause is invisible to everything this harness prints.
+
+  **THE LEFT-TAIL RATE ON THIS SYSTEM IS UNMEASURED, AND THAT IS WHAT DECIDES THIS.** The proposal's
+  own falsifier is a rate above ~5%, where nothing tested here survives. The rate is measurable and
+  the experiment is not the load run: the documented cause is an acknowledgement naming a tick this
+  session never sent — a reconnect onto a server still holding the previous session's
+  `LastInputTick` — which `Samples~/ReconnectPolicyDemo` can induce. `AckAheadOfSend` has read 0 on
+  seven consecutive runs, which means the condition did not arise on those runs, not that it cannot.
+  **If it cannot be induced, or induces negligibly, this proposal loses its force and the
+  percentile is undefended** — see the note below on where its original defence went.
+
+  *A sequencing disclosure, because a reader should be able to judge this rather than trust it.*
+  The porosity finding above was made **after** the load run had already retired the percentile's
+  original justification, which is the shape of a post-hoc rescue. It is offered as falsifiable
+  rather than as argued: the reconnect experiment settles it either way, and it was named as the
+  decisive one before this proposal was written down.
+
+  **The load run retired the percentile's original defence and did not touch this one.** Under an
+  8-player load the ladder stayed straight — residuals 0.03 and 0.07, `q00` on the fitted line
+  (0.00 and −0.03) — so neither contamination appeared. The percentile's justification of record
+  was a *bimodal-under-load* regime, and that regime has not been observed on this system. A
+  constant defended by a regime nobody can produce is not defended. That defence is gone; the
+  guard-porosity argument above is a different one, and load could never have tested it, because
+  the left-tail cause is a reconnect condition rather than a load phenomenon.
+
+  **On not executing the pre-registered rule.** `AckLatencyEstimator` says the minimum returns if
+  the floor is inflated. Its *condition* is met — confirmed on two independent axes. Its *premise*
+  is false: it assumed a working sweep guard makes the minimum safe, and the guard cannot see the
+  case that kills the minimum. **A pre-registered rule whose premise is falsified by later evidence
+  must not be executed on the strength of its condition alone.** Pre-registration protects against
+  reading numbers backwards; it does not protect against the reasoning that set the threshold being
+  wrong, and the two failures look identical from inside the rule.
 
 - **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
   number chosen for an unrelated reason.** This is recorded as a defect rather than an
@@ -452,6 +530,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decided about `FloorPercentile` — including leaving it alone — this subtraction should be
   restated as something that follows from what it is correcting for, or removed in favour of one
   that is.
+
+  **Retired by consequence, not fixed, if the proposal above is adopted.** Subtracting a *measured*
+  statistical bias (`0.10 × measured_slope`) removes the reason to subtract the unrelated
+  `UnsweptSeconds`, and with it the coincidence. The arithmetic above stays recorded rather than
+  deleted, because "this term was removed because something else replaced its job" and "this term
+  was correct" are different histories, and only the first one warns the next person who reaches
+  for `UnsweptSeconds` as a bias correction.
 
 ### Open terms
 
