@@ -499,6 +499,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reading numbers backwards; it does not protect against the reasoning that set the threshold being
   wrong, and the two failures look identical from inside the rule.
 
+### Open terms
+
+
+Both were found while instrumenting the adopt path, both are real, and neither is fixed
+here — each needs its own change with its own test rather than a silent rider on this one.
+Named rather than left to be rediscovered.
+
+- **The two-argument `Reconcile(Vec2, long)` overload can adopt while incrementing nothing
+  at all.** `HistoryMisses` is gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`,
+  so a two-arg caller whose pending buffer is empty takes the authoritative position
+  wholesale and moves neither `HistoryHits`, nor `HistoryMisses`, nor `ReplayedSteps`.
+  `Adoptions` is the first counter that sees it — it is measured off the fallback's outcome
+  and has no such gate — but the hit/miss pair still reads as though no reconcile occurred.
+  Not the live path: `com.cuvara.dots` drives the three-argument form. A consumer that
+  cannot supply the snapshot tick is on it, which is exactly the caller least able to
+  diagnose the result.
+
+- **`Reset()` clears `Adoptions` but not `HistoryHits` / `HistoryMisses`.** It already
+  cleared `ReplayedSteps`, `Snaps`, `Reconciles`, `DroppedInputs`, `RejectedInputs` and
+  `CoalescedInputs` and left the history pair alone; `Adoptions` was added to the cleared
+  set because it is the sibling of `ReplayedSteps`, which makes the asymmetry visible rather
+  than creating it. The consequence is specific and worth stating: **after a reconnect, any
+  ratio between `Adoptions` and `HistoryMisses` is meaningless**, because the numerator
+  restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
+  therefore only readable within one session.
+
 - **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
   number chosen for an unrelated reason.** This is recorded as a defect rather than an
   observation, because a term that works only for its current inputs is not a working term.
@@ -537,63 +563,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted, because "this term was removed because something else replaced its job" and "this term
   was correct" are different histories, and only the first one warns the next person who reaches
   for `UnsweptSeconds` as a bias correction.
-
-### Open terms
-
-
-Both were found while instrumenting the adopt path, both are real, and neither is fixed
-here — each needs its own change with its own test rather than a silent rider on this one.
-Named rather than left to be rediscovered.
-
-- **The two-argument `Reconcile(Vec2, long)` overload can adopt while incrementing nothing
-  at all.** `HistoryMisses` is gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`,
-  so a two-arg caller whose pending buffer is empty takes the authoritative position
-  wholesale and moves neither `HistoryHits`, nor `HistoryMisses`, nor `ReplayedSteps`.
-  `Adoptions` is the first counter that sees it — it is measured off the fallback's outcome
-  and has no such gate — but the hit/miss pair still reads as though no reconcile occurred.
-  Not the live path: `com.cuvara.dots` drives the three-argument form. A consumer that
-  cannot supply the snapshot tick is on it, which is exactly the caller least able to
-  diagnose the result.
-
-- **`Reset()` clears `Adoptions` but not `HistoryHits` / `HistoryMisses`.** It already
-  cleared `ReplayedSteps`, `Snaps`, `Reconciles`, `DroppedInputs`, `RejectedInputs` and
-  `CoalescedInputs` and left the history pair alone; `Adoptions` was added to the cleared
-  set because it is the sibling of `ReplayedSteps`, which makes the asymmetry visible rather
-  than creating it. The consequence is specific and worth stating: **after a reconnect, any
-  ratio between `Adoptions` and `HistoryMisses` is meaningless**, because the numerator
-  restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
-  therefore only readable within one session.
-
-- **A limitation with no consequence for the action is not a limitation — and the caveats carried
-  through this work were audited against that rather than the principle merely being stated.**
-
-  The case that produced it: the quantile ladder cannot tell a client running 9% fast from a
-  server running 9% slow, and that was carried for most of a day as a standing limitation. It is
-  not one. Both causes produce an error of `advertised/measured − 1`, and both take the same
-  correction — convert with the measured rate. Nothing anybody would *do* differs between the two
-  worlds, so the inability to distinguish them costs nothing.
-
-  Applied to the rest of this work's caveats, and deliberately reported with the ones that
-  **survive**, because a principle that dissolves everything it is pointed at is a licence rather
-  than a test:
-
-  | caveat | verdict |
-  |---|---|
-  | the ladder cannot attribute skew to client or server | **dissolved** — same correction either way |
-  | two quantiles are silent about a distribution | **discharged** — it had a real consequence, which is why the ladder exists; it is now paid, not waived |
-  | the harness is also the client, so the instrument moved with the measurement | **narrowed** — it bars a quantitative before/after comparison, which nothing here relied on; the qualitative step (a refusal becoming a floor) is unaffected |
-  | below 3 frames per snapshot no cadence sweeps | **stands** — it decides whether the feature works on a 30 fps device |
-  | at exactly 60 fps the constant is unrecoverable | **stands** — it decides whether a run can be read at all |
-  | a non-uniform clock breaks the ladder | **stands** — it changes what must be checked (the residual) |
-  | the clock error reaches the steering lead, not just the report | **stands, bounded** — real, and at most `0.02 × floor` on any run the validity gate admits |
-  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **stands** — the guard's first verdict is its weakest |
-
-  **The guard on the principle, which matters more than the principle.** "No consequence for the
-  action" has to mean *no consequence for any action anyone might take with this information* —
-  not *no consequence for the action I already intend*. Read the second way it becomes a tool for
-  discarding inconvenient caveats, which is a considerably worse failure than carrying a few
-  harmless ones. The test is whether two people who disagree about what to do next would both be
-  unaffected; if only one of them is, the limitation is real and it is theirs.
 
 ### Notes
 
@@ -641,6 +610,37 @@ Named rather than left to be rediscovered.
   is in the server repo, predates this change, and is logged here so it is on a known list rather
   than a future surprise.
 
+
+- **A limitation with no consequence for the action is not a limitation — and the caveats carried
+  through this work were audited against that rather than the principle merely being stated.**
+
+  The case that produced it: the quantile ladder cannot tell a client running 9% fast from a
+  server running 9% slow, and that was carried for most of a day as a standing limitation. It is
+  not one. Both causes produce an error of `advertised/measured − 1`, and both take the same
+  correction — convert with the measured rate. Nothing anybody would *do* differs between the two
+  worlds, so the inability to distinguish them costs nothing.
+
+  Applied to the rest of this work's caveats, and deliberately reported with the ones that
+  **survive**, because a principle that dissolves everything it is pointed at is a licence rather
+  than a test:
+
+  | caveat | verdict |
+  |---|---|
+  | the ladder cannot attribute skew to client or server | **dissolved** — same correction either way |
+  | two quantiles are silent about a distribution | **discharged** — it had a real consequence, which is why the ladder exists; it is now paid, not waived |
+  | the harness is also the client, so the instrument moved with the measurement | **narrowed** — it bars a quantitative before/after comparison, which nothing here relied on; the qualitative step (a refusal becoming a floor) is unaffected |
+  | below 3 frames per snapshot no cadence sweeps | **stands** — it decides whether the feature works on a 30 fps device |
+  | at exactly 60 fps the constant is unrecoverable | **stands** — it decides whether a run can be read at all |
+  | a non-uniform clock breaks the ladder | **stands** — it changes what must be checked (the residual) |
+  | the clock error reaches the steering lead, not just the report | **stands, bounded** — real, and at most `0.02 × floor` on any run the validity gate admits |
+  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **stands** — the guard's first verdict is its weakest |
+
+  **The guard on the principle, which matters more than the principle.** "No consequence for the
+  action" has to mean *no consequence for any action anyone might take with this information* —
+  not *no consequence for the action I already intend*. Read the second way it becomes a tool for
+  discarding inconvenient caveats, which is a considerably worse failure than carrying a few
+  harmless ones. The test is whether two people who disagree about what to do next would both be
+  unaffected; if only one of them is, the limitation is real and it is theirs.
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**
