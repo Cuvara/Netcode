@@ -7,6 +7,519 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-08
+
+> **The failure mode behind this release: reasoning about one property and gating on another.**
+>
+> Every defect in this release was found by noticing that a statement believed to be evidence was
+> true of something *adjacent* to what it was being used to prove. None of them were wrong
+> statements, which is why none of them were caught by review.
+>
+> - `SkewPpm` returns **0** when no line has been fitted, byte-identical to what two perfectly
+>   matched clocks produce. A prediction-OFF arm reading "0 ppm" was taken for a control.
+> - A **1.103** clock ratio was recorded as this machine's measured truth and used to widen
+>   `MinimumSkew`/`MaximumSkew`. It was a delay-floor artefact; the same machine measures 1.0002
+>   idle. The bounds are unchanged — the number that was wrong was the justification.
+> - The live measurement was `[Ignore]`d on one named term, and an ignored test reads as *"not
+>   applicable"* rather than *"unverified"*, so nothing downstream of it was checked for three
+>   releases.
+> - *"A physical constant cannot take two values in one run"* was sound about a crystal ratio and
+>   was applied to a loaded server tick loop, which is not one.
+> - The rate was gated on corroboration and the **age** left on `IsUsable`, justified by an
+>   argument about the *slope*. The age is the height above a line the slope tilts, so the same
+>   displacement moves both, and a refused slope went on steering the lead through the residual.
+> - The server's own metrics were read across a six-sample window that happened to be quiet and
+>   reported as "the server was fine". Sampled finer, it dips to 54.23 Hz and drops 38 ticks.
+>   **A window with no drops is not a run with no drops.**
+>
+> **Three sibling failure modes, with different defences.** Not every mistake here was a reading
+> believed for the wrong property, and the ones that were not need different answers.
+>
+> *An aggregate read once is a claim about the moment you read it, not about the run.* The
+> server's drop counter was sampled at 20-second intervals against a transient lasting seconds,
+> read as flat, and reported as "the server was fine". The counter was never at fault and reading
+> it **more carefully** would not have helped — only reading it **more often**. Defence: match the
+> sampling interval to the lifetime of the thing being excluded, and say what window a claim
+> covers.
+>
+> *A fixture written from the code's model of the wire can only confirm it.* Twice in this work a
+> test passed against a defect because it shared the defect's assumption: one stamped
+> acknowledgements at `now + latency`, reproducing the very interval-shrinking flaw it was meant
+> to catch, and two others warmed up long enough to *fit* but not to *corroborate*, so they pinned
+> a branch that was no longer taken. Defence: **derive the fixture from the wire's behaviour, not
+> from the code's model of it** — acknowledgements arrive on the snapshot cadence and the send
+> time moves, because that is what actually happens.
+>
+> *When two mechanisms produce the same counter, testing either against the pooled data tests
+> neither.* A signature for one cause of reconcile misses was refuted across seven runs — by a run
+> whose misses came from the *other* cause, already identified and already fixed. Controlled to the
+> subset where the first mechanism cannot operate, the signature holds 3 for 3, which is not a
+> finding at n=3 but makes the verdict *untested*, not *refuted*. **Note the direction: this one
+> discards something possibly true, where the other three accept things that are false.** A warning
+> written only against false acceptance leaves it invisible. Defence: before testing a second
+> cause, exclude the runs the first can explain — and say which subset the claim is about.
+>
+> *Some defects cannot be found before a release by construction.* Importing a sample twice is a
+> hard compile error, and the second copy only exists after a **version bump** — so it lands on
+> the first person to update and never on the person who imported. Pre-release testing imports
+> into a tree with no older copy, so no amount of it finds this. Defence: for anything keyed by
+> version, the acceptance test is "does it work **on top of the previous version**", not "does it
+> work".
+>
+> **Every guard in this release asks "should I believe this measurement". Not one asked "and what
+> happens when I don't".** That gap has three separate defects in it, and it was only visible from
+> the third:
+>
+> - the acknowledgement floor **truncated to whole base ticks** contributed *zero* while still
+>   taking its branch, so turning the estimator on deleted the round-trip term and put nothing
+>   back;
+> - the round-trip fallback itself is `round(RoundTripMs * Hz / 1000)`, which is **`round(0.24)` =
+>   0** on loopback — it does not degrade gracefully, it vanishes;
+> - and the provisional age, once it saturated `Math.Min(.., gap)`, delivered **`gap`** — the
+>   warm-up fallback — on every call.
+>
+> Three different mechanisms, one hole: the fallback path was never measured, never guarded and
+> never printed, because attention was on whether to trust the estimate. **A fallback is not
+> automatically the safe option; it is another claim about the same quantity and needs the same
+> scrutiny as the estimate it replaces.**
+>
+> **The sharpest instance, because it is a fallback rather than a reading.** The fitted rate is
+> refused *because its slope is untrusted* — and the fallback asserts **slope = zero**, which is
+> the same untrusted quantity set to a different value, and the one that grows without bound. A
+> fallback is not automatically the safe option: it is another claim about the same thing, and it
+> needs the same scrutiny as the estimate it replaces. Measured, that claim cost 45.56 base ticks
+> of age against a true 0.09, which saturated its own clamp and delivered the warm-up fallback the
+> release exists to remove.
+>
+> And a note on instruments, since three of the defects above were in them rather than in the
+> mechanism: **instruments are cheaper to fix than mechanisms, and not cheaper to get wrong.** A
+> wrong instrument costs a full measurement cycle and sends the reader to the wrong layer — one
+> label here asserted the opposite of what the code did, on the exact line an investigation had
+> come down to.
+>
+> Two rules come out of it, and they are worth more than any single fix here. **Never read a zero
+> as evidence without the counter beside it that says a measurement happened** — hence
+> `staleness fit` printing fits/refused/baseline, the wire-rate gap printing a percentage instead
+> of "(agrees)", and the clock error printing a band rather than a latched sample. And **a gate
+> with no test that reads it is not a gate**: removing one token from the binder's rate gate
+> restored the defect in full while 126 tests stayed green, which is why
+> `WorldViewBinderRateGateTests` now exists.
+>
+> The corresponding design move is to gate on **reproducibility rather than on a diagnosis**. A
+> fitted rate is believed once it survives a doubled baseline — no threshold on magnitude, no
+> claim about the cause. A transient server dip, a delay-floor step and a genuine clock
+> difference are then sorted correctly without anyone having to be right about which is
+> happening.
+>
+> **How each fix in this release was validated, because they are not equal — and because the
+> strongest available evidence for most of them is not a live run.** Every fix here guards against
+> an **untrustworthy timebase**. In a context where the timebase is trustworthy the fit
+> corroborates, the rate gate passes through without refusing, the age stays fitted, and the
+> saturation refusal cannot fire at all. **A guard against an abnormal condition cannot be
+> validated in a context that does not produce the condition** — and the context in which this
+> package reads clean is the same one in which v0.33.0 read clean while carrying the defect that
+> started this work.
+>
+> That is a genuine bind: the guards are exercised only where the measurement is currently
+> unmeasurable, and measurable only where they are not exercised. A third context resolves it. The
+> EditMode suite **injects each abnormal condition synthetically** — a 300 ms delay-floor step, a
+> phase-locked distribution with one outlier, an acknowledgement from a session that never existed,
+> a provisional reading that saturates its clamp — and each one reproduces on demand and **fails
+> without its fix**. So for a guard against a condition nobody can produce on demand in a live run,
+> a discriminating synthetic test is not a weaker grade of the same evidence: **it is the only kind
+> of evidence available.**
+>
+> The ledger is therefore **two fixes confirmed live — one by a before/after between two runs the
+> validity gate admits, one by a behavioural falsifier across four environments — five confirmed
+> against synthetic conditions that reproduce and discriminate, one structural-only with no test
+> and zero live magnitude, one retained for attribution reasons alone, and a machine that cannot
+> currently measure the thing this branch is about in any context tried.** Ordered weakest first, so a reader hunting a regression has a
+> map of where to look rather than a reassurance.
+>
+> | Fix | Validation |
+> |---|---|
+> | Age gated on corroboration (`AgeIsFitted`) | **Confirmed on two measurable runs.** `reconciles from history` 39 hit/120 missed → **147/15**, age 45.56 → 0.09 — and the before/after runs read **59.5 Hz (−0.8%)** and **60.1 Hz (+0.2%)**, so *both pass the 2% validity gate*. The only before/after comparison in this work drawn between two runs the gate would admit. |
+> | Saturated provisional age refused | **Confirmed behaviourally, four times, in four environments** (90 833 / 35 532 / 39 235 / 90 690 ppm, the last with a single test in the process). Falsifier stated in advance: large skew *and* `TARGET LEAD 4` would mean failure; measured lead **0** every time. Note all four runs **fail** the validity gate — which does not weaken it, because the check is whether a code path fired, not what a correction figure read. A behavioural falsifier survives an unmeasurable run; a numeric comparison does not. |
+> | Rate gated on corroboration (`RateCorroborated`) | **Synthetic, discriminating.** Delay-floor step reproduces the artefact in a test; live readings of 220 ppm idle against 90 636 loaded on one machine. |
+> | Sweep guard: span between quantiles + bucket occupancy | **Synthetic, discriminating.** Two tests fail against the extremes-based span. First *observed* discriminating in run 2 (p10–median spread 3.09 offered, 0.28 refused) — after the fix, not as validation of it. |
+> | Acknowledgement floor carried as a fraction | **Synthetic, discriminating.** `Math.Floor` demonstrably returned 0 for both live readings (0.14, 0.68). |
+> | Acknowledgements from a previous session discarded | **Synthetic, discriminating.** Reproduces in a test; **never observed live** — `ack floor ack-ahead` has read 0 on every run since it was added. |
+> | Newest-retired input timed, superseded counted | **Synthetic, discriminating.** The min-over-a-group identity is arithmetic; the sweep-span corruption reproduces in a test. |
+> | Round trip computed unconditionally | **Structural only** — no synthetic test. Structural; its live magnitude on loopback is **zero**, so it has never been exercised. |
+> | Tenth-percentile floor | **Weakest.** Introduced on one loaded run, its justifying test now fails at its own precondition once the sweep guard works, and it is retained only because reverting it in the same commit would have made the sweep fix unattributable. |
+>
+> **And the set has never been measured as a set — which is the risk, not the count.** Nine fixes
+> validated individually against a measurement with a 2.6× environmental spread is a weaker
+> position than nine fixes validated together against a stable one, and **no amount of per-fix
+> confidence adds up to the second**. Every fix is individually justified; the nine of them have never run together against a measurement capable of
+> resolving them, and the one time two landed together the result could not be attributed. Two runs
+> of one identical commit produced a **2.6× spread in apparent clock skew, a 4× spread in
+> correction count, and opposite floor decisions** — so a single run of any commit is worth very
+> little, and much of the attribution in this work rested on exactly that. That is a limitation of
+> how this release was validated, not a footnote about process.
+>
+> **The conclusion, which is not about any of the individual defects.** Nine fixes came out of
+> this work and not one of them was found by reasoning about the code. Every advance came from a
+> measurement: a counter printed beside another counter, a band printed instead of a sample, a
+> distribution printed instead of a single figure, a server metric read from outside the client, a
+> test that failed at its own precondition. Both people working on it were confidently wrong
+> repeatedly, in both directions, and each time the correction came from an instrument rather than
+> from an argument. **The code was not fixed by understanding it better. It was instrumented until
+> it could not hide.** Where this release's guards disagree with a future reader's intuition, the
+> guards were measured and the intuition was not.
+>
+> **The commit sequence is left unsquashed on purpose.** A tenth-percentile floor was introduced,
+> the sweep guard above it was then fixed, and the p10's own justifying test failed *at its
+> precondition* — the distribution it was built around is refused outright once the guard works.
+> That sequence is the direct evidence that the statistic was compensating for the guard, and
+> squashing it would delete the only record of it, leaving a reverted constant with no visible
+> reason.
+
+### Fixed
+
+- **The measurement prints the snapshot age as a band with a trend, and stops recommending the
+  thing the rate gate exists to prevent.** The age is the height of the newest snapshot above a
+  fitted envelope, and that envelope's intercept is anchored to a *single* sample
+  (`_offset = _anchorY - _skew * _anchorX`) — so a delay displacement between the anchors shifts
+  the height exactly as it tilts the slope. One printed number cannot tell a client genuinely
+  acting on 87 ms-old data from a fit whose anchor was laid before the displacement arrived. The
+  two differ in shape over a run — a growing backlog shows a rising **trend**, a contaminated fit
+  shows a **step** — so `snapshot age band` now prints min..max with first-half and second-half
+  means and names which shape it sees. Separately, `ClockErrorNote`'s droop branch used to end
+  "Feed the fitted rate to the clock"; that advice predates the corroboration gate and now
+  recommends exactly what the gate prevents, since the large ppm it fires on is usually an
+  uncorroborated fit. It now says to read `rate corroborated` first, and that the droop
+  arithmetic describes a rate that does not exist when it reads NO.
+
+- **The binder's rate gate now has a test of its own** (`WorldViewBinderRateGateTests`). The
+  estimator's tests pin `RateCorroborated`; they cannot pin that `WorldViewBinder` *reads* it,
+  and nothing did — deleting the second half of `Staleness.IsUsable && Staleness.RateCorroborated`
+  left all 126 other tests green while restoring the defect in full. Verified: with the gate
+  removed, two clocks that genuinely agree plus a 300 ms delay-floor step drive the client to
+  apply a **0.9923x** rate scale, and the test fails; with it, the scale stays at 1. It drives a
+  real `LocalMovePredictor` and `WorldState` through `binder.Tick` on an injected `IViewClock`,
+  so it needs no sleeping and reads `ClockRateScale` directly. The companion case pins that a
+  corroborated half-percent rate *does* still reach the clock, so the gate cannot pass by
+  refusing to correct at all.
+
+- **The measurement prints the fit's baseline and fit counts beside the ppm, and stops calling
+  an 8% wire-rate gap "(agrees)".** Two instruments that should have caught the rate artefact and
+  did not. A delay-floor step of *d* seconds fakes a slope of `d / baseline`, so the same ppm
+  means opposite things at different baselines — 90 000 ppm over 4 s is a 362 ms hitch, over 60 s
+  it would need 5.4 s of floor movement — and the reading could not be judged without the
+  baseline beside it. `staleness fit` now prints fitted/refused/baseline, and calls out
+  `fits 0` explicitly: **`SkewPpm` returns 0 when there is no fit, which is identical to what two
+  perfectly matched clocks produce.** That trap is documented in the estimator and caught us
+  anyway — a prediction-OFF arm reading "0 ppm" was taken for a control proving the loaded arm's
+  90 000 ppm artefactual, when it was an arm that never fitted a line at all (`Staleness.Sample`
+  is only reached on the predictor's path). Separately, `tick rate measured` now always prints
+  the percentage gap: `TickRateEstimator.DisagreementTolerance` is 15%, correctly sized to catch
+  a *wrong rate* (the nearest realistic pair is 15 against 20 Hz), so a client measuring 55.0 Hz
+  off a 60 Hz server "agreed" on every arm of a run whose clock was being steered 8% wrong. The
+  tolerance is **not** changed — a wrong rate and a distorted observation of the right rate are
+  different faults wanting different bands — but a gap of 3% or more is now called out as the
+  starved-frame-loop signature it is.
+
+- **`Clock Sync Probe` gains a "Raise delivery floor" button — the defect made pressable.** Every
+  netcode feature ships a scene, and this one belongs in the existing clock scene rather than a
+  new one: same subject, same two synthetic clocks. The button adds a *sustained* 300 ms to every
+  delivery, distinct from the one-off "Stall a frame" — a lower envelope shrugs off a stall, which
+  is what it is for, and is blind to a floor that rises and stays risen. The two clocks remain in
+  perfect agreement and the fit reports tens of thousands of ppm anyway; the readout then shows
+  `corroborated NO`, `age from the unit-rate floor`, and a steering lead that stays put instead of
+  climbing with the baseline. The scene's `TargetLeadTicks` now mirrors the binder's gate on
+  `AgeIsFitted` rather than `IsUsable`, so the sample cannot drift from the code it demonstrates.
+  **The dial's +110,000 ppm default is relabelled**: it was recorded as this machine's measured
+  ratio and used to justify widening the clamp, and it is falsified — 220 ppm idle on the same
+  Windows-Editor/Linux-container pair. It stays as a synthetic stress case at the clamp boundary,
+  in the scene, its README and the sample description, with the correction stated in all three.
+
+- **A refused slope no longer reaches the lead through the snapshot age either.** Gating the
+  clock was half a fix. `StalenessTicks` is `y - (offset + skew * x)`, and `skew` is the *same*
+  slope `RateCorroborated` refuses — so an uncorroborated fit went on steering the lead through
+  the residual, undiminished, and growing with the distance from the anchor. Measured live on a
+  run where the rate was correctly refused and every rate counter read clean: a **51 225 ppm** fit
+  over a **6.1 s** baseline displaces the line by 0.31 s — **18.7 base ticks** — the age read
+  **5.24** against a true idle age of 0.06, the lead went to **6** where healthy runs sat at 1,
+  and the correction stayed at three whole steps. An uncorroborated fit now falls back to the
+  **provisional** reading, which is measured at unit rate against a running floor and therefore
+  cannot accumulate with the baseline at all. That is not new code: it is the branch that already
+  existed for the pre-fit window, safe for exactly the reason it was safe there — it carries no
+  slope — and `TargetLeadTicks` already clamps it with `Math.Min(.., gap)`. The unit-rate floor is
+  now kept live while a fit exists but is uncorroborated, so that reading does not go stale. New
+  `AgeIsFitted` says which line the age is measured against; **`IsUsable` does not mean that and
+  reading it as though it did was the defect.** The comment it replaced in `TargetLeadTicks` —
+  *"A fitted line. Believe it; the ceiling below is the only guard it needs"* — was true while the
+  only thing that could go wrong with a fit was noise, and is not true now that a fit can be a
+  displacement divided by a baseline.
+
+- **A fitted clock rate no longer reaches the clock unless it reproduces over a doubled
+  baseline.** `SnapshotStalenessEstimator` fits a line through two best-case samples, and that
+  line is a *rate* only if the **minimum achievable delay was the same at both anchors**. The
+  class documented that assumption and never tested it, and `WorldViewBinder` handed the result
+  straight to `LocalMovePredictor.SetClockRateScale`. When a starved frame loop raises the delay
+  floor, the later anchor sits above the true line and the slope absorbs the displacement **as
+  rate**. Measured on one machine minutes apart: idle, **220 ppm** (a ratio of 1.0002 — two
+  ordinary crystals); inside a loaded PlayMode suite, **90 636 ppm**. A crystal ratio does not
+  move 90 000 ppm in ten minutes. Over the 4 s minimum baseline that slope is a delay-floor step
+  of 362 ms, which is an ordinary hitch — and the client obediently ran its base-tick clock
+  **8.3% slow**, sat at a three-tick standing error, and corrected by three whole steps at every
+  transition. A rate reads the same over any baseline; a floor step fakes `step / baseline` and
+  halves when the baseline doubles, so the new `RateCorroborated` gate requires the reading to
+  reproduce once the baseline has **doubled** — scale-invariant, and needing no threshold on
+  magnitude. `IsUsable` still gates the *age*, which is the right evidence bar for a residual
+  read once per snapshot and the wrong one for a rate applied every second forever.
+
+- **Comparing consecutive fits was not enough, and the guard's own test caught it.** A decaying
+  slope changes by `step * epoch / baseline²` between neighbours, which falls under any fixed
+  tolerance once the baseline is long enough — a 300 ms floor step self-corroborates at about
+  25 s on a reading still 12 000 ppm wrong. Requiring the baseline to double makes a pure decay
+  disagree by half of itself at every scale.
+
+- **A rate beyond one percent is counted rather than passing silently.** `SkewPpm` has always
+  said a few hundred ppm is two crystals and that tens of thousands "is worth an error rather
+  than a correction"; nothing enforced it. `FitsExtraordinary` now counts them and the
+  measurement reports them. It is a counter and not an unconditional refusal on purpose: refusing
+  outright would permanently disable rate correction on a machine whose ratio genuinely is
+  extraordinary, which is the failure the original 0.90/1.10 bounds produced, arriving by another
+  door. Such a reading still has to corroborate like every other.
+
+### Changed
+
+- **`MinimumSkew`/`MaximumSkew` are left at 0.75/1.33, and the reasoning recorded with them is
+  corrected.** They were widened from 0.90/1.10 on the belief that the development machine's true
+  clock ratio is **1.103**; that figure is now believed to have been this same delay-floor
+  artefact, since the same Windows-Editor/Linux-container pair measures 1.0002 when idle. The
+  mass refusals that justified widening were most likely the clamp working. The bounds are
+  **not** narrowed back, because narrowing would not have caught the artefact that prompted this
+  — the live skew was **0.9169**, comfortably inside the old bounds — and because an artefact and
+  a rate are not distinguished by magnitude at all, but by whether the reading survives a change
+  of baseline. `LocalMovePredictor`'s rate-scale clamps are the reciprocals of these two and are
+  therefore also unchanged; no behaviour changes for a client on a genuinely odd clock beyond the
+  corroboration requirement above. Every comment and test remark claiming 1.103 as a *measured*
+  ratio has been rewritten to say where the figure came from and why it is not trusted — the
+  `[TestCase(1.103)]` cases are kept and relabelled as synthetic, because the band still has to
+  admit such a ratio.
+
+
+### Added
+
+- **`AckLatencyEstimator` — the pipeline constant the staleness envelope absorbs.** The client
+  applies an input at its OWN base tick; the server applies it at the tick its packet is drained
+  on, so the two label the same input with the same tick number only if the client leads by
+  `uplink + snapshot age`. `SnapshotStalenessEstimator` fits a lower envelope and therefore
+  absorbs any constant by construction, so neither its reading nor the clock error can ever show
+  this term — which is why it survived two rounds of fixes with every counter reading clean. The
+  estimator times each input from its send to the first snapshot whose `ack_tick` reaches it and
+  takes the minimum, which converges on `uplink + age`. No new wire traffic and no server change:
+  both ends of the interval were already at the client. Call
+  `WorldViewBinder.NoteInputSent(tick)` beside `LocalMovePredictor.RecordInput`, or the estimator
+  has one end of the interval and offers nothing.
+
+### Fixed
+
+- **The acknowledgement floor is carried into the lead as a fraction, not truncated to whole
+  base ticks.** Truncation was the reason this term stayed open. Live the floor read 0.14 and
+  0.68 base ticks and `Math.Floor` returned zero both times, so the estimator contributed
+  *nothing* on exactly the links it exists for — every localhost run measured. And a sub-tick
+  deficit is not a sub-tick problem: the tick label is an integer, so a client leading 0.68 ticks
+  short carries the wrong tick number for most of every tick and the reconcile returns a whole
+  step for it. That is the second step of the 2.00-step residual against a floor of 1.00. The
+  one-sided bias that truncation was there to provide is kept and moved into the units that are
+  actually uncertain — `AckLatencyEstimator.ConservativeFloorTicks` is the floor less
+  `UnsweptSeconds`, the measured part of the wait's range never sampled — so it shrinks as the
+  sweep completes instead of firing as a total loss whenever the link is fast.
+
+- **An acknowledgement now times only the newest input it retires.** It timed every input it
+  covered. That could never pull the floor *down* — an older input waited for an acknowledgement
+  a later one had already earned, so its interval is larger, and a minimum is monotone — but it
+  stretched the observed **span**, which is the whole of the evidence `SweptEnough` rests on. On
+  a client sending four inputs per snapshot in phase, the superseded send times widened the span
+  by three send periods and the guard read "swept" on a link whose wait never varied at all,
+  offering a floor inflated by a fixed wait. That is an over-lead, the original defect arriving
+  from the other side. Superseded observations are drained and counted (`Superseded`) rather than
+  folded in.
+
+- **A measured floor no longer silently lowers the runaway ceiling.** `rttTicks` was computed
+  only on the branch a floor did not take, so the arrival of a floor dropped the round trip out
+  of `ceiling = gap * 2 + rttTicks + floor` as well as out of the lead — a clamp tightening for a
+  reason that has nothing to do with a runaway, on a change whose safety argument was that it
+  could not touch the steer. It is now computed unconditionally. Together with the truncation
+  above this is the coupling behind the clock error moving from −1 to −2/−4 when the estimator
+  was first wired in: the floor was never steering anything, the round trip had stopped steering
+  anything, and a truncated floor put nothing back.
+
+- **`Clock Sync Probe` gains an `.asmdef`, because importing it twice was a hard compile error.**
+  Unity's sample importer writes to `Assets/Samples/<package>/<version>/<sample>/`, so a project
+  that imported an earlier version and committed it has two copies on disk after an update.
+  Without an assembly definition both compile into the project's default assembly and collide
+  with `CS0101` and `CS0229` — the whole assembly fails, the Editor is dead until one is deleted
+  by hand, and because the copies sit in different version folders **it lands on the first person
+  to update, never on the person who imported.** Found by hitting it while importing this
+  release's own headline sample.
+
+  **Six other samples have the same defect and are deliberately left alone in this release**:
+  `ContentPipeline`, `DemoBootstrap`, `E2ECertification`, `InterpolationProbe`, `KcpProbe` and
+  `WorldView` all ship without an assembly definition, and only `DOTSSample` and
+  `ReconnectPolicyDemo` have one. Fixing all seven blind would mean writing six sets of assembly
+  references that cannot be compiled from the package, on the eve of a release; the one that
+  demonstrates this release's fix is fixed, and the rest are named so they are a known list
+  rather than six future surprises.
+
+- **The sweep guard measures its span between the tenth and ninetieth percentiles, not between
+  the extremes — and the floor goes back to the minimum as a result.** `SweptEnough` is what
+  decides whether a minimum is evidence about the pipeline constant, and its span was
+  `max - min`, which **a single observation satisfies**. Measured live on a client sending at
+  15 Hz into a 15 Hz snapshot stream — the phase-locked case this class's remarks warn about by
+  name — the input-to-acknowledgement distribution was `min 5.5 ms, median 58.8, p90 62.2`: a
+  lock with one outlier. `max - min` read 57 ms against a 33 ms requirement and passed. The floor
+  then landed on the locked mode at **3.33 base ticks while the harness's own observed minimum
+  was 0.33** — ten times high, in the opposite direction from every failure this estimator had
+  produced before, straight into the steering lead, which reached 8 and pushed the reconcile's
+  compare point past the retained history (**39 hits against 120 misses**, where a healthy run
+  had 138 against 3). Between quantiles, one outlier moves nothing and the same data is refused.
+  The span is paired with a **bucket-occupancy** test, because extent is not shape: a span
+  between two order statistics still describes two points, while occupancy of at least three of
+  eight divisions of the interval cannot be produced by any arrangement of two observations. Both
+  are kept — the span bounds the extent, the occupancy bounds the shape, and neither implies the
+  other. A **third** flaw in the same guard is recorded rather than fixed: the snapshot interval
+  every requirement is scaled by is itself the smallest gap between acknowledgements, so it reads
+  the interval *less the arrival jitter* and weakens the sweep requirement in proportion — about
+  a quarter on a 66 ms cadence. Same shape again, and it deserves its own measurement rather than
+  a fix folded in behind this one.
+
+- **The tenth-percentile floor is deliberately NOT changed in the same commit.** The expectation
+  is that the sweep fix makes the choice moot — a genuinely swept distribution has its tenth
+  percentile a hair above its minimum, and the distributions where they diverge are now refused
+  before any statistic is taken. But if both shipped together and the floor came back correct,
+  nothing would distinguish which one did the work, and the answer would have to be reasoned
+  rather than read. The revert is written and held. Either way the lesson does not depend on the
+  outcome: **a statistic cannot repair a guard**, and reaching for a more robust one is a sign the
+  guard above it is admitting data it should not.
+
+- **An acknowledgement naming a tick the client never sent is discarded rather than timed.**
+  `ack_tick` is defined as *this client's* newest accepted input tick, so one greater than the
+  newest tick this client has stamped cannot be about this client's inputs — it is a server
+  still holding the previous session's `LastInputTick` for the same user while a fresh
+  connection restarts its numbering at 1. Left unguarded every early input satisfies
+  `tick <= ackTick` the instant it is sent, is retired by the very next snapshot, and is timed
+  at the wait for one client frame: single-digit milliseconds against a real pipeline of
+  twenty-five, which a minimum filter then holds for its whole epoch memory. Measured live: a
+  floor of **0.17 base ticks on a run whose input-to-acknowledgement minimum was 1.39 and p90
+  1.95**, leaving the lead at 0 and the correction at 3.67 wire-sized steps. This is why
+  `InputToVisibleMovement_WithAndWithoutPrediction` passed when filtered to itself and failed
+  inside the full PlayMode suite — run alone, the previous session has been reaped; run after
+  other tests, it has not. Counted as `AckAheadOfSend` and printed as `ack floor ack-ahead`,
+  because a client seeing it past its first seconds is talking to a server that thinks it is
+  someone else.
+
+- **The measurement reports the clock error as a band, and stops asserting a cause it cannot
+  support.** `clock error (last steer)` is one instantaneous integer sample of a quantity that
+  quantises, so a clock sitting steadily between two ticks reports one value or the next
+  depending on where the last snapshot fell — a band of width 1 straddling the target is a
+  clock in step, a band of width 1 sitting off it is a standing offset, and a single number
+  cannot tell those apart. A `clock error band` line now prints the range sampled every frame.
+  Two related traps are closed with it: a prediction-OFF run's `0` is an **absence**, not a
+  zero — `SteerToServerTick` returns immediately when the predictor is disabled, so `TickError`
+  is never assigned — and is now printed as `NOT SAMPLED`; and the fall-through note read
+  "the clock is not tracking the steering target" for any error of 2 or more, which since
+  v0.33.0 fed the fitted rate to the clock is *every* such error, because the droop branch it
+  falls through from is computed from a `SkewPpm` drift that is now ~0 by design. An alarming
+  string reached by construction is not a finding. The note also records that this figure is
+  measured against `serverTick + TargetLeadTicks`, so it is **not comparable across builds that
+  changed the lead arithmetic** — the same clock reads one lower per tick the lead gained.
+
+- **`InputToVisibleMovement_WithAndWithoutPrediction` is no longer `[Ignore]`d.** It was ignored
+  on this one named open term. Every assertion stands where it was — the 1.5-step correction
+  budget and the budget of 2 corrections above one step included; neither was widened.
+
+
+- **The measurement refuses a run it cannot measure, instead of reporting its numbers.** A run whose
+  client does not observe the snapshot stream at the rate the server sends it has not measured
+  prediction; it has measured whatever made the stream look slow — and every lead term is derived
+  from that stream. Six runs of near-identical code gave ON-arm wire rates of 57.1, 59.5, 60.1,
+  55.6, 55.8 and 58.0 Hz against an advertised 60, with **two runs of a single commit differing by
+  2.6× in apparent clock skew, 4× in correction count, and disagreeing on whether a floor could be
+  offered at all.** The cause is not known after six runs of looking — and a validity gate needs a
+  precondition, not a diagnosis. Past a 2% gap the run is `Inconclusive`: **refused, not clamped and
+  not annotated**, because a discarded run costs seven minutes and a silently annotated one gets
+  quoted six months later. The refusal carries the numbers it refused, printed where the verdict
+  would have been, so a reader grepping for corrections finds the refusal rather than a figure. The
+  threshold is set from those six runs and is **weak evidence** — a 2% gate discards four of them,
+  the two it keeps are the two whose corrections were lowest, n=2, and the same runs produced the
+  hypothesis. If a later run passes the gate and still reads badly, that is the gate being wrong
+  rather than the fix. Precedent: the loadtest harness already refuses a run whose entity count does
+  not match what was requested, for the same reason — **a run that failed its preconditions produces
+  numbers that look like results.**
+
+- **A saturated provisional age is refused instead of being delivered as the clamp — the clamp
+  value *was* the defect.** `Math.Min(StalenessTicks, gap)` reads as a safety ceiling and behaves
+  like one while the provisional figure is roughly right. It is not a ceiling once the figure runs
+  away: the provisional reading carries **no slope term**, so an untrustworthy timebase makes it
+  accumulate at the apparent skew, it exceeds `gap` on every call, and the clamp then returns a
+  **constant** — which is `gap`, the warm-up fallback the whole of v0.33.0 and v0.34.0 exist to
+  stop steering on. The report even labels it one line below: *"a lead equal to this is the warm-up
+  fallback, not a measurement."* Measured: a provisional age of **45.56 base ticks** against a true
+  age of 0.09 one commit earlier on the same box, all three arms steering on a lead of 4, the worst
+  correction figures of the sequence (**37 of 39** above one step at **4.00**) with `reconciles
+  from history 142 hit / 0 missed` — nothing missing from the history, so the corrections were pure
+  over-lead. A provisional age above one snapshot interval is not a plausible age for a healthy
+  route (a route genuinely that slow produces a fit whose slope *reproduces*, and takes the fitted
+  branch), so it is now treated as **evidence of an unusable reading** and contributes zero. An
+  untrustworthy timebase must produce an under-lead, not the largest lead available; the uplink is
+  still covered by the acknowledgement floor, which is measured independently.
+
+- **The provisional floor decays per epoch, like the fitted path's anchors.** It only ever moved
+  downward, so it was a memory of the session's fastest moment and the height above it carried the
+  whole of any rate difference accumulated since. One epoch of memory now, the same shape
+  `AckLatencyEstimator` uses, so a single unlucky epoch cannot leave the client without a reading.
+  This bounds the accumulation; it does not eliminate it at large apparent skew, which is why the
+  saturation refusal above is the load-bearing half.
+
+- **`SNAPSHOT AGE ... (fitted)` was labelled from the wrong flag, and the provisional age carries
+  no rate term.** Two defects in the work this release added, found by a run that could not be
+  read because of the first. The label was driven by `IsUsable` — "a line exists" — while the age
+  had fallen to the provisional path because the slope was refused, so the report asserted the
+  opposite of what the code did on the one line the investigation turned on. `AgeIsFitted` is now
+  printed. And the provisional reading is `(y - x) - floor` at **unit rate**: it has no slope, so a
+  client clock *n*% fast adds *n*% of elapsed time to it every second. Measured: **45.56 base
+  ticks** (759 ms) on a run whose apparent skew was 81 351 ppm over ~10 s — 0.074 × 10 s = 740 ms,
+  which is the reading to within 2%. The same build read **0.09** on a run whose skew was −55 ppm.
+  It is bounded where it steers, by `Math.Min(.., gap)`, so no lead exceeded 4 in any arm; the
+  reported number is not bounded and now says what it is measured against.
+
+- **The age band's trend test was multiplicative and could not see a linear drift.** `second half >
+  first half × 1.5` reported `43.31 -> 45.60` as *"flat: the age is a stable property of the
+  route"*, because the ratio is 1.05 — on a quantity with a large offset, a proportional test is
+  blind to exactly the additive growth it is there to catch. Now `second - first >= 1.0` base tick.
+
+- **The estimator's own observation distribution is printed** — count, p10 and median in base
+  ticks. The harness's floor times ~20 sample inputs while the estimator times every send at a
+  different phase, so when they disagree there is no way to tell which distribution is unusual
+  without seeing the estimator's. Both statistic choices made in this cycle were made by reasoning
+  about the harness's twenty samples, and both were wrong.
+
+### Known
+
+- **The snapshot interval the sweep requirement scales by is itself a minimum, and reads about
+  25% low.** `AckLatencyEstimator` measures the interval as the smallest gap between
+  acknowledgements — and a gap *can* fall below the cadence, when one arrival is late and the next
+  is on time, so it reads the interval **less the arrival jitter**. Every requirement scaled by it
+  is weakened in proportion: on a 66 ms cadence with a frame of jitter, roughly a quarter. This is
+  the third instance in one class of a minimum standing in for a quantity it is silent about, and
+  it is recorded rather than fixed on purpose — folding it in behind the sweep fix would make its
+  own effect unattributable, which is the mistake this release spent a run avoiding. The guard is
+  *lenient* because of it, never strict, so it cannot cause an over-lead on its own.
+
+- **A phase-locked client cannot measure its own pipeline constant, and the round-trip fallback is
+  zero on a fast link.** A client whose send cadence equals the snapshot cadence never sees a small
+  wait, so no floor can be offered — correctly, since inventing one is the over-lead defect. And
+  `rttTicks = round(RoundTripMs * Hz / 1000)` is `round(4 × 60 / 1000)` = **0** on loopback, so the
+  fallback does not degrade gracefully, it vanishes. The choice for such a client is therefore
+  *measured floor or nothing*, and `uplink + snapshot age` stays uncovered for it. Closing that is a
+  **send-cadence** decision — deliberately offsetting the client's send rate from the snapshot rate
+  so the wait sweeps — which is a product change, not a netcode fix, and is not made here.
+
 ## [0.33.0] - 2026-09-08
 
 ### Fixed

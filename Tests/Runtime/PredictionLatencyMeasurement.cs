@@ -98,6 +98,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
         private const int Repeats = 3;
 
         /// <summary>Frames of zero input before a sample, to settle.</summary>
+        /// <summary>
+        /// How far the observed wire rate may sit from the advertised one before a run is
+        /// refused as unmeasurable.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Set from the data rather than from taste. Six runs of near-identical code gave ON-arm
+        /// wire rates of 57.1, 59.5, 60.1, 55.6, 55.8 and 58.0 Hz against 60 — −4.8%, −0.8%,
+        /// +0.2%, −7.3%, −7.0% and −3.3%. A 2% gate discards four of the six, which is severe;
+        /// the two it keeps are also the two whose corrections were lowest, which is weak
+        /// evidence that it selects the runs worth reading. <b>Weak because n=2 and because the
+        /// same six runs produced the hypothesis</b> — if a later run passes the gate and still
+        /// reads badly, that is the gate being wrong rather than the fix.
+        /// </para>
+        /// <para>
+        /// Deliberately unrelated to <c>TickRateEstimator.DisagreementTolerance</c> (15%), which
+        /// asks a different question: whether the client is predicting at the WRONG RATE, where
+        /// the nearest realistic pair is 15 against 20 Hz. A distorted observation of the right
+        /// rate is a different fault and wants a much tighter band. Collapsing the two into one
+        /// threshold is how a constant ends up needing repeated adjustment.
+        /// </para>
+        /// </remarks>
+        private const double WireRateValidityFraction = 0.02;
+
         private const int SettleTicks = 6;
 
         /// <summary>Give up on a sample after this long and report it, rather than hang.</summary>
@@ -377,6 +401,42 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Round trip the session reported, milliseconds.</summary>
             public long RoundTripMs;
 
+            /// <summary>The measured pipeline constant, in base ticks.</summary>
+            public float AckFloorMeasuredTicks;
+
+            /// <summary>
+            /// What the lead actually received from it: the floor less its own unswept
+            /// uncertainty. Printed beside the raw floor because the gap between them is the
+            /// measurement's own error bar, and reading only one of the two is how the
+            /// truncated version looked healthy while contributing nothing.
+            /// </summary>
+            public float AckFloorContributionTicks;
+
+            /// <summary>Inputs an acknowledgement drained without timing. See AckLatencyEstimator.</summary>
+            public int AckFloorSuperseded;
+
+            /// <summary>
+            /// Inputs discarded because an acknowledgement named a tick this client never sent.
+            /// </summary>
+            /// <remarks>
+            /// Nonzero means the server was still holding a previous session's
+            /// <c>LastInputTick</c> for this user when this run's numbering restarted at 1 —
+            /// so every early input read as acknowledged the moment it was sent. It is the
+            /// reason this measurement once passed alone and failed inside the suite: run it on
+            /// its own and the previous session has been reaped, run it after other tests and
+            /// it has not.
+            /// </remarks>
+            public int AckFloorAhead;
+
+            /// <summary>Whether that floor was offered at all, and why not when it was not.</summary>
+            public bool AckFloorOffered;
+
+            /// <summary>Whether the wait term was seen to sweep, which is what makes a floor mean anything.</summary>
+            public bool AckFloorSwept;
+
+            /// <summary>Observations refused as implausible for a floor.</summary>
+            public int AckFloorRefused;
+
             /// <summary>
             /// Smallest input-to-acknowledgement time seen, in base ticks — an upper bound on
             /// the pipeline constant the steering target is still missing.
@@ -417,6 +477,120 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// </remarks>
             public double SkewPpm;
 
+            /// <summary>
+            /// Whether that rate was reproduced over a doubled baseline, and therefore reached
+            /// the clock at all.
+            /// </summary>
+            /// <remarks>
+            /// <b>Read this before reading the ppm.</b> The envelope fit is a rate only if the
+            /// minimum achievable delay was the same at both anchors; a starved frame loop
+            /// raises that floor and the slope absorbs the rise as rate. False beside a large
+            /// ppm is that artefact being caught. False beside a small one is a session too
+            /// short to have doubled a baseline yet, which is ordinary in the first ~10 s.
+            /// </remarks>
+            public bool RateCorroborated;
+
+            /// <summary>
+            /// Whether the AGE was measured against the fitted line or the unit-rate floor.
+            /// </summary>
+            /// <remarks>
+            /// <b>Not the same as <see cref="StalenessFitted"/>, and printing only that one made
+            /// a run unreadable.</b> `SNAPSHOT AGE ... (fitted)` was driven by `IsUsable`, which
+            /// means "a line exists", while the age had fallen to the provisional path because
+            /// the slope was refused. So the report asserted the opposite of what the code did,
+            /// on the one line an investigation was turning on.
+            /// </remarks>
+            public bool AgeIsFitted;
+
+            /// <summary>Observations the acknowledgement floor was computed from, and their shape.</summary>
+            /// <remarks>
+            /// <b>The harness's own floor is not a reference for these.</b> It times 20 sample
+            /// inputs; the estimator times every send, ~140 of them, at a different phase. When
+            /// the two disagree there is no way to tell which distribution is unusual without
+            /// seeing the estimator's own — so it is printed rather than inferred. Choosing a
+            /// statistic from the harness's twenty samples is what produced two wrong choices.
+            /// </remarks>
+            public int AckObservations;
+
+            /// <inheritdoc cref="AckObservations"/>
+            public float AckObservationP10;
+
+            /// <inheritdoc cref="AckObservations"/>
+            public float AckObservationMedian;
+
+            /// <summary>Fits that failed to reproduce over a doubled baseline.</summary>
+            /// <inheritdoc cref="RateCorroborated"/>
+            public int FitsUncorroborated;
+
+            /// <summary>Fits claiming the two clocks differ by more than one percent.</summary>
+            /// <inheritdoc cref="RateCorroborated"/>
+            public int FitsExtraordinary;
+
+            /// <summary>Baseline the current rate estimate was fitted over, in seconds.</summary>
+            /// <remarks>
+            /// <b>Print this next to the ppm or the ppm cannot be judged.</b> A delay-floor
+            /// step of <i>d</i> seconds fakes a slope of <c>d / baseline</c>, so the same
+            /// reading means completely different things at different baselines: 90 000 ppm
+            /// over 4 s is a 362 ms hitch, which is ordinary, while the same figure over 60 s
+            /// would need 5.4 s of floor movement, which is not. A bogus fit over a short
+            /// baseline and a real one over a long baseline are one glance apart here and
+            /// indistinguishable without it.
+            /// </remarks>
+            public double StalenessBaselineSeconds;
+
+            /// <summary>Lines fitted, and pairs refused for implying an impossible rate.</summary>
+            /// <remarks>
+            /// <b><c>fits 0</c> is why a 0 ppm reading must never be read as agreement.</b>
+            /// <c>SkewPpm</c> returns 0 when there is no fit, which is identical to what two
+            /// perfectly matched clocks produce — the estimator's own remarks call this out and
+            /// it caught us anyway: a prediction-OFF arm reading "0 ppm" was taken for a
+            /// control proving the loaded arm's 90 000 ppm was an artefact, when it was simply
+            /// an arm that never fitted a line. <c>Staleness.Sample</c> is only reached on the
+            /// predictor's path, so the OFF arm has no rate measurement at all to compare with.
+            /// </remarks>
+            public int StalenessFits;
+
+            /// <inheritdoc cref="StalenessFits"/>
+            public int StalenessFitsRefused;
+
+            /// <summary>
+            /// Every snapshot-age reading taken during the sampled window, in base ticks.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>The single printed age cannot distinguish the two things it might be.</b> The
+            /// age is the height of the newest snapshot above a fitted envelope, and the
+            /// envelope's intercept is anchored to ONE sample — so a displacement between the
+            /// anchors shifts the height exactly as it tilts the slope. A reading of 5.24 base
+            /// ticks is therefore either a client genuinely acting on 87 ms-old data, or a fit
+            /// whose anchor was laid before that displacement arrived.
+            /// </para>
+            /// <para>
+            /// The two have different shapes over a run and that is what separates them. A
+            /// backlog that is growing shows a rising TREND; a contaminated fit shows a STEP at
+            /// the refit and is flat either side of it. Hence the band and the two half-means.
+            /// </para>
+            /// </remarks>
+            public readonly List<float> SnapshotAges = new List<float>();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeMin =>
+                SnapshotAges.Count == 0 ? float.NaN : SnapshotAges.Min();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeMax =>
+                SnapshotAges.Count == 0 ? float.NaN : SnapshotAges.Max();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeFirstHalf =>
+                SnapshotAges.Count < 4 ? float.NaN
+                    : SnapshotAges.Take(SnapshotAges.Count / 2).Average();
+
+            /// <inheritdoc cref="SnapshotAges"/>
+            public float SnapshotAgeSecondHalf =>
+                SnapshotAges.Count < 4 ? float.NaN
+                    : SnapshotAges.Skip(SnapshotAges.Count / 2).Average();
+
             /// <summary>Rate correction the predictor's base-tick clock is running with.</summary>
             /// <remarks>1.0 means none is applied — the pre-fix behaviour.</remarks>
             public float ClockRateScale;
@@ -434,6 +608,39 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Client base tick minus the steering target, as of the last steer.</summary>
             /// <inheritdoc cref="StalenessFitted"/>
             public long TickErrorTicks;
+
+            /// <summary>
+            /// The same quantity's range over the whole run, sampled every frame.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>One instantaneous sample of this cannot be read as a settled offset, and
+            /// reading it as one cost a round of investigation.</b> The error is an integer
+            /// difference re-evaluated at each snapshot, so it quantises: a clock sitting
+            /// steadily between two ticks reports one value or the next depending on where the
+            /// snapshot fell, and <see cref="TickErrorTicks"/> is whichever the LAST steer
+            /// happened to see.
+            /// </para>
+            /// <para>
+            /// A band of width 1 straddling the target is a clock in step. A band of width 1
+            /// sitting entirely off it is a genuine standing offset. A single number cannot
+            /// tell those apart, and they have opposite meanings.
+            /// </para>
+            /// </remarks>
+            public long TickErrorMin = long.MaxValue;
+
+            /// <inheritdoc cref="TickErrorMin"/>
+            public long TickErrorMax = long.MinValue;
+
+            /// <summary>Whether the error band was ever sampled at all. False on a prediction-OFF run.</summary>
+            /// <remarks>
+            /// <c>LocalMovePredictor.SteerToServerTick</c> returns immediately when the
+            /// predictor is disabled, so <c>TickError</c> is never assigned and reads its
+            /// initial 0. <b>A prediction-OFF run's clock error is not a zero, it is an
+            /// absence</b> — it is not a baseline the prediction-ON figure can be compared
+            /// against, and it was read as one.
+            /// </remarks>
+            public bool TickErrorSampled;
 
             public float MaxCorrection;
             public float EffectiveSpeed;
@@ -881,24 +1088,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// line below is still reported here, so the next attempt starts from real numbers.
         /// </para>
         /// <para>
-        /// <b>Un-ignoring is a one-line change.</b> Every assertion is left in place and none
-        /// has been loosened; only this attribute stands between the suite and the result.
+        /// <b>No longer ignored, and no assertion was loosened to get there.</b> It was
+        /// <c>[Ignore]</c>d on one named open term — the steering target not covering
+        /// <c>uplink + snapshot age</c>, which cost a residual of 2.00 steps against a floor of
+        /// 1.00. <see cref="Prediction.AckLatencyEstimator"/> measures that term and
+        /// <c>WorldViewBinder.TargetLeadTicks</c> now carries it, so the attribute is gone with
+        /// the 1.5-step budget and the two-correction budget standing exactly where they were.
+        /// If the residual comes back, it belongs in this attribute again with the term named —
+        /// never in a wider bound.
+        /// </para>
+        /// <para>
         /// Run it by hand against a live stack whenever the lead arithmetic is touched — it is
         /// the only thing in the repository that measures prediction against a real server,
         /// and each of the three defects it has found was invisible to the EditMode suite.
         /// </para>
         /// </remarks>
         [UnityTest]
-        [Ignore("Open term: the steering target does not cover uplink + snapshot age (~1 base " +
-                "tick on localhost), so the residual correction is 2.00 steps against a floor " +
-                "of 1.00 and the 1.5-step budget fails. The budget is right and must NOT be " +
-                "widened — a bound that accepted 2.00 would accept the defect it measures. " +
-                "Everything else reads clean (rates agree at 60 Hz, clock error 0 to -1, lead " +
-                "from a fitted line, 139 of 140 reconciles closing through the history path), " +
-                "because a lower-envelope fit absorbs the missing constant by construction — " +
-                "which is why this has twice been misdiagnosed as a tick-rate mismatch. " +
-                "Follow-up: AckLatencyEstimator on branch feat/ack-latency-estimator. Every " +
-                "assertion is left standing; remove this attribute to re-enable.")]
         public IEnumerator InputToVisibleMovement_WithAndWithoutPrediction() => UniTask.ToCoroutine(async () =>
         {
             // Skip, loudly, when there is nothing to measure against.
@@ -991,6 +1196,49 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Report(withoutPrediction);
             Report(diverging);
             ReportComparison(withPrediction, withoutPrediction);
+
+            // ---- VALIDITY GATE: is this run measurable at all? ----
+            //
+            // A run whose client does not observe the snapshot stream at the rate the server
+            // sends it has not measured prediction; it has measured whatever made the stream
+            // look slow. Six runs of near-identical code produced ON-arm wire rates of 57.1,
+            // 59.5, 60.1, 55.6, 55.8 and 58.0 Hz against an advertised 60 -- a 7% spread on one
+            // machine, with two runs of a SINGLE commit differing by 2.6x in apparent clock skew,
+            // 4x in correction count, and disagreeing on whether a floor could be offered at all.
+            // The cause is not known after six runs of looking.
+            //
+            // It does not have to be. A validity gate needs a precondition, not a diagnosis, and
+            // this one is cheaper to DETECT than to eliminate. The loadtest harness already
+            // refuses a run whose entity count does not match what was requested, for the same
+            // reason: a run that failed its preconditions produces numbers that look like
+            // results.
+            //
+            // REFUSED, NOT CLAMPED AND NOT ANNOTATED. A discarded run costs seven minutes; a
+            // silently annotated one gets quoted six months later. Inconclusive rather than
+            // failed, because nothing here says the code is wrong -- only that this run cannot
+            // say whether it is.
+            if (withPrediction.MeasuredTickRate > 0f && withPrediction.TickRateInUse > 0)
+            {
+                double wireGap = (withPrediction.MeasuredTickRate - withPrediction.TickRateInUse)
+                                 / (double)withPrediction.TickRateInUse;
+
+                if (Math.Abs(wireGap) > WireRateValidityFraction)
+                {
+                    Assert.Inconclusive(
+                        $"UNMEASURABLE RUN, not a result: the client observed the snapshot " +
+                        $"stream at {withPrediction.MeasuredTickRate:F1} Hz against an advertised " +
+                        $"{withPrediction.TickRateInUse} Hz, {wireGap * 100.0:+0.0;-0.0}%, past the " +
+                        $"{WireRateValidityFraction * 100.0:F0}% validity gate. Every lead term is " +
+                        "derived from that stream, so the corrections below describe whatever made " +
+                        "it look slow rather than describing prediction. Re-run; if it persists, " +
+                        "the machine is not currently capable of this measurement. " +
+                        $"(clock rate difference {withPrediction.SkewPpm:F0} ppm, " +
+                        $"corrections > ONE STEP {withPrediction.CorrectionsAboveOneStep} of " +
+                        $"{withPrediction.SmoothedCorrections}, max " +
+                        $"{(withPrediction.ExpectedStepFromWire > 0f ? withPrediction.MaxCorrection / withPrediction.ExpectedStepFromWire : float.NaN):F2}" +
+                        " steps — recorded here so the refusal carries the numbers it refused.)");
+                }
+            }
 
             // ---- Guards that make the numbers mean something ----
 
@@ -1507,6 +1755,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     tick++;
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
+                    binder.NoteInputSent(tick);
                     await PumpAsync(client, binder, localId, dt, ct, corrections);
                     lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
@@ -1535,6 +1784,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                 client.Session?.SendInput(sampleTick, forceDivergence ? 0f : 1f, 0f, "");
                 predictor?.RecordInput(sampleTick, 1f, 0f);
+
+                // The lead's pipeline term is measured from this pairing: the send stamped
+                // here, the acknowledgement seen by the binder. Without it the estimator has
+                // one end of the interval and offers nothing.
+                binder.NoteInputSent(sampleTick);
 
                 var sample = new Sample { VisibleTimedOut = true, AuthoritativeTimedOut = true };
                 bool sawVisible = false, sawAuthoritative = false;
@@ -1660,6 +1914,24 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     if (predictor != null)
                     {
                         run.PendingPeak = Math.Max(run.PendingPeak, predictor.PendingCount);
+
+                        // The age over the whole window, not just its last value. See
+                        // Run.SnapshotAges: one reading cannot tell a growing backlog from a
+                        // fit anchored before a displacement.
+                        if (binder.Staleness.IsUsable)
+                        {
+                            run.SnapshotAges.Add(binder.Staleness.StalenessTicks);
+                        }
+
+                        // The band, not just the last value. See Run.TickErrorMin.
+                        if (predictor.IsEnabled)
+                        {
+                            long err = predictor.TickError;
+                            if (err < run.TickErrorMin) run.TickErrorMin = err;
+                            if (err > run.TickErrorMax) run.TickErrorMax = err;
+                            run.TickErrorSampled = true;
+                        }
+
                         corrections.Poll();
                     }
 
@@ -1803,11 +2075,28 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // predictor, so the two columns are comparable and a difference between them is
             // itself a finding.
             run.StalenessFitted = binder.Staleness.IsUsable;
+            run.AgeIsFitted = binder.Staleness.AgeIsFitted;
+            run.AckObservations = binder.AckLatency.Samples;
+            run.AckObservationP10 = binder.AckLatency.ObservationQuantileTicks(0.10);
+            run.AckObservationMedian = binder.AckLatency.ObservationQuantileTicks(0.50);
             run.StalenessTicks = binder.Staleness.StalenessTicks;
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
             run.SkewPpm = binder.Staleness.SkewPpm;
+            run.RateCorroborated = binder.Staleness.RateCorroborated;
+            run.FitsUncorroborated = binder.Staleness.FitsUncorroborated;
+            run.FitsExtraordinary = binder.Staleness.FitsExtraordinary;
+            run.StalenessBaselineSeconds = binder.Staleness.BaselineSeconds;
+            run.StalenessFits = binder.Staleness.Fits;
+            run.StalenessFitsRefused = binder.Staleness.FitsRefused;
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
+            run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
+            run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
+            run.AckFloorSuperseded = binder.AckLatency.Superseded;
+            run.AckFloorAhead = binder.AckLatency.AckAheadOfSend;
+            run.AckFloorOffered = binder.AckLatency.HasEstimate;
+            run.AckFloorSwept = binder.AckLatency.SweptEnough;
+            run.AckFloorRefused = binder.AckLatency.Refused;
 
             var acked = run.Samples.Where(x => !x.AuthoritativeTimedOut)
                 .Select(x => x.InputToAuthoritativeMs).ToList();
@@ -1934,7 +2223,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
-                    (run.TickRateDisagrees ? "   <<< DISAGREES with the rate in use" : "   (agrees)") + "\n" +
+                    WireRateNote(run) + "\n" +
                 // ── THE CLOCK OFFSET ────────────────────────────────────────────────────
                 //
                 // Printed because its absence cost two investigations. A run reading
@@ -1946,6 +2235,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 // means on the two sides, and the reconcile reports the whole of it as
                 // position. Every one of these is a binder/link property, so they are printed
                 // for the prediction-OFF run too and the two columns compare.
+                $"  age measured against     {(run.AgeIsFitted ? "the fitted line" : "the UNIT-RATE floor")}" +
+                    (run.AgeIsFitted
+                        ? "   (the slope reproduced, so the residual is against it)\n"
+                        : "   <<< the slope was refused, so the age is a height above a\n" +
+                          "                             running minimum at UNIT RATE. That reading carries no slope\n" +
+                          "                             term, so it ACCUMULATES at the apparent skew: a client clock\n" +
+                          "                             n% fast adds n% of elapsed time to it every second, bounded\n" +
+                          "                             only by the floor's epoch memory.\n") +
                 $"  SNAPSHOT AGE measured    {run.StalenessTicks:F2} base ticks" +
                     (run.StalenessFitted
                         ? "   (fitted)"
@@ -1953,27 +2250,100 @@ namespace Cuvara.Netcode.Tests.PlayMode
                           "                             snapshots and a short run never gets one") + "\n" +
                 $"  TARGET LEAD in use       {run.TargetLeadTicks} base ticks" +
                     LeadNote(run) + "\n" +
+                $"  snapshot age band        " +
+                    (run.SnapshotAges.Count >= 4
+                        ? $"{run.SnapshotAgeMin:F2} .. {run.SnapshotAgeMax:F2}, " +
+                          $"first half {run.SnapshotAgeFirstHalf:F2} -> second half {run.SnapshotAgeSecondHalf:F2}" +
+                          (run.SnapshotAgeSecondHalf - run.SnapshotAgeFirstHalf >= 1.0f
+                              ? "\n                             <<< RISING by a whole base tick or more across the run"
+                              : run.SnapshotAgeMax > run.SnapshotAgeMin * 4f
+                                  ? "\n                             <<< a STEP rather than a trend, which is what a fit\n" +
+                                    "                             anchored before a displacement looks like"
+                                  : "   (flat: the age is a stable property of the route)")
+                        : "not sampled") + "\n" +
                 $"  snapshot gap measured    {run.SnapshotGapTicks} base ticks   " +
                     "(a lead equal to this is the warm-up fallback, not a measurement)\n" +
                 $"  round trip reported      {run.RoundTripMs} ms   " +
                     (run.RoundTripMs == 0
                         ? "<<< the session has reported none; the lead's round-trip term is 0"
                         : "(the lead adds half of this)") + "\n" +
-                $"  ACK FLOOR                {run.AckFloorTicks:F2} base ticks   " +
-                    "<<< upper bound on uplink + snapshot age, the term the\n" +
-                "                             lead is still missing. Residual correction should be\n" +
-                "                             ~1 step (clock quantisation) + this, less the lead.\n" +
+                $"  ACK FLOOR (harness)      {run.AckFloorTicks:F2} base ticks   " +
+                    "(smallest input->ack seen; upper bound on uplink + age)\n" +
+                $"  ack observations         {run.AckObservations} timed, " +
+                    $"p10 {run.AckObservationP10:F2} t, median {run.AckObservationMedian:F2} t   " +
+                    "(the estimator's OWN distribution — the\n" +
+                "                             harness floor below is 20 samples at a different phase and is\n" +
+                "                             not a reference for it)\n" +
+                $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
+                    (run.AckFloorOffered
+                        ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +
+                          "                             the staleness envelope absorbs"
+                        : run.AckFloorSwept
+                            ? "   <<< not offered yet: too few observations"
+                            : "   <<< NOT OFFERED: the wait never swept, so the\n" +
+                              "                             minimum is not evidence about the floor. The lead keeps\n" +
+                              "                             the round-trip fallback.") + "\n" +
+                $"  ack floor in the lead    {run.AckFloorContributionTicks:F2} base ticks   " +
+                    "(the floor less its unswept uncertainty — what the\n" +
+                "                             lead actually received. Fractional on purpose: truncating\n" +
+                "                             this to whole ticks is what left the term open.)\n" +
+                $"  ack floor refused        {run.AckFloorRefused}   " +
+                    "(observations too long to be a floor — stalls, not routes)\n" +
+                $"  ack floor ack-ahead      {run.AckFloorAhead}" +
+                    (run.AckFloorAhead > 0
+                        ? "   <<< THE SERVER ACKED A TICK THIS RUN NEVER SENT —\n" +
+                          "                             a previous session's LastInputTick, not yet reaped. Those\n" +
+                          "                             inputs are discarded; unguarded they pin the floor near zero.\n"
+                        : "   (no acknowledgement named an unsent tick)\n") +
+                $"  ack floor superseded     {run.AckFloorSuperseded}   " +
+                    "(inputs an ack drained without timing — a later input had\n" +
+                "                             already earned that ack, so the interval is not this pipeline)\n" +
+                $"  staleness fit            {run.StalenessFits} fitted, {run.StalenessFitsRefused} refused, " +
+                    $"baseline {run.StalenessBaselineSeconds:F1} s" +
+                    (run.StalenessFits == 0
+                        ? "\n                             <<< NO LINE WAS EVER FITTED. The ppm below is 0 because\n" +
+                          "                             there is no measurement, which is NOT the same as two clocks\n" +
+                          "                             that agree — do not read it as a control.\n"
+                        : "   (a floor step of d seconds fakes d/baseline\n" +
+                          "                             of slope, so the ppm below cannot be judged without this)\n") +
                 $"  clock rate difference    {run.SkewPpm:F0} ppm" +
                     (Math.Abs(run.SkewPpm) > 10_000
                         ? "   <<< the two clocks run at materially different rates\n" +
                           "                             (a few hundred ppm is two crystals; this is the machine)"
                         : "   (a few hundred is two ordinary crystals)") + "\n" +
+                $"  rate corroborated        {(run.RateCorroborated ? "yes" : "NO")}" +
+                    (run.RateCorroborated
+                        ? "   (reproduced over a doubled baseline, so it is a rate and\n" +
+                          "                             not a delay floor that moved — this is what lets it\n" +
+                          "                             reach the clock)"
+                        : "   <<< THE RATE ABOVE DID NOT REACH THE CLOCK. It did not\n" +
+                          "                             reproduce when the baseline doubled, so it is a\n" +
+                          "                             displacement divided by a baseline, not a rate. Early in\n" +
+                          "                             a session this is simply 'not yet'.") + "\n" +
+                $"  fits uncorroborated      {run.FitsUncorroborated}   " +
+                    "(fits refused for the clock; the AGE still uses the line)\n" +
+                $"  fits extraordinary       {run.FitsExtraordinary}" +
+                    (run.FitsExtraordinary > 0
+                        ? "   <<< a fit claimed the clocks differ by over 1% — either a\n" +
+                          "                             remarkable machine or a measurement across something\n" +
+                          "                             that moved, and both are worth seeing\n"
+                        : "   (no fit claimed more than a 1% clock difference)\n") +
                 $"  clock rate correction    {run.ClockRateScale:F4}x" +
                     (Math.Abs(run.ClockRateScale - 1f) < 1e-4f
                         ? "   (none applied — the clock runs at the client's own rate)"
                         : "   (server seconds per client second, from the fitted line)") + "\n" +
                 $"  clock error (last steer) {run.TickErrorTicks} base ticks" +
                     ClockErrorNote(run) + "\n" +
+                $"  clock error band         " +
+                    (run.TickErrorSampled
+                        ? $"{run.TickErrorMin} .. {run.TickErrorMax} base ticks   " +
+                          (run.TickErrorMax - run.TickErrorMin <= 1
+                              ? "(width <= 1: quantisation, read the band\n" +
+                                "                             and not the last sample)"
+                              : "   <<< the error MOVES over the run — a single\n" +
+                                "                             sample of it says nothing")
+                        : "NOT SAMPLED — the predictor is off, so the steer never ran and\n" +
+                          "                             the last-steer figure above is an unassigned 0, not a zero error") + "\n" +
                 $"  --- smoothness (per render frame, while moving) ---\n" +
                 $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
                     "high means the avatar teleports once per input and is frozen between\n" +
@@ -2263,6 +2633,53 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// and the whole of it comes back as position, at every start and stop.
         /// </para>
         /// </remarks>
+        /// <summary>
+        /// How the measured wire rate compares with the advertised one, as a percentage.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>"(agrees)" was hiding an 8% gap, and this is why the binary reading was wrong.</b>
+        /// <c>TickRateEstimator.DisagreementTolerance</c> is 15%, sized to catch a WRONG RATE —
+        /// the nearest realistic pair is 15 against 20 Hz, a 33% step, and the failure that
+        /// motivated it was 4x. Against that bar, a client measuring 55.0 Hz off a 60 Hz server
+        /// agrees, and the report said so on every arm of a run whose clock was being steered
+        /// 8% wrong.
+        /// </para>
+        /// <para>
+        /// The tolerance is not raised or lowered here, because it is right for what it is for:
+        /// a wrong rate and a distorted OBSERVATION of the right rate are different faults and
+        /// want different bands. A starved frame loop does not change the server's tick rate,
+        /// it changes what the client sees of it — and that is worth reading long before it
+        /// reaches 15%. So the gap is now always printed as a number, and a few percent is
+        /// called out as worth reading rather than silently folded into "agrees".
+        /// </para>
+        /// </remarks>
+        private static string WireRateNote(Run run)
+        {
+            if (run.MeasuredTickRate <= 0f || run.TickRateInUse <= 0)
+            {
+                return "   (no wire measurement)";
+            }
+
+            double gap = (run.MeasuredTickRate - run.TickRateInUse) / (double)run.TickRateInUse;
+            string pct = $"{gap * 100.0:+0.0;-0.0;0.0}%";
+
+            if (run.TickRateDisagrees)
+            {
+                return $"   <<< DISAGREES with the rate in use ({pct})";
+            }
+
+            if (Math.Abs(gap) >= 0.03)
+            {
+                return $"   <<< {pct} against the advertised rate. Inside the 15%\n" +
+                       "                             DisagreementTolerance, so not a wrong rate — but the client\n" +
+                       "                             is not seeing the stream at the rate the server sends it,\n" +
+                       "                             which is what a starved frame loop looks like from here.";
+            }
+
+            return $"   (agrees, {pct})";
+        }
+
         private static string ClockErrorNote(Run run)
         {
             if (Math.Abs(run.TickErrorTicks) <= 1)
@@ -2279,14 +2696,34 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             if (Math.Abs(droop) >= 1.0 && Math.Sign(droop) == Math.Sign(run.TickErrorTicks))
             {
-                return $"   <<< PROPORTIONAL DROOP, not a lost clock: a {run.SkewPpm:F0} ppm\n" +
-                       $"                             rate difference drifts {drift:F1} ticks/s and " +
-                       $"steering at gain 0.1\n" +
-                       $"                             x {snapshotHz:F0} Hz settles at {droop:F1}. " +
-                       "Feed the fitted rate to the clock.";
+                // NOT "feed the fitted rate to the clock" any more. That advice predates the
+                // corroboration gate and now recommends precisely what the gate exists to
+                // prevent: the large ppm this branch fires on is usually an uncorroborated fit,
+                // and feeding it is how a client ends up running its clock several percent wrong
+                // on purpose. Read `rate corroborated` before believing the ppm at all.
+                return $"   <<< the droop this SIZE implies: a {run.SkewPpm:F0} ppm rate\n" +
+                       $"                             difference drifts {drift:F1} ticks/s and steering at gain 0.1\n" +
+                       $"                             x {snapshotHz:F0} Hz settles at {droop:F1}. But check `rate " +
+                       "corroborated`\n" +
+                       "                             first — if it reads NO, that ppm is a displacement over a\n" +
+                       "                             baseline and this arithmetic is describing a rate that does\n" +
+                       "                             not exist.";
             }
 
-            return "   <<< the clock is not tracking the steering target";
+            // NOT "the clock is not tracking". This branch used to say that, and on this
+            // package it can no longer support the claim: the droop test above is computed
+            // from SkewPpm, and since the fitted rate is fed to the clock through
+            // SetClockRateScale the drift it tests for is ~0 by design — so the droop branch
+            // never fires and EVERY error of 2 or more falls through to here regardless of
+            // cause. An alarming string that is reached by construction is not a finding.
+            //
+            // Read the band on the next line instead. And note the target this is measured
+            // against MOVED when the acknowledgement floor entered the lead: the same clock
+            // reads one lower per tick of TargetLeadTicks, so this figure is not comparable
+            // across builds that changed the lead arithmetic.
+            return "   (2+ ticks off the target — read the band below before\n" +
+                   "                             concluding anything; the droop test above cannot\n" +
+                   "                             fire once the fitted rate is fed to the clock)";
         }
 
         private static string LeadNote(Run run)

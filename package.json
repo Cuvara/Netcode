@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -61,7 +61,7 @@
     },
     {
       "displayName": "Clock Sync Probe",
-      "description": "Two synthetic clocks, no server, no network: a dial sets how fast the client's clock runs against the server's, SnapshotStalenessEstimator fits the ratio from snapshot arrivals alone, and the prediction clock steers on it. The default dial position is the development machine's own measured +110,000 ppm — the value that silently disabled the fit until 0.23.0 — so convergence, refusal past the clamp, a stalled frame and a stepped server clock can each be seen rather than read about.",
+      "description": "Two synthetic clocks, no server, no network: a dial sets how fast the client's clock runs against the server's, SnapshotStalenessEstimator fits the ratio from snapshot arrivals alone, and the prediction clock steers on it. Convergence, refusal past the clamp, a stalled frame and a stepped server clock can each be seen rather than read about. 'Raise delivery floor' is the one to press: it adds a sustained delivery delay while leaving the two clocks in perfect agreement, and the fit reports tens of thousands of ppm anyway — the defect v0.34.0 closes. Watch corroborated stay NO and both the clock rate and the age refuse to follow it. The +110,000 ppm dial default was once recorded as this machine's measured ratio; it has been falsified (220 ppm idle) and is kept as a synthetic stress case at the clamp boundary.",
       "path": "Samples~/ClockSyncProbe"
     },
     {

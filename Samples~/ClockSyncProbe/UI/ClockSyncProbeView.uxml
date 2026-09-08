@@ -41,7 +41,8 @@
             <engine:VisualElement class="cuvara-probe__row">
                 <engine:Button name="stall" text="Stall a frame (250 ms)" class="cuvara-probe__button" />
                 <engine:Button name="step-clock" text="Step server clock +5 s" class="cuvara-probe__button" />
-                <engine:Button name="reset" text="Reset"
+                <engine:Button name="floor-step" text="Raise delivery floor (+300 ms)" class="cuvara-probe__button" />
+                        <engine:Button name="reset" text="Reset"
                                class="cuvara-probe__button cuvara-probe__button--secondary" />
                 <engine:Toggle name="pause" text="Pause" class="cuvara-probe__toggle" />
             </engine:VisualElement>
