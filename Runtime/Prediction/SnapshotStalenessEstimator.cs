@@ -281,6 +281,19 @@ namespace Cuvara.Netcode.Prediction
         public bool IsUsable => _haveFit;
 
         /// <summary>
+        /// Whether <see cref="StalenessTicks"/> is measured against the fitted line, rather
+        /// than against the unit-rate provisional floor.
+        /// </summary>
+        /// <remarks>
+        /// <b><see cref="IsUsable"/> is not this, and reading it as this was a defect.</b> It
+        /// says a line was fitted; it does not say the line is trustworthy. The age is
+        /// <c>y - (offset + skew * x)</c>, so an uncorroborated SLOPE steers the age exactly as
+        /// it would have steered the clock — the further <c>x</c> runs from the anchor, the
+        /// larger the displacement. Gating the clock alone left that route wide open.
+        /// </remarks>
+        public bool AgeIsFitted => _haveFit && RateCorroborated;
+
+        /// <summary>
         /// Whether <see cref="StalenessTicks"/> carries a reading at all — fitted, or the
         /// provisional one taken above the running floor before the fit lands.
         /// </summary>
@@ -440,7 +453,11 @@ namespace Cuvara.Netcode.Prediction
 
             // The unit-rate floor, kept across epochs. `residual` is y - x exactly while
             // there is no fit, which is that same unit-rate line.
-            if (!_haveFit)
+            //
+            // Kept live while a fit exists but is UNCORROBORATED, because that is when the
+            // provisional reading below is the one being used and a frozen floor would make it
+            // stale. See the age branch beneath.
+            if (!_haveFit || !RateCorroborated)
             {
                 double unit = y - x;
                 if (!_haveFloor || unit < _floorResidual)
@@ -450,7 +467,23 @@ namespace Cuvara.Netcode.Prediction
                 }
             }
 
-            if (_haveFit)
+            // THE AGE IS MEASURED AGAINST THE FITTED LINE ONLY ONCE THE SLOPE IS CORROBORATED,
+            // AND THAT IS THE OTHER HALF OF THE RATE FIX.
+            //
+            // `above` subtracts `_offset + _skew * x`, and `_skew` is the SAME slope
+            // RateCorroborated refuses. So gating only the clock left the refused slope steering
+            // the lead by the other route, undiminished and growing with the distance from the
+            // anchor: measured live, a 51 225 ppm fit over a 6.1 s baseline displaces the line by
+            // 0.31 s -- 18.7 base ticks -- and the age read 5.24 against a true idle age of 0.06,
+            // taking the lead to 6 on a run where the rate had been correctly refused.
+            //
+            // An uncorroborated fit therefore falls back to the provisional reading below, which
+            // is measured at UNIT RATE against a running floor and so cannot accumulate with the
+            // baseline at all. That is not a new code path invented for this: it is the branch
+            // that already exists for the pre-fit window, and it is safe for exactly the reason
+            // it was safe there -- it carries no slope. The caller must clamp it from above; see
+            // HasEstimate, and WorldViewBinder.TargetLeadTicks does so with Math.Min(.., gap).
+            if (_haveFit && RateCorroborated)
             {
                 double above = y - (_offset + _skew * x);
                 if (above < 0) above = 0;

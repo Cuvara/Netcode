@@ -631,5 +631,49 @@ namespace Cuvara.Netcode.Tests.Editor
                 + "an error rather than a correction. Nothing enforced it and the correction "
                 + "was issued anyway; now at least it is visible.");
         }
+
+        /// <summary>
+        /// A refused slope must not reach the AGE either. It is the same fit, and the age is the
+        /// height above it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Gating the clock alone was half a fix, and the counter said so.</b> The age is
+        /// <c>y - (offset + skew * x)</c>, so the slope <see cref="SnapshotStalenessEstimator.RateCorroborated"/>
+        /// refuses is the same slope the residual is measured against — refusing it for the
+        /// clock left it steering the lead by the other route, undiminished, and growing with
+        /// the distance from the anchor.
+        /// </para>
+        /// <para>
+        /// Measured live on a run where the rate was correctly refused: a 51 225 ppm fit over a
+        /// 6.1 s baseline displaces the line by 0.31 s — <b>18.7 base ticks</b> — and the age
+        /// read <b>5.24</b> against a true idle age of 0.06, taking the lead to 6 where healthy
+        /// runs sat at 1. The correction stayed at three whole steps with every rate counter
+        /// reading clean.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ARefusedSlopeDoesNotReachTheAgeEither()
+        {
+            // Two clocks that genuinely agree, with a 300 ms delay floor arriving at 6 s: the
+            // fit lands, the slope is a displacement over a baseline, and nothing may believe it.
+            var e = Run(seconds: 40.0, rate: 1.0, floorStep: 0.300, stepAt: 6.0);
+
+            Assert.That(e.IsUsable, Is.True, "precondition: a line was fitted");
+            Assert.That(e.RateCorroborated, Is.False, "precondition: and its slope was refused");
+
+            Assert.That(e.AgeIsFitted, Is.False,
+                "the age must fall back to the unit-rate provisional reading, which carries no "
+                + "slope and so cannot accumulate with the baseline. Measuring it against the "
+                + "refused line is how the slope kept steering the lead after the clock stopped "
+                + "listening to it.");
+
+            // The true age here is the 300 ms step above the pre-step floor: 18 base ticks. What
+            // must NOT happen is the reading running away with the distance from the anchor.
+            Assert.That(e.StalenessTicks, Is.LessThan(60f),
+                "the provisional reading is a height above a running floor at unit rate. It is "
+                + "bounded by what the route actually did; a slope-derived one is bounded by "
+                + "nothing but the baseline, and the caller's ceiling.");
+        }
     }
 }

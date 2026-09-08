@@ -73,6 +73,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different faults wanting different bands — but a gap of 3% or more is now called out as the
   starved-frame-loop signature it is.
 
+- **A refused slope no longer reaches the lead through the snapshot age either.** Gating the
+  clock was half a fix. `StalenessTicks` is `y - (offset + skew * x)`, and `skew` is the *same*
+  slope `RateCorroborated` refuses — so an uncorroborated fit went on steering the lead through
+  the residual, undiminished, and growing with the distance from the anchor. Measured live on a
+  run where the rate was correctly refused and every rate counter read clean: a **51 225 ppm** fit
+  over a **6.1 s** baseline displaces the line by 0.31 s — **18.7 base ticks** — the age read
+  **5.24** against a true idle age of 0.06, the lead went to **6** where healthy runs sat at 1,
+  and the correction stayed at three whole steps. An uncorroborated fit now falls back to the
+  **provisional** reading, which is measured at unit rate against a running floor and therefore
+  cannot accumulate with the baseline at all. That is not new code: it is the branch that already
+  existed for the pre-fit window, safe for exactly the reason it was safe there — it carries no
+  slope — and `TargetLeadTicks` already clamps it with `Math.Min(.., gap)`. The unit-rate floor is
+  now kept live while a fit exists but is uncorroborated, so that reading does not go stale. New
+  `AgeIsFitted` says which line the age is measured against; **`IsUsable` does not mean that and
+  reading it as though it did was the defect.** The comment it replaced in `TargetLeadTicks` —
+  *"A fitted line. Believe it; the ceiling below is the only guard it needs"* — was true while the
+  only thing that could go wrong with a fit was noise, and is not true now that a fit can be a
+  displacement divided by a baseline.
+
 - **A fitted clock rate no longer reaches the clock unless it reproduces over a doubled
   baseline.** `SnapshotStalenessEstimator` fits a line through two best-case samples, and that
   line is a *rate* only if the **minimum achievable delay was the same at both anchors**. The

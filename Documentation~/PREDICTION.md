@@ -316,9 +316,16 @@ the clock. Comparing consecutive fits does not work — a decay's change between
 under any fixed tolerance once the baseline is long enough, and a 300 ms step self-corroborates
 at about 25 s on a reading still 12 000 ppm wrong.
 
-Note the split: `IsUsable` gates the **age**, `RateCorroborated` gates the **rate**. A wrong
-slope perturbs a residual slightly, once per snapshot; it perturbs a clock rate every second,
-forever. Those are different evidence bars and they used to share one gate.
+**One gate, not two, and the first attempt got that wrong.** The rate was gated on
+`RateCorroborated` and the age left on `IsUsable`, reasoning that a wrong slope perturbs a
+residual only slightly while it perturbs a clock rate forever. That argument is about the
+*slope*; the age is the *height above a line the slope tilts*, and the envelope's intercept is
+anchored to a single sample — so the same displacement moves both. Live, with the rate correctly
+refused, a 51 225 ppm fit over a 6.1 s baseline still drove the age to 5.24 base ticks against a
+true idle 0.06 and the lead to 6. An uncorroborated fit now sends the age down the **provisional**
+path too: unit rate, a running floor, no slope, and clamped by the caller to the snapshot gap.
+`AgeIsFitted` reports which line the age is measured against — `IsUsable` only ever meant "a line
+was fitted".
 
 In the measurement report, read `rate corroborated` before `clock rate difference`. `NO` beside a
 large ppm is the artefact being caught; `NO` beside a small one, early in a session, is simply a

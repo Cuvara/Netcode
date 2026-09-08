@@ -422,9 +422,18 @@ namespace Cuvara.Netcode.View
             int gap = TickRate.SnapshotTickGap > 0 ? TickRate.SnapshotTickGap : 1;
 
             float lead;
-            if (Staleness.IsUsable)
+            if (Staleness.AgeIsFitted)
             {
-                // A fitted line. Believe it; the ceiling below is the only guard it needs.
+                // A fitted line WHOSE SLOPE HAS REPRODUCED. Believe it; the ceiling below is
+                // the only guard it then needs.
+                //
+                // This used to read `Staleness.IsUsable`, with the comment "A fitted line.
+                // Believe it." That was true while the only thing that could go wrong with a
+                // fit was noise. It is not true now that a fit can be a displacement divided by
+                // a baseline: the age is the height above THAT line, so an uncorroborated slope
+                // reached the lead through the residual even after the clock stopped listening
+                // to it. Live, with the rate correctly refused, a 51 225 ppm fit still drove the
+                // age to 5.24 base ticks against a true idle 0.06, and the lead to 6.
                 lead = Staleness.StalenessTicks;
             }
             else if (Staleness.HasEstimate)

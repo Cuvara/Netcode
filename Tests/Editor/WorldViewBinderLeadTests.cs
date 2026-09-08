@@ -122,8 +122,12 @@ namespace Cuvara.Netcode.Tests.Editor
 
             // Long enough for a fit, with one snapshot held for six ticks at the end: a real,
             // measured age larger than the derived figure must survive.
-            double until = now + SnapshotStalenessEstimator.MinimumBaselineSeconds
-                               + SnapshotStalenessEstimator.EpochSeconds * 2;
+            // Long enough to CORROBORATE, not merely to fit. The first fit lands at the
+            // minimum baseline and only sets the reference; the slope is believed once it has
+            // reproduced over a doubled baseline, which needs roughly four times the minimum.
+            // Warming only to the first fit leaves the age on the provisional path, where it is
+            // clamped to the snapshot gap — correct behaviour, and not what these two pin.
+            double until = now + SnapshotStalenessEstimator.MinimumBaselineSeconds * 5;
             while (now < until)
             {
                 binder.TickRate.Sample(tick, now);
@@ -133,6 +137,9 @@ namespace Cuvara.Netcode.Tests.Editor
             }
 
             Assert.That(binder.Staleness.IsUsable, Is.True, "precondition: a line must be fitted");
+            Assert.That(binder.Staleness.AgeIsFitted, Is.True,
+                "precondition: and its slope must have reproduced, or the age is measured "
+                + "against the unit-rate floor instead and this test is pinning the wrong branch");
 
             binder.TickRate.Sample(tick, now + 6.0 / BaseHz);
             binder.Staleness.Sample(tick, now + 6.0 / BaseHz, BaseHz);
@@ -276,8 +283,12 @@ namespace Cuvara.Netcode.Tests.Editor
             long tick = 1000;
             double now = ClockOffset + tick / (double)BaseHz + 0.010;
 
-            double until = now + SnapshotStalenessEstimator.MinimumBaselineSeconds
-                               + SnapshotStalenessEstimator.EpochSeconds * 2;
+            // Long enough to CORROBORATE, not merely to fit. The first fit lands at the
+            // minimum baseline and only sets the reference; the slope is believed once it has
+            // reproduced over a doubled baseline, which needs roughly four times the minimum.
+            // Warming only to the first fit leaves the age on the provisional path, where it is
+            // clamped to the snapshot gap — correct behaviour, and not what these two pin.
+            double until = now + SnapshotStalenessEstimator.MinimumBaselineSeconds * 5;
             while (now < until)
             {
                 binder.TickRate.Sample(tick, now);
@@ -287,6 +298,9 @@ namespace Cuvara.Netcode.Tests.Editor
             }
 
             Assert.That(binder.Staleness.IsUsable, Is.True, "precondition: a line must be fitted");
+            Assert.That(binder.Staleness.AgeIsFitted, Is.True,
+                "precondition: and its slope must have reproduced, or the age is measured "
+                + "against the unit-rate floor instead and this test is pinning the wrong branch");
 
             // 100 ms round trip at 60 Hz is 6 ticks.
             binder.RoundTripMs = 100;
