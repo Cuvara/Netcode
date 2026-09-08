@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `## [0.35.0]` entry contradicted its own code in four places, and is corrected in place
+  rather than by deletion.** That entry was assembled from five branches over one day, each
+  written about the state at its own moment, and the merges reconciled the code without
+  reconciling the prose. **Nothing in it was wrong when it was written; it became wrong when the
+  halves met in one release** — which is the failure that entry is itself named about, arriving in
+  the release notes instead of in the code.
+
+  Corrected: the `Notes` bullet deferring the `Quantile` degeneracy ("not fixed here") against the
+  `Fixed` bullet and `MinimumSweepSamples` that fix it — and its `n ≥ 10` bound, which is `n ≥ 11`;
+  the caveat-audit table row still marking that degeneracy **stands**; the `Limitations` paragraph
+  calling `AckAheadOfSend` "a guard nobody has watched act" after `AckAheadOfSendInduction` made it
+  read **1**; and the `Open terms` retirement recorded conditionally on a proposal that was adopted
+  in the same release. In every case the original wording is quoted and the sequence made visible,
+  so a reader who remembers the old claim finds out it changed rather than finding silence.
+
 ## [0.35.0] - 2026-09-08
 
 > **The defect: a constant that was correct, used for something it does not describe.**
@@ -826,19 +843,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regardless — but the record should not leave the porosity case looking better supported than it
   is.
 
-  The left-tail rate remains unmeasured and is still worth measuring, for a narrower reason: it
-  converts `AckAheadOfSend` from a guard nobody has watched act into a measurement. It has read 0
-  on seven consecutive runs, which means the condition did not arise on those runs, not that it
-  cannot. The documented cause is an acknowledgement naming a tick this session never sent — a
-  reconnect onto a server still holding the previous session's `LastInputTick`. **That experiment
-  can only measure the one cause the package counts; an unknown cause is invisible to every
-  instrument here, so a null result narrows the question rather than closing it.**
+  The left-tail rate remains unmeasured and is still worth measuring — **but the narrower reason
+  first recorded for it has since been discharged, by the induction run named two paragraphs
+  above.** It was written here as: *"it converts `AckAheadOfSend` from a guard nobody has watched
+  act into a measurement. It has read 0 on seven consecutive runs, which means the condition did
+  not arise on those runs, not that it cannot."* The seven zeroes stand; what changed is the
+  eighth reading. `AckAheadOfSendInduction` induced the condition deliberately and **the guard
+  fired — `AckAheadOfSend` 1** (see `### Added`), so it is no longer a guard nobody has watched
+  act, and a zero from here is evidence of absence from an instrument known to function. What is
+  still unmeasured is the **rate in normal operation**, about which one deliberately induced
+  occurrence says nothing — which is the reason the experiment is still worth running, narrower
+  again than the one it replaces. The documented cause is an acknowledgement naming a tick this
+  session never sent — a reconnect onto a server still holding the previous session's
+  `LastInputTick`. **That experiment can only measure the one cause the package counts; an unknown
+  cause is invisible to every instrument here, so a null result narrows the question rather than
+  closing it.**
 
   *A sequencing disclosure, because a reader should be able to judge this rather than trust it.*
   The porosity finding above was made **after** the load run had already retired the percentile's
   original justification, which is the shape of a post-hoc rescue. It is offered as falsifiable
   rather than as argued: the reconnect experiment settles it either way, and it was named as the
-  decisive one before this proposal was written down.
+  decisive one before this proposal was written down. **That offer was taken up rather than left
+  standing: the experiment has since been run, and it settled against the porosity argument — see
+  the paragraph above.** The disclosure is kept as written because it is what made the finding
+  falsifiable in the first place; only its future tense has expired.
 
   **The load run retired the percentile's original defence and did not touch this one.** Under an
   8-player load the ladder stayed straight — residuals 0.03 and 0.07, `q00` on the fitted line
@@ -910,8 +938,10 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   restated as something that follows from what it is correcting for, or removed in favour of one
   that is.
 
-  **Retired by consequence, not fixed, if the proposal above is adopted.** Subtracting a *measured*
-  statistical bias (`0.10 × measured_slope`) removes the reason to subtract the unrelated
+  **Retired by consequence, not fixed — recorded here conditionally, as *"if the proposal above
+  is adopted"*, and the proposal was adopted in this same release, so the condition is met rather
+  than pending.** Subtracting a *measured* statistical bias (`0.10 × measured_slope`) removes the
+  reason to subtract the unrelated
   `UnsweptSeconds`, and with it the coincidence. The arithmetic above stays recorded rather than
   deleted, because "this term was removed because something else replaced its job" and "this term
   was correct" are different histories, and only the first one warns the next person who reaches
@@ -950,10 +980,27 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   `_obsCount == 8` — exactly `MinimumSamples` — the tenth percentile is index 0 and the ninetieth
   is index 7: **the minimum and the maximum**, which is precisely the `max - min` statistic the
   guard was rewritten to stop being, and which a single outlier satisfies. The same holds at
-  n = 9. From **n ≥ 10** the low quantile moves off index 0 and the statistic becomes a real order
-  statistic. Not fixed here — tuning a guard's constants while changing the cadence feeding it
-  would make neither result attributable — and logged so it joins the known list rather than being
-  rediscovered.
+  n = 9. At n = 10 the low quantile moves off index 0, but `(int)(0.9 × 10)` is 9, still the last
+  index of ten — so the degenerate window is `8 .. 10`, one observation wider than this note said
+  when it first stopped at *"from n ≥ 10 the statistic becomes a real order statistic"*. The
+  correct bound is in `### Fixed` above.
+
+  **This was recorded as deferred and it is no longer deferred, and the sequence is the point
+  rather than the outcome.** It was logged here as *"not fixed here — tuning a guard's constants
+  while changing the cadence feeding it would make neither result attributable — and logged so it
+  joins the known list rather than being rediscovered"*, and that reasoning was correct at the
+  moment it was written: the cadence work was in flight, and a guard tuned against a moving input
+  yields no attributable result for either change. **The reason expired rather than being
+  overruled.** Once the cadence change landed on its own branch the input feeding the guard was
+  fixed, the attribution objection stopped applying, and the fix followed in a separate change
+  where it *was* attributable — `MinimumSweepSamples`, a refusal derived from `SweepLowQuantile`
+  and `SweepHighQuantile` rather than the tuned constant the deferral was written to avoid. See
+  **`### Fixed`** above.
+
+  Corrected in place rather than deleted, because this is the failure this release is named
+  about arriving in the release notes themselves: **neither half was wrong when it was written,
+  and the entry became wrong when the two met in one release.** A deferral records a reason, and
+  a reason can expire without anybody overturning it.
 
 - **Known pre-existing discrepancy, unchanged by this work.** `GameConstants.MaxBankedMovementMs`
   reasons that `MaxBankedMovementTicks(15) = 4` ticks of 66.7 ms covers a bursting client's 264 ms
@@ -986,7 +1033,7 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   | at exactly 60 fps the constant is unrecoverable | **stands** — it decides whether a run can be read at all |
   | a non-uniform clock breaks the ladder | **stands** — it changes what must be checked (the residual) |
   | the clock error reaches the steering lead, not just the report | **stands, bounded** — real, and at most `0.02 × floor` on any run the validity gate admits |
-  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **stands** — the guard's first verdict is its weakest |
+  | `Quantile` degenerates to min/max at `n == MinimumSamples` | **was "stands — the guard's first verdict is its weakest"; now closed** — the arithmetic is unchanged and still true, but `MinimumSweepSamples` refuses a span verdict across the whole `8 .. 10` window, so the first verdict is no longer taken from the extremes. Closed by the fix, not by the audit |
 
   **The guard on the principle, which matters more than the principle.** "No consequence for the
   action" has to mean *no consequence for any action anyone might take with this information* —
