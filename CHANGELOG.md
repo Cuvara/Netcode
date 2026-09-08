@@ -42,6 +42,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > matter and costs nothing where it cannot, not because it improves the reading on the machine this
 > shipped from.**
 >
+> **A statistic computed from a fit that includes the suspect point cannot detect that point.**
+> Three detectors for sparse left-tail contamination were built and all three failed, and it took
+> the third to see that they had failed for one reason rather than three. The maximum residual
+> understates a dropped `q00`; a leave-one-out variant *flips sign* as contamination grows; and
+> `q00 − intercept` has no resolution at all — clean runs read +0.01…+0.05 and a run with one bad
+> observation in 128 reads −0.11…+0.11. In every case **the contaminated point is inside the fit,
+> so the line follows it down and the discrepancy the test looks for is absorbed by the thing it
+> is measured against.** Detection has to come from data the fit excludes, or from outside the fit
+> entirely — which is what `AckAheadOfSend` is, and why a counter that is *narrower than the
+> question* is the only working left-tail instrument in the package. Generalised: **when a test and
+> the thing it tests share an input, agreement is not evidence.**
+>
+> **Prefer operations that cannot be partially wrong; where you cannot have that, build the check
+> the measurement lacks.** Five times in one day an operation touched more than it was aimed at.
+> Four were silent — a server unregistered in Redis so the gateway routed elsewhere, a stale test
+> assembly, an environment that never crossed the WSL boundary, a stale results file — and each
+> produced internally consistent numbers about the wrong object. The fifth, a version-pinning regex
+> that matched every git dependency instead of one, **failed loudly and immediately**. The
+> difference is not luck: package resolution carries a *total* correctness check, since every
+> dependency must resolve, while a measurement carries none and will report faithfully on whatever
+> it was pointed at. That asymmetry is what the run precondition gate exists to close, and it
+> fired on its first deliberate test.
+>
 > **And one no-op in the opposite direction.** A cadence change alone greps clean, reads as a fix
 > in the diff, and does nothing at all on the target machine, because the defect lives in the loop
 > shape rather than in the constant. It was caught only because the recommendation was run against
@@ -468,14 +491,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present would have seen it. And **the only left-tail cause with a detector is the one
   `AckAheadOfSend` counts**; an unknown cause is invisible to everything this harness prints.
 
-  **THE LEFT-TAIL RATE ON THIS SYSTEM IS UNMEASURED, AND THAT IS WHAT DECIDES THIS.** The proposal's
-  own falsifier is a rate above ~5%, where nothing tested here survives. The rate is measurable and
-  the experiment is not the load run: the documented cause is an acknowledgement naming a tick this
-  session never sent — a reconnect onto a server still holding the previous session's
-  `LastInputTick` — which `Samples~/ReconnectPolicyDemo` can induce. `AckAheadOfSend` has read 0 on
-  seven consecutive runs, which means the condition did not arise on those runs, not that it cannot.
-  **If it cannot be induced, or induces negligibly, this proposal loses its force and the
-  percentile is undefended** — see the note below on where its original defence went.
+  **THE ARGUMENT THAT CARRIES THIS DOES NOT DEPEND ON ANY CONTAMINATION RATE, AND THAT IS WHY THE
+  PROPOSAL IS NOT HELD ON AN UNRUN EXPERIMENT.** It was first argued from guard porosity, which
+  does depend on the rate; that argument is weaker than the one that replaced it. The one that
+  carries it is the **direction of harm on a healthy run**: the raw tenth percentile is
+  systematically biased by `0.1 · S` in the *over-lead* direction — the original defect arriving
+  from the other side — on every clean run, whether or not any contamination exists. Subtracting
+  the measured bias removes that, and the corrected statistic then under-reads under contamination,
+  which is the direction this package calls tolerable. **Safe on clean data and safe when wrong**,
+  with no rate in the argument.
+
+  The left-tail rate remains unmeasured and is still worth measuring, for a narrower reason: it
+  converts `AckAheadOfSend` from a guard nobody has watched act into a measurement. It has read 0
+  on seven consecutive runs, which means the condition did not arise on those runs, not that it
+  cannot. The documented cause is an acknowledgement naming a tick this session never sent — a
+  reconnect onto a server still holding the previous session's `LastInputTick`. **That experiment
+  can only measure the one cause the package counts; an unknown cause is invisible to every
+  instrument here, so a null result narrows the question rather than closing it.**
 
   *A sequencing disclosure, because a reader should be able to judge this rather than trust it.*
   The porosity finding above was made **after** the load run had already retired the percentile's
