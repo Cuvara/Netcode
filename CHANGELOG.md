@@ -127,15 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > a discriminating synthetic test is not a weaker grade of the same evidence: **it is the only kind
 > of evidence available.**
 >
-> The ledger is therefore **one fix confirmed live across three environments, eight confirmed
-> against synthetic conditions that reproduce and discriminate, and a live in-suite context that is
-> unmeasurable rather than failing.** Ordered weakest first, so a reader hunting a regression has a
+> The ledger is therefore **two fixes confirmed live — one by a before/after between two runs the
+> validity gate admits, one by a behavioural falsifier across four environments — five confirmed
+> against synthetic conditions that reproduce and discriminate, one structural-only with no test
+> and zero live magnitude, one retained for attribution reasons alone, and a machine that cannot
+> currently measure the thing this branch is about in any context tried.** Ordered weakest first, so a reader hunting a regression has a
 > map of where to look rather than a reassurance.
 >
 > | Fix | Validation |
 > |---|---|
-> | Saturated provisional age refused | **Confirmed.** Falsifier stated in advance — large skew *and* `TARGET LEAD 4` would mean failure. Measured: 90 833 ppm, lead **0**. |
-> | Age gated on corroboration (`AgeIsFitted`) | **Confirmed on one run.** `reconciles from history` 39 hit/120 missed → 147/15, age 45.56 → 0.09. Single run, and a single run is now known to be worth little. |
+> | Age gated on corroboration (`AgeIsFitted`) | **Confirmed on two measurable runs.** `reconciles from history` 39 hit/120 missed → **147/15**, age 45.56 → 0.09 — and the before/after runs read **59.5 Hz (−0.8%)** and **60.1 Hz (+0.2%)**, so *both pass the 2% validity gate*. The only before/after comparison in this work drawn between two runs the gate would admit. |
+> | Saturated provisional age refused | **Confirmed behaviourally, four times, in four environments** (90 833 / 35 532 / 39 235 / 90 690 ppm, the last with a single test in the process). Falsifier stated in advance: large skew *and* `TARGET LEAD 4` would mean failure; measured lead **0** every time. Note all four runs **fail** the validity gate — which does not weaken it, because the check is whether a code path fired, not what a correction figure read. A behavioural falsifier survives an unmeasurable run; a numeric comparison does not. |
 > | Rate gated on corroboration (`RateCorroborated`) | **Synthetic, discriminating.** Delay-floor step reproduces the artefact in a test; live readings of 220 ppm idle against 90 636 loaded on one machine. |
 > | Sweep guard: span between quantiles + bucket occupancy | **Synthetic, discriminating.** Two tests fail against the extremes-based span. First *observed* discriminating in run 2 (p10–median spread 3.09 offered, 0.28 refused) — after the fix, not as validation of it. |
 > | Acknowledgement floor carried as a fraction | **Synthetic, discriminating.** `Math.Floor` demonstrably returned 0 for both live readings (0.14, 0.68). |
