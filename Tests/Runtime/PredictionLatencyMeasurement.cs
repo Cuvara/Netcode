@@ -1172,6 +1172,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "by its 'LiveBackend' category. " + LiveBackendConfig.Describe());
             }
 
+            Debug.Log("[Measure] config provenance: " + LiveBackendConfig.DescribeProvenance());
             Debug.Log("[Measure] endpoints: " + LiveBackendConfig.Describe() +
                       "\n[Measure] NOTE: the tickRate above is only a FALLBACK. The rate " +
                       "actually predicted with comes from the server and is reported per run below.");
@@ -1262,6 +1263,54 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // silently annotated one gets quoted six months later. Inconclusive rather than
             // failed, because nothing here says the code is wrong -- only that this run cannot
             // say whether it is.
+            // THE RUN MUST HAVE MEASURED THE SERVER IT WAS CONFIGURED FOR, AND THIS IS
+            // CHECKED RATHER THAN PRINTED.
+            //
+            // Three times in one day an experiment ran to completion against the wrong object
+            // and produced internally consistent numbers: a game server that never registered
+            // in Redis so the gateway routed elsewhere; a `dotnet test` that re-ran a stale
+            // assembly; and an S-halving run whose environment never crossed the WSL/Windows
+            // boundary, so it measured the 15 Hz server while the 30 Hz one sat idle. In every
+            // case the output looked exactly as a SUCCESSFUL run was predicted to look, which
+            // is precisely why a human reading the log is not a sufficient check.
+            //
+            // The comparison is in TICKS, deliberately, because a tick count is skew-invariant.
+            // Comparing measured Hz against configured Hz would false-fail on a client whose
+            // clock is fast -- the very arm where the ladder is still readable -- since a 9%
+            // fast clock makes a healthy stream look 9% slow. The gap between snapshots in base
+            // ticks is a property of the server's own schedule and is unaffected by how fast
+            // the observer's clock runs.
+            if (withPrediction.SnapshotGapTicks > 0 &&
+                withPrediction.TickRateInUse > 0 &&
+                LiveBackendConfig.SnapshotRateHz > 0)
+            {
+                int expectedGap = (int)Math.Round(
+                    withPrediction.TickRateInUse / (double)LiveBackendConfig.SnapshotRateHz);
+
+                // A QUARTER OF THE EXPECTED GAP, not exact equality. The gap is an estimate off
+                // the wire and can wobble by a tick; failing a healthy run for that would make
+                // this gate the thing people disable. A routing error is not a wobble -- it is
+                // the gap doubling or halving -- so a tolerance of 25% separates the two
+                // cleanly: at an expected 4 it admits 3..5, and still catches the 2 that a
+                // 30 Hz configuration landing on a 15 Hz server produces.
+                if (expectedGap > 0 &&
+                    Math.Abs(withPrediction.SnapshotGapTicks - expectedGap) > expectedGap * 0.25)
+                {
+                    Assert.Inconclusive(
+                        "WRONG SERVER, not a result: this run was configured for a " +
+                        $"{LiveBackendConfig.SnapshotRateHz} Hz snapshot rate, which at " +
+                        $"{withPrediction.TickRateInUse} Hz base is {expectedGap} base ticks " +
+                        $"between snapshots — but it measured {withPrediction.SnapshotGapTicks}, " +
+                        $"i.e. about {withPrediction.TickRateInUse / (double)withPrediction.SnapshotGapTicks:F1} Hz. " +
+                        "The gateway routed this client somewhere other than the server the " +
+                        "configuration names. Every figure below is internally consistent and " +
+                        "about the wrong object. Check that the intended game server is " +
+                        "registered in Redis for this map, and that the environment actually " +
+                        "reached the process — on Windows launched from WSL that needs WSLENV. " +
+                        "Provenance for this run: " + LiveBackendConfig.DescribeProvenance());
+                }
+            }
+
             if (withPrediction.MeasuredTickRate > 0f && withPrediction.TickRateInUse > 0)
             {
                 double wireGap = (withPrediction.MeasuredTickRate - withPrediction.TickRateInUse)

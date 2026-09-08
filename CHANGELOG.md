@@ -175,6 +175,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tolerance is a fraction of the fitted slope rather than a constant somebody can tune. Both
   numbers were already computable and neither was shown.
 
+- **`PredictionLatencyMeasurement` now refuses a run that measured a server other than the one it
+  was configured for**, and reports which of its settings came from the environment rather than
+  from a default. **Three times in one day an experiment ran to completion against the wrong
+  object and produced internally consistent numbers**: a game server that never registered in
+  Redis, so the gateway routed elsewhere; a `dotnet test` that silently re-ran a stale assembly;
+  and a snapshot-rate experiment whose environment never crossed the WSL-to-Windows boundary
+  (no `WSLENV`), so it measured the 15 Hz server while the 30 Hz one sat idle at
+  `players_online 0`. In each case the output looked exactly as a *successful* run had been
+  predicted to look, which is why reading the log is not a sufficient check.
+
+  Two halves, because neither covers the other: the gate compares the measured snapshot gap
+  against the gap the configured rate implies and returns Inconclusive on a mismatch — catching
+  **misrouting**; the provenance line names which environment variables were actually present —
+  catching **an override that never arrived**, where configuration and reality agree because both
+  are the default. The comparison is in **base ticks**, deliberately, because a tick count is
+  skew-invariant: comparing measured Hz against configured Hz would false-fail on a fast-clocked
+  client, which is the very arm where the ladder is still readable. Its tolerance is a quarter of
+  the expected gap — wide enough that a wobbling estimate does not make this the gate people
+  disable, narrow enough that a doubled or halved interval cannot pass.
+
 ### Changed
 
 - **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
