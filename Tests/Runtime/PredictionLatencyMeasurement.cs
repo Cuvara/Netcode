@@ -2168,6 +2168,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 // means on the two sides, and the reconcile reports the whole of it as
                 // position. Every one of these is a binder/link property, so they are printed
                 // for the prediction-OFF run too and the two columns compare.
+                $"  age measured against     {(run.AgeIsFitted ? "the fitted line" : "the UNIT-RATE floor")}" +
+                    (run.AgeIsFitted
+                        ? "   (the slope reproduced, so the residual is against it)\n"
+                        : "   <<< the slope was refused, so the age is a height above a\n" +
+                          "                             running minimum at UNIT RATE. That reading carries no slope\n" +
+                          "                             term, so it ACCUMULATES at the apparent skew: a client clock\n" +
+                          "                             n% fast adds n% of elapsed time to it every second, bounded\n" +
+                          "                             only by the floor's epoch memory.\n") +
                 $"  SNAPSHOT AGE measured    {run.StalenessTicks:F2} base ticks" +
                     (run.StalenessFitted
                         ? "   (fitted)"
