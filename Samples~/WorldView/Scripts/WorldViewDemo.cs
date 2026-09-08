@@ -33,6 +33,13 @@ namespace Samples.WorldView
 
         [Header("Run")]
         [SerializeField] private float runSeconds = 300f;
+        // DELIBERATELY PINNED AT 15, which equals the snapshot rate and is therefore
+        // phase-locked -- AckLatencyEstimator will refuse to offer a floor here. That is
+        // intended: this is a a view/interpolation demo that does not read the acknowledgement floor, so the
+        // lock costs it nothing.
+        // Everything that is NOT a fixed harness takes its cadence from
+        // InputCadence.RecommendedSendHz instead (13 Hz against a 15 Hz snapshot rate).
+        // Do not "fix" this to match the default; read InputCadence first.
         [SerializeField] private int inputRateHz = 15;
 
         [Tooltip("Seconds after the peer appears before the screenshot is taken, so both " +

@@ -45,6 +45,13 @@ namespace Samples.NetcodeE2E
         [SerializeField] private int gatewayPort = 8000;
         [SerializeField] private string mapId = "map_01";
         [SerializeField] private float runSeconds = 75f;
+        // DELIBERATELY PINNED AT 15, which equals the snapshot rate and is therefore
+        // phase-locked -- AckLatencyEstimator will refuse to offer a floor here. That is
+        // intended: this is a certification harness: what it measures must not move as a side effect of a
+        // cadence fix elsewhere.
+        // Everything that is NOT a fixed harness takes its cadence from
+        // InputCadence.RecommendedSendHz instead (13 Hz against a 15 Hz snapshot rate).
+        // Do not "fix" this to match the default; read InputCadence first.
         [SerializeField] private int inputRateHz = 15;
 
         private NetworkClient _client;

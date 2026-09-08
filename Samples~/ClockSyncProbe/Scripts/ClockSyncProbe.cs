@@ -76,8 +76,8 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
         private double _nextSnapshotAtServerSeconds;
 
         /// <summary>Snapshots in flight: item one is the client time it arrives at.</summary>
-        private readonly List<(double deliverAt, long tick)> _pending =
-            new List<(double, long)>();
+        private readonly List<(double deliverAt, long tick, long ackTick)> _pending =
+            new List<(double, long, long)>();
 
         private SnapshotStalenessEstimator _staleness;
         private LocalMovePredictor _predictor;
@@ -106,6 +106,42 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
 
         private System.Random _rng = new System.Random(12345);
 
+        // ── The send cadence, and the acknowledgement floor it decides ──
+        //
+        // This half of the probe exists because the pipeline constant `uplink + snapshot
+        // age` is measured by timing an input to the first snapshot that acknowledges it,
+        // and that measurement is only valid while the wait term SWEEPS. Sending at exactly
+        // the snapshot rate locks the two cadences in phase and the estimator -- correctly --
+        // refuses to offer anything at all. Drag the cadence slider to 15 and watch it
+        // happen; the histogram collapses to a single bar.
+        private const double UplinkSeconds = 0.020;
+        private const int SnapshotHz = BaseHz / SnapshotEvery;
+
+        private AckLatencyEstimator _ackLatency;
+        private InputSendSchedule _sendSchedule;
+        private int _sendHz = InputCadence.RecommendedSendHz(SnapshotHz);
+        private long _inputTick;
+
+        /// <summary>Inputs in flight: the client time the SERVER can first see them.</summary>
+        private readonly List<(double visibleAt, long tick)> _inFlightInputs =
+            new List<(double, long)>();
+
+        /// <summary>
+        /// The probe's own copy of the observations, purely so the histogram can show the
+        /// distribution the guard is judging.
+        /// </summary>
+        /// <remarks>
+        /// Re-derived here rather than read back out of the estimator, because the estimator
+        /// deliberately exposes statistics and not its ring. These are the same numbers it
+        /// folds in — send time to the arrival of the acknowledging snapshot — computed at
+        /// the same two points.
+        /// </remarks>
+        private readonly List<double> _observedLatencies = new List<double>();
+
+        /// <summary>Send times, so the histogram can time an acknowledgement the same way.</summary>
+        private readonly List<(long tick, double sentAt)> _sentLog =
+            new List<(long, double)>();
+
         // ── UI ──
         private Slider _skewSlider;
         private Label _skewValue;
@@ -117,6 +153,12 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
         private Label _verdict;
         private VisualElement _measuredBar;
         private VisualElement _configuredMark;
+        private SliderInt _sendHzSlider;
+        private Label _sendHzValue;
+        private Label _cadenceLine;
+        private Label _cadenceVerdict;
+        private readonly VisualElement[] _phaseBars =
+            new VisualElement[AckLatencyEstimator.SweepBuckets];
 
         private void Awake()
         {
@@ -134,6 +176,21 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             _verdict = root.Q<Label>("verdict");
             _measuredBar = root.Q<VisualElement>("measured-bar");
             _configuredMark = root.Q<VisualElement>("configured-mark");
+            _sendHzSlider = root.Q<SliderInt>("send-hz");
+            _sendHzValue = root.Q<Label>("send-hz-value");
+            _cadenceLine = root.Q<Label>("cadence-line");
+            _cadenceVerdict = root.Q<Label>("cadence-verdict");
+
+            for (var i = 0; i < _phaseBars.Length; i++)
+            {
+                _phaseBars[i] = root.Q<VisualElement>($"phase-{i}");
+                if (_phaseBars[i] != null) continue;
+
+                Debug.LogError($"[ClockSyncProbe] UXML element 'phase-{i}' not found — the " +
+                               "histogram has fewer bars than AckLatencyEstimator.SweepBuckets.");
+                enabled = false;
+                return;
+            }
 
             // A Q<T> miss returns null and the scene then dies on first interaction with a
             // NullReferenceException that names nothing. Failing at startup with the element
@@ -145,6 +202,8 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                          (_pauseToggle, "pause"), (_fitLine, "fit-line"),
                          (_steerLine, "steer-line"), (_verdict, "verdict"),
                          (_measuredBar, "measured-bar"), (_configuredMark, "configured-mark"),
+                         (_sendHzSlider, "send-hz"), (_sendHzValue, "send-hz-value"),
+                         (_cadenceLine, "cadence-line"), (_cadenceVerdict, "cadence-verdict"),
                      })
             {
                 if (element == null)
@@ -167,6 +226,26 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             _jitterSlider.RegisterValueChangedCallback(e => _jitterMs = e.newValue);
 
             _pauseToggle.RegisterValueChangedCallback(e => _paused = e.newValue);
+
+            // Spans the interesting range either side of the snapshot rate, so 15 -- the
+            // lock -- is reachable by dragging rather than only describable in a comment.
+            _sendHzSlider.lowValue = 8;
+            _sendHzSlider.highValue = 20;
+            _sendHzSlider.value = _sendHz;
+            _sendHzSlider.RegisterValueChangedCallback(e =>
+            {
+                _sendHz = e.newValue;
+
+                // A cadence change restarts the measurement rather than mixing two phase
+                // relationships into one ring. Carrying the old observations across would
+                // show a swept histogram for several seconds after dragging to 15, which is
+                // precisely the wrong thing for this panel to say.
+                _ackLatency.Reset();
+                _sendSchedule.Start(_sendHz, _clientSeconds);
+                _observedLatencies.Clear();
+                _sentLog.Clear();
+                _inFlightInputs.Clear();
+            });
 
             root.Q<Button>("stall").clicked += () => _pendingStallSeconds = 0.25f;
             root.Q<Button>("step-clock").clicked += () => _pendingServerStepSeconds = 5.0;
@@ -192,6 +271,14 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             _predictor = new LocalMovePredictor(
                 new PredictionSettings(BaseHz, 5f, MapBounds.Default));
             _predictor.Reconcile(Vec2.Zero, 0);
+
+            _ackLatency = new AckLatencyEstimator();
+            _sendSchedule = new InputSendSchedule();
+            _sendSchedule.Start(_sendHz, 0.0);
+            _inputTick = 0;
+            _inFlightInputs.Clear();
+            _observedLatencies.Clear();
+            _sentLog.Clear();
         }
 
         private void Update()
@@ -230,13 +317,41 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 _pendingServerStepSeconds = 0;
             }
 
+            // ── The client's send loop ──
+            //
+            // On the PINNED schedule the production loops now use, so the cadence the slider
+            // names is the cadence that goes out. Re-deriving the deadline from whenever the
+            // frame happened to land is what used to make every nominal rate in (12, 15]
+            // arrive as 12 Hz. See InputSendSchedule.
+            while (_sendSchedule.SecondsUntilDue(_clientSeconds) <= 0.0)
+            {
+                _inputTick++;
+                _ackLatency.RecordSent(_inputTick, _clientSeconds);
+
+                // The server cannot act on it until the uplink has elapsed.
+                _inFlightInputs.Add((_clientSeconds + UplinkSeconds, _inputTick));
+                _sentLog.Add((_inputTick, _clientSeconds));
+                _sendSchedule.NoteSent(_clientSeconds);
+            }
+
             while (_serverSeconds >= _nextSnapshotAtServerSeconds)
             {
                 _serverTick += SnapshotEvery;
                 _nextSnapshotAtServerSeconds += SnapshotIntervalServerSeconds;
 
+                // What this snapshot acknowledges: the newest input that had reached the
+                // server by the time it was built. Everything older is drained with it,
+                // exactly as the real server's monotonic LastInputTick behaves.
+                long ackTick = 0;
+                for (var i = _inFlightInputs.Count - 1; i >= 0; i--)
+                {
+                    if (_inFlightInputs[i].visibleAt > _clientSeconds) continue;
+                    if (_inFlightInputs[i].tick > ackTick) ackTick = _inFlightInputs[i].tick;
+                    _inFlightInputs.RemoveAt(i);
+                }
+
                 double jitter = _jitterMs > 0f ? _rng.NextDouble() * _jitterMs / 1000.0 : 0.0;
-                _pending.Add((_clientSeconds + jitter + _deliveryFloorSeconds, _serverTick));
+                _pending.Add((_clientSeconds + jitter + _deliveryFloorSeconds, _serverTick, ackTick));
             }
 
             for (var i = _pending.Count - 1; i >= 0; i--)
@@ -247,6 +362,7 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 }
 
                 long tick = _pending[i].tick;
+                long ackTick = _pending[i].ackTick;
                 _pending.RemoveAt(i);
 
                 if (tick <= _lastDeliveredTick)
@@ -261,6 +377,16 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
                 _staleness.Sample(tick, _clientSeconds, BaseHz);
                 _predictor.SeedBaseTick(tick);
                 _predictor.SteerToServerTick(tick, TargetLeadTicks());
+
+                // The acknowledgement rides on the snapshot, so it is folded in when the
+                // snapshot ARRIVES -- one observation is send -> uplink -> wait for the next
+                // snapshot -> age, and only the wait varies. This is the real estimator, on
+                // the real call the binder makes.
+                if (ackTick > 0)
+                {
+                    RecordAckObservation(ackTick);
+                    _ackLatency.RecordAck(ackTick, _clientSeconds, BaseHz);
+                }
             }
 
             _predictor.Advance(dt);
@@ -287,11 +413,174 @@ namespace Cuvara.Netcode.Samples.ClockSyncProbe
             return Mathf.Clamp(ticks, 0, SnapshotEvery * 2);
         }
 
+        /// <summary>
+        /// The send-cadence half of the panel: what is configured, what the phase actually
+        /// does, and whether the estimator will offer a floor because of it.
+        /// </summary>
+        private void RenderCadenceReadout()
+        {
+            int occupied = RenderPhaseHistogram();
+            int recommended = InputCadence.RecommendedSendHz(SnapshotHz);
+            bool locked = _sendHz == SnapshotHz;
+
+            _sendHzValue.text = $"{_sendHz} Hz" + (_sendHz == recommended ? " (recommended)" : string.Empty);
+
+            _cadenceLine.text =
+                $"send {_sendHz} Hz vs snapshots {SnapshotHz} Hz | " +
+                $"phases {InputCadence.DistinctPhases(_sendHz, SnapshotHz)} | " +
+                $"sweep every {InputCadence.SendsPerSweep(_sendHz, SnapshotHz):F1} sends " +
+                $"({InputCadence.SweepSeconds(_sendHz, SnapshotHz):F2} s) | " +
+                $"buckets {occupied}/{AckLatencyEstimator.SweepBuckets} " +
+                $"(needs {AckLatencyEstimator.MinimumOccupiedBuckets}) | " +
+                $"samples {_ackLatency.Samples} | superseded {_ackLatency.Superseded} | " +
+                $"unswept {_ackLatency.UnsweptSeconds * 1000.0:F1} ms | " +
+                $"floor {_ackLatency.FloorTicks:F2} t → lead {_ackLatency.ConservativeFloorTicks:F2} t";
+
+            if (_ackLatency.Samples < AckLatencyEstimator.MinimumSamples)
+            {
+                _cadenceVerdict.text =
+                    "warming up — the floor needs " +
+                    $"{AckLatencyEstimator.MinimumSamples} acknowledged observations";
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", false);
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", false);
+                return;
+            }
+
+            if (!_ackLatency.SweptEnough)
+            {
+                _cadenceVerdict.text = locked
+                    ? "REFUSED — the send cadence EQUALS the snapshot rate, so every " +
+                      "observation carries the same fixed wait. The floor would read high by " +
+                      "up to a whole snapshot interval, and an over-lead steers the client " +
+                      "past the server. Nothing is offered, and that is correct: this client " +
+                      "holds no evidence about its own pipeline constant."
+                    : $"REFUSED — {_sendHz} Hz visits only " +
+                      $"{InputCadence.DistinctPhases(_sendHz, SnapshotHz)} phase(s) of the " +
+                      $"interval, so the wait never sweeps far enough to trust its minimum. " +
+                      $"Try {recommended} Hz.";
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", false);
+                _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", true);
+                return;
+            }
+
+            // The true constant in this model is the uplink plus the age the snapshot had
+            // when it arrived; the uplink half is the part the staleness fit can never see.
+            _cadenceVerdict.text =
+                $"SWEPT — the wait varied across {occupied} of " +
+                $"{AckLatencyEstimator.SweepBuckets} divisions, so the minimum means " +
+                $"something. Floor {_ackLatency.FloorSeconds * 1000.0:F1} ms against an " +
+                $"injected uplink of {UplinkSeconds * 1000.0:F0} ms plus the snapshot age.";
+            _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--ok", true);
+            _cadenceVerdict.EnableInClassList("cuvara-probe__verdict--bad", false);
+        }
+
+        /// <summary>
+        /// Times an acknowledgement exactly as <see cref="AckLatencyEstimator"/> does — the
+        /// NEWEST input it covers, never an older one — so the histogram shows the same
+        /// distribution the guard is judging.
+        /// </summary>
+        /// <remarks>
+        /// Timing an older input would measure a wait a later input had already earned, and
+        /// would stretch the apparent spread by however far the send cadence runs ahead of
+        /// the acknowledgement cadence. That is the exact corruption the estimator documents
+        /// under <c>Superseded</c>, and a picture drawn from it would make a locked link look
+        /// swept — which is the failure this panel exists to make visible.
+        /// </remarks>
+        private void RecordAckObservation(long ackTick)
+        {
+            double newestSentAt = 0.0;
+            var haveNewest = false;
+
+            for (var i = _sentLog.Count - 1; i >= 0; i--)
+            {
+                if (_sentLog[i].tick > ackTick) continue;
+
+                if (!haveNewest || _sentLog[i].sentAt > newestSentAt)
+                {
+                    newestSentAt = _sentLog[i].sentAt;
+                    haveNewest = true;
+                }
+
+                _sentLog.RemoveAt(i);
+            }
+
+            if (!haveNewest) return;
+
+            double latency = _clientSeconds - newestSentAt;
+            if (latency <= 0.0) return;
+
+            _observedLatencies.Add(latency);
+
+            // The same memory the estimator keeps, so the picture ages out with the reading.
+            const int capacity = 128;
+            if (_observedLatencies.Count > capacity)
+            {
+                _observedLatencies.RemoveRange(0, _observedLatencies.Count - capacity);
+            }
+        }
+
+        /// <summary>
+        /// Fills the eight phase bars, bucketing exactly as
+        /// <c>AckLatencyEstimator.OccupiedBuckets</c> does, and returns how many are occupied.
+        /// </summary>
+        private int RenderPhaseHistogram()
+        {
+            var counts = new int[AckLatencyEstimator.SweepBuckets];
+            double interval = _ackLatency.AckIntervalSeconds;
+
+            if (_observedLatencies.Count > 0 && interval > 0.0)
+            {
+                double lo = double.MaxValue;
+                for (var i = 0; i < _observedLatencies.Count; i++)
+                {
+                    if (_observedLatencies[i] < lo) lo = _observedLatencies[i];
+                }
+
+                double width = interval / AckLatencyEstimator.SweepBuckets;
+                for (var i = 0; i < _observedLatencies.Count; i++)
+                {
+                    var bucket = (int)((_observedLatencies[i] - lo) / width);
+                    if (bucket < 0) bucket = 0;
+                    if (bucket >= AckLatencyEstimator.SweepBuckets)
+                    {
+                        bucket = AckLatencyEstimator.SweepBuckets - 1;
+                    }
+
+                    counts[bucket]++;
+                }
+            }
+
+            var peak = 1;
+            for (var i = 0; i < counts.Length; i++)
+            {
+                if (counts[i] > peak) peak = counts[i];
+            }
+
+            var occupied = 0;
+            for (var i = 0; i < counts.Length; i++)
+            {
+                if (counts[i] > 0) occupied++;
+                if (_phaseBars[i] == null) continue;
+
+                // A floor of 2px so an empty bucket is still drawn -- an absent bar and a
+                // zero bar read identically otherwise, and "seven empty buckets" is the
+                // whole picture of a lock.
+                float share = counts[i] / (float)peak;
+                _phaseBars[i].style.height = 2f + share * 38f;
+                _phaseBars[i].EnableInClassList(
+                    "cuvara-probe__histogram-bar--empty", counts[i] == 0);
+            }
+
+            return occupied;
+        }
+
         private void RenderReadout()
         {
             _skewValue.text = $"{_skewPpm / 1000f:+0.0;-0.0} ×10³ ppm " +
                               $"({(1.0 + _skewPpm / 1e6):F4}×)";
             _jitterValue.text = $"{_jitterMs:F0} ms";
+
+            RenderCadenceReadout();
 
             _fitLine.text =
                 $"measured {_staleness.SkewPpm / 1000.0:+0.0;-0.0} ×10³ ppm | " +

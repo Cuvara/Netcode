@@ -277,3 +277,38 @@
     color: rgba(255, 255, 255, 0.85);
     margin-bottom: 4px;
 }
+
+/* ── Send-cadence histogram ──
+   Eight bars, one per division of the snapshot interval — the same eight
+   AckLatencyEstimator.SweepBuckets counts occupancy over, so what the viewer sees is the
+   shape the guard is actually judging rather than a decorative restatement of it.
+
+   The picture is the point of the whole panel: at 13 Hz all eight fill and the sweep
+   verdict is green; drag the cadence to 15 and every observation piles into one bar while
+   the other seven stay empty. A lock is not a subtle statistical condition on screen — it
+   is one bar. */
+
+.cuvara-probe__histogram {
+    flex-direction: row;
+    align-items: flex-end;
+    height: 46px;
+    margin: 6px 0 8px 0;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+    padding: 3px;
+}
+
+.cuvara-probe__histogram-bar {
+    flex-grow: 1;
+    height: 2px;
+    margin: 0 1px 0 1px;
+    background-color: rgba(94, 201, 98, 0.55);
+    border-radius: 2px;
+    min-height: 2px;
+}
+
+/* An occupied bucket is what the guard counts; an empty one is drawn dim rather than
+   omitted, so "three of eight" is legible as a shape and not only as a number. */
+.cuvara-probe__histogram-bar--empty {
+    background-color: rgba(240, 126, 116, 0.30);
+}

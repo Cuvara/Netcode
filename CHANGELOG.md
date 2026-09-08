@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **The defect: a constant that was correct, used for something it does not describe.**
+>
+> Every send loop in this package took its cadence from `GameConstants.DefaultTickRate`, under a
+> tooltip reading *"matches the server's simulation rate"*. It does not. The server advertises
+> `JoinTokenResponse.tick_rate = SimulationRates.MovementHz = CriticalHz`, which is **60**. The
+> 15 in that constant is `WorldHz` — the World group's rate, which is also **the cadence the
+> snapshot broadcast runs at**. So the client was not sending at the simulation rate. It was
+> sending at exactly the *snapshot* rate, and that is the one cadence at which the pipeline
+> constant cannot be measured at all.
+>
+> The constant was never wrong. Nothing about `DefaultTickRate = 15` needed changing, and it has
+> not changed. What was wrong was the *use*, and a wrong use of a right constant does not fail a
+> review that checks the constant. This is the same shape as 0.34.0's release theme — reasoning
+> about one property and gating on another — arriving one layer down, in a value rather than in a
+> guard, and found by reading rather than by a live run.
+
+### Fixed
+
+- **The client no longer sends input at the snapshot rate, so the `uplink + snapshot age` term is
+  measurable at all.** `AckLatencyEstimator` recovers that constant by timing an input to the
+  first snapshot whose `ack_tick` reaches it — `uplink + wait-for-the-next-snapshot + age`, where
+  the wait is the only varying term, so the minimum converges on the constant. **That argument
+  holds only while the wait sweeps.** Sending at the snapshot rate locks the two cadences in
+  phase: every observation carries the same fixed wait and the minimum reads high by up to a whole
+  snapshot interval.
+
+  **The guard added in 0.34.0 detected this and refused, and refusing was right.** Measured live:
+  `median 61.9 ms, p90 62.7, min 23.7` — a p10-to-median span of 0.28 base ticks, a textbook lock.
+  A phase-locked client genuinely holds no evidence about its own pipeline constant, and a floor
+  offered on that evidence would read high, which is an **over**-lead — the original defect
+  arriving from the other side. But refusing correctly is not the same as being finished: the
+  fallback is `RoundTripMs * 0.5`, and on a fast link `round(4 ms × 60 Hz / 1000)` is **0**. For a
+  phase-locked client the term was therefore unobtainable *in principle*, not merely
+  unimplemented. **No statistic, guard or fallback can close it** — they all describe a
+  distribution that was never generated. Only changing the cadence generates it.
+
+  New `InputCadence` picks the send rate from the snapshot rate: the fastest rate below it that is
+  coprime with it (so the phase set is as fine as possible), visits at least
+  `AckLatencyEstimator.MinimumOccupiedBuckets` phases, and completes a sweep inside
+  `AckLatencyEstimator.MinimumSamples` observations. Against the default 15 Hz snapshot rate that
+  is **13 Hz**: 13 distinct phases spaced 5.13 ms, a full sweep every 0.5 s against a 5 s epoch.
+
+  **The rule is encoded rather than the number, because `WorldHz` is operator-configurable** and a
+  hard-coded 13 would be right for one deployment and silently wrong for the next — which is the
+  same defect as the anchor it replaces. **Note the coupling this creates:** the cadence now
+  depends on `AckLatencyEstimator.MinimumSamples` and `MinimumOccupiedBuckets`. Changing either
+  changes how often every client sends input. Both are referenced by name so the dependency is
+  greppable, and `InputCadence` says so in its remarks.
+
+  Why not the neighbouring rates, measured by driving the real estimator with an injected constant
+  of 1.00 base ticks:
+
+  | cadence | phases | sends/sweep | outcome |
+  |---|---|---|---|
+  | 15 Hz | 1 | ∞ | locked; no floor offered. The defect. |
+  | 14 Hz | 14 | 14.0 | reads correctly but has 1 Hz of margin — it re-locks the moment it drifts to 15. |
+  | **13 Hz** | **13** | **6.5** | **chosen.** Still yields an estimate when drifted to 13.25, 13.5, 13.75 and 14.0. |
+  | 12 Hz | 4 | 4.0 | sweeps *faster*, yet `UnsweptSeconds` sticks at 16.67 ms and the lead lands at 0.48 against a true 1.00 — half the term discarded. |
+
+  12 Hz is the case that decides the rule's shape: it is *closer* to 15 than 13 is and far worse,
+  because `gcd(12, 15) = 3`. The condition is coprimality, not proximity.
+
+- **The configured cadence is now the cadence actually sent.** Both send loops were shaped
+  `send(); await UniTask.Delay(period);`. `UniTask.Delay` starts its stopwatch when the delay is
+  *constructed* — after the send — and resumes on the first Update frame at or past the period,
+  **discarding the remainder every iteration**. Simulated at 60 fps, every nominal rate in
+  `(12, 15]` collapsed onto 60/5 = **12 Hz**: 15 sent 12, 14 sent 12, 13 sent 12.
+
+  **Changing the constant alone would have been a literal no-op** — same packets, same phase, same
+  verdict — while reading as a fix in the diff and passing a test driven by an ideal timer. The
+  achieved cadence was never a property of the constant; it was a property of the loop shape and
+  the frame rate, and the two loops in this package disagreed by 3 Hz because of it. The PlayMode
+  harness pumps to an absolute deadline and achieved ~15 Hz — which is the lock measured live —
+  while the bootstrap and DOTS loops achieved ~12 and swept **by accident**, at a cadence nobody
+  chose, with four phases instead of thirteen, and only until the frame rate moved.
+
+  New `InputSendSchedule` advances by one period from the previous *scheduled* instant, so
+  quantisation error cancels instead of accumulating. Catch-up after a stall is bounded
+  (`ResyncAfterPeriods`) and counted: an unbounded backlog would arrive as a burst inside one
+  snapshot interval, where every input is superseded and contributes no observation — destroying
+  the phase relationship the schedule exists to preserve.
+
+- `LiveBackendConfig.TickRate` was serving as both the prediction fallback rate **and** the
+  harness's send cadence — the same conflation, in the instrument. Split into `FallbackTickRate`
+  (still `CUVARA_TICK_RATE`, still 15, still only the fallback its documentation always described)
+  and `InputSendHz` (new `CUVARA_INPUT_SEND_HZ`, defaulting to the recommendation). `SnapshotRateHz`
+  is now named separately rather than implied.
+
+- `DOTSNetworkBridge` passed `inputRateHz` as `fallbackTickRate` while its own remarks said that
+  constant was "deliberately NOT reused for this". The two were numerically equal at 15 so the
+  confusion cost nothing visible; offsetting the cadence would have quietly made the fallback wrong
+  by a further 2 Hz. It now passes the constant directly — **the value is unchanged**, only the
+  coupling is gone.
+
+### Added
+
+- `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, a live phase histogram
+  over the same eight divisions `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict.
+  Extended rather than given its own sample because it is the same story told to the same reader —
+  a clock/fit panel already lives here. **Drag the cadence to 15 and the histogram collapses to one
+  bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
+  it is one bar.
+
+### Changed
+
+- **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
+  is a real cost in feel and it is accepted deliberately, because the term it buys is currently
+  worth multiple base ticks of standing reconcile error. Recorded here so it is a trade on the
+  record rather than a silent regression. The uplink packet rate also falls ~13%, and because sends
+  are now strictly slower than acknowledgements arrive, `AckLatencyEstimator.Superseded` goes to
+  zero.
+- The server is unaffected by the slower cadence, and this was checked rather than assumed. Its
+  movement model integrates the newest held direction once per base tick whether or not a packet
+  arrived (`ApplyHeldMovement`: *"never on how many input packets a client sends"*), and the hold
+  expiry is a 250 ms **silence** timeout rather than a send-rate window. A stall still takes four
+  consecutive lost packets at 13 Hz exactly as it did at 15; the tolerated silence is identical.
+- The four fixed harnesses (`E2ECertification`'s three, `WorldView`) stay pinned at 15 Hz on
+  purpose — changing what a certification harness measures as a side effect of a cadence fix is not
+  something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
+  so the disagreement with the default does not read as an oversight to be tidied away.
+
+### Notes
+
+- **The harness is also the client, so this change moves the instrument and the thing measured in
+  the same commit.** There is no third client to hold fixed. The consequence is that a live run
+  cannot, on its own, separate *"the fix worked"* from *"the harness now samples differently"*:
+  both the cadence and the pinned schedule alter which phases get sampled. Stated here rather than
+  discovered later. What the run *can* establish is the qualitative step — a floor offered at all
+  where none was before — because the previous state was a refusal, not a different number.
+- **Known pre-existing discrepancy, unchanged by this work.** `GameConstants.MaxBankedMovementMs`
+  reasons that `MaxBankedMovementTicks(15) = 4` ticks of 66.7 ms covers a bursting client's 264 ms
+  idle "exactly". That arithmetic is for the *uniform* 15 Hz configuration. Under the live split
+  60/15 rates the handler is built with `MovementHz = 60`, so the budget is `MaxBankedMovementTicks(60)
+  = 15` base ticks = **250 ms**, and the 264 ms case it claims to cover is already 14 ms over. This
+  is in the server repo, predates this change, and is logged here so it is on a known list rather
+  than a future surprise.
+
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**

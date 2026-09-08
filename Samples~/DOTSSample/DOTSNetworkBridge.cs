@@ -49,7 +49,12 @@ namespace DOTSSample
         // carries no DOTSNetworkBridge and no stored value to override it. Author the
         // component into a scene and the serialized number wins instead — at which point
         // this default stops applying and the scene has to be updated too.
-        [SerializeField] private int inputRateHz = GameConstants.DefaultTickRate;
+        // OFFSET FROM THE SNAPSHOT RATE ON PURPOSE. This used to be
+        // GameConstants.DefaultTickRate, which is 15 -- the World group rate, and therefore
+        // exactly the rate snapshots arrive at. Sending at the snapshot rate locks the two
+        // in phase and makes the acknowledgement floor unmeasurable. See InputCadence.
+        [SerializeField] private int inputRateHz =
+            InputCadence.RecommendedSendHz(GameConstants.DefaultTickRate);
 
         [Tooltip("Take movement from WASD / arrow keys. Off falls back to the scripted " +
                  "sine-wave walk, which is what this sample did before and is still what " +
@@ -99,7 +104,9 @@ namespace DOTSSample
 
         /// <summary>The timestep replay is using, recovered for the cross-check log.</summary>
         private float PredictedDt() =>
-            _client != null && _client.TickRate > 0 ? 1f / _client.TickRate : 1f / Mathf.Max(1, inputRateHz);
+            _client != null && _client.TickRate > 0
+                ? 1f / _client.TickRate
+                : 1f / Mathf.Max(1, GameConstants.DefaultTickRate);
 
         // --- Status for OnGUI ---
         private string _status = "Initializing...";
@@ -508,8 +515,16 @@ namespace DOTSSample
 
             uint advertised = _client?.TickRate ?? 0u;
 
+            // THE FALLBACK IS NOT inputRateHz, and the remarks above already said so while
+            // the code did the opposite. A send cadence is a client choice; the integration
+            // rate is the server's. They were numerically equal at 15 so the confusion cost
+            // nothing visible, and offsetting the cadence to 13 would have quietly made the
+            // fallback wrong by a further 2 Hz. Passing the constant directly keeps this
+            // value exactly as it was and removes the coupling rather than worsening it.
+            // (It is still not 60, the rate the server actually advertises — a separate
+            // pre-existing gap, live only on a server old enough to advertise nothing.)
             var settings = PredictionSettings.FromServer(
-                advertised, fallbackTickRate: inputRateHz, playerSpeed, MapBounds.Default);
+                advertised, fallbackTickRate: GameConstants.DefaultTickRate, playerSpeed, MapBounds.Default);
 
             _predictor = new LocalMovePredictor(settings);
             _binder = new WorldViewBinder(_view, _predictor);
@@ -1130,8 +1145,25 @@ namespace DOTSSample
                 _status = "In World";
                 Debug.Log($"[DOTSNet] IN WORLD as {_client.UserId}");
 
-                var dt = 1f / Mathf.Max(1f, inputRateHz);
                 var started = DateTime.UtcNow;
+
+                // PINNED SCHEDULE, NOT "delay one period after each send". UniTask.Delay
+                // starts its stopwatch after the send and resumes on the first Update frame
+                // at or past the period, throwing the remainder away every iteration; at
+                // 60 fps that collapsed every nominal rate in (12, 15] onto 12 Hz. The
+                // configured cadence was therefore not the cadence sent, and setting a
+                // different number here would have changed nothing. See InputSendSchedule.
+                var schedule = new InputSendSchedule();
+                schedule.Start(inputRateHz, Time.realtimeSinceStartupAsDouble);
+
+                if (!InputCadence.Sweeps(inputRateHz, GameConstants.DefaultTickRate))
+                {
+                    Debug.LogWarning(
+                        $"[DOTSNet] send cadence {inputRateHz} Hz does not sweep against the " +
+                        $"{GameConstants.DefaultTickRate} Hz snapshot rate — the acknowledgement floor " +
+                        $"will be refused. Recommended: " +
+                        $"{InputCadence.RecommendedSendHz(GameConstants.DefaultTickRate)} Hz.");
+                }
 
                 while (!ct.IsCancellationRequested)
                 {
@@ -1155,8 +1187,18 @@ namespace DOTSSample
                     // attackTarget is not passed and combat stays server-authoritative.
                     _predictor?.RecordInput(_inputTick, moveX, moveY);
 
-                    await UniTask.Delay(TimeSpan.FromSeconds(dt), DelayType.Realtime,
-                        PlayerLoopTiming.Update, ct);
+                    schedule.NoteSent(Time.realtimeSinceStartupAsDouble);
+                    double wait = schedule.SecondsUntilDue(Time.realtimeSinceStartupAsDouble);
+
+                    if (wait > 0.0)
+                    {
+                        await UniTask.Delay(TimeSpan.FromSeconds(wait), DelayType.Realtime,
+                            PlayerLoopTiming.Update, ct);
+                    }
+                    else
+                    {
+                        await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                    }
                 }
 
                 _client.Disconnect();

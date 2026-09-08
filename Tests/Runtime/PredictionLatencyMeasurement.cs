@@ -597,7 +597,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             /// <summary>Base ticks between consecutive snapshots, measured off the wire.</summary>
             /// <remarks>
-            /// Measured, not <c>LiveBackendConfig.TickRate</c>. That constant is the harness's
+            /// Measured, not <c>LiveBackendConfig.FallbackTickRate</c>. That constant is the harness's
             /// SEND cadence and its own fallback, and this file already carries the lesson
             /// about printing a configured constant in a slot where a measurement belongs —
             /// see the <c>effective speed</c> line. The two happen to coincide at 60/15 and
@@ -1659,7 +1659,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             var settings = PredictionSettings.FromServer(
                 client.TickRate,
-                fallbackTickRate: LiveBackendConfig.TickRate,
+                fallbackTickRate: LiveBackendConfig.FallbackTickRate,
                 LiveBackendConfig.PlayerSpeed,
                 MapBounds.Default);
 
@@ -1734,7 +1734,21 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             // The SEND cadence, which is a client choice and deliberately not the server's
             // integration rate. Conflating the two is what produced the defect above.
-            float dt = 1f / LiveBackendConfig.TickRate;
+            // PINNED, and offset from the snapshot rate. Two separate fixes in one line:
+            //
+            // 1. The cadence is InputSendHz (13 Hz against a 15 Hz snapshot rate), not the
+            //    prediction fallback it used to share a constant with. Sending at the
+            //    snapshot rate phase-locks the two and AckLatencyEstimator refuses to offer
+            //    a floor -- which is what this harness measured live at median 61.9 ms.
+            //
+            // 2. The schedule is pinned. PumpAsync spins to an ABSOLUTE deadline and returns
+            //    on the first frame at or past it, so a fixed per-send `dt` was ceil-
+            //    quantised to the frame grid and the remainder discarded every iteration.
+            //    At 60 fps a nominal 13 Hz would have arrived as 12 Hz -- coprime lost,
+            //    four phases instead of thirteen -- and the cadence change would have
+            //    measured something other than what it configured.
+            var schedule = new InputSendSchedule();
+            schedule.Start(LiveBackendConfig.InputSendHz, Time.realtimeSinceStartupAsDouble);
 
             // Let the world arrive and the local entity spawn before measuring.
             // Deliberately NOT sampled for corrections: measurement starts when the
@@ -1756,7 +1770,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     client.Session?.SendInput(tick, 0f, 0f, "");
                     predictor?.RecordInput(tick, 0f, 0f);
                     binder.NoteInputSent(tick);
-                    await PumpAsync(client, binder, localId, dt, ct, corrections);
+
+                    schedule.NoteSent(Time.realtimeSinceStartupAsDouble);
+                    var wait = (float)Math.Max(
+                        0.0, schedule.SecondsUntilDue(Time.realtimeSinceStartupAsDouble));
+
+                    await PumpAsync(client, binder, localId, wait, ct, corrections);
                     lastFrameAt = Time.realtimeSinceStartupAsDouble;
                 }
 
@@ -2147,7 +2166,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
             double until = Time.realtimeSinceStartupAsDouble + seconds;
             double last = Time.realtimeSinceStartupAsDouble;
 
-            while (Time.realtimeSinceStartupAsDouble < until)
+            // AT LEAST ONE FRAME, ALWAYS. With a pinned send schedule the caller can ask for
+            // a wait of zero -- it is already due, because the previous frame overran the
+            // period -- and a plain `while` would return without pumping, so the caller's
+            // loop would send again with no frame in between. That is a burst at the server's
+            // input drain and it collapses the phase relationship the acknowledgement floor
+            // is measured from: every input in the burst lands inside one snapshot interval
+            // and is superseded. Pumping one frame keeps the loop a loop.
+            do
             {
                 binder.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
                 binder.Tick(client.World, localId);
@@ -2163,6 +2189,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
                 await UniTask.Yield(PlayerLoopTiming.Update, ct);
             }
+            while (Time.realtimeSinceStartupAsDouble < until);
         }
 
         // ---- reporting ----
