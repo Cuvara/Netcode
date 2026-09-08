@@ -298,6 +298,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | tenth percentile | inflated by the same `0.1·S` | survives while contamination stays under 10% |
   | ladder intercept | **worst** — the tail bends the line and least squares drags the intercept down, under-reading by up to 0.18 | also degraded |
 
+  **Read that last row twice, because the intuition it violates is the natural one.** The ladder
+  intercept is the most principled-looking candidate on clean data — it uses every observation,
+  it is the model's own estimate of the constant, and it carries a built-in validity check. It is
+  also the **least** trustworthy of the four exactly where robustness is needed, and for a reason
+  that is easy to miss: least squares fits the whole line, so a right tail lifting the *upper*
+  quantiles rotates the line and drags the *intercept* down at the other end. A statistic can be
+  contaminated by data at the opposite end of the distribution from where it is read. Anyone
+  arriving at this problem fresh — including the two of us, on this morning's numbers — will want
+  to propose "just use the intercept". The simulation is what refutes it, not the reasoning.
+
   So the choice is not "which statistic is more robust" but **which contamination this system
   actually produces** — and the left-tail case is exactly the one whose known cause
   (`AckAheadOfSend`, a previous session's `LastInputTick`) has since been guarded, so its current
@@ -314,17 +324,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not decided here, and deliberately: the load run has not been done, and choosing now would be
   choosing on the one regime where the candidates agree.
 
-- **A cancellation in `ConservativeFloorTicks` that currently works for the wrong reason.** It
-  subtracts `UnsweptSeconds`, which on a swept link is about `S / phases`, from a floor inflated by
-  `0.1 · S`. Those are unrelated quantities, and they nearly cancel only because the shipped
-  cadence visits 13 phases (15 Hz) and 23 phases (30 Hz), both near the 10 that would make the
-  cancellation exact. **The sign of what remains flips with the phase count:** above 10 phases the
-  conservative floor over-reads by `S · (0.1 − 1/phases)` — about 0.09–0.11 base ticks in both
-  shipped configurations, an over-lead — and below 10 phases it under-reads. A cadence with 8
-  phases would silently turn the residual bias negative. Recorded because two unrelated quantities
-  that nearly cancel is the shape of coincidence this work has been unpicking all along, and
-  whichever way the statistic question is settled, this should be made explicit rather than left
-  as luck.
+- **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
+  number chosen for an unrelated reason.** This is recorded as a defect rather than an
+  observation, because a term that works only for its current inputs is not a working term.
+
+  It subtracts `UnsweptSeconds` — on a swept link about `S / phases` — from a floor inflated by
+  `0.1 · S`. **Those are unrelated quantities.** One is the part of the wait's range never
+  sampled; the other is the offset of a chosen order statistic from the minimum. Nothing connects
+  them, and they nearly cancel only because the two shipped cadences visit 13 phases (15 Hz) and
+  23 phases (30 Hz) — both near the **10** at which `1/phases` happens to equal `FloorPercentile`
+  and the cancellation would be exact.
+
+  What survives is `S · (0.1 − 1/phases)`, and **its sign flips with the phase count**:
+
+  | phases | remainder | direction |
+  |---|---|---|
+  | 13 (13 Hz vs 15 Hz) | `4 · (0.1 − 0.077)` = **+0.09** | over-lead |
+  | 23 (23 Hz vs 30 Hz) | `2 · (0.1 − 0.043)` = **+0.11** | over-lead |
+  | 10 | 0 | exact, by coincidence |
+  | 8 | `4 · (0.1 − 0.125)` = **−0.10** | under-lead |
+
+  So both shipping configurations sit on the over-lead side — the direction this estimator exists
+  to avoid — by about a tenth of a base tick, and a cadence recommendation that happened to select
+  8 phases would silently invert that with nothing in any counter changing. The phase count is
+  chosen by `InputCadence` for reasons that have nothing to do with `FloorPercentile`; the two
+  constants are coupled only by this accident.
+
+  **It is not urgent and it is not small in the way that matters.** The magnitude is a tenth of a
+  tick; the defect is that the term's correctness is not a property of the term. Whatever is
+  decided about `FloorPercentile` — including leaving it alone — this subtraction should be
+  restated as something that follows from what it is correcting for, or removed in favour of one
+  that is.
 
 ### Notes
 
