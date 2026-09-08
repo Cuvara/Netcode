@@ -54,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > question* is the only working left-tail instrument in the package. Generalised: **when a test and
 > the thing it tests share an input, agreement is not evidence.**
 >
+> **A retracted instrument leaves the question it was built for standing, and the question keeps
+> recruiting designs that assume an answer exists.** When the only detector for sparse left-tail
+> contamination was withdrawn, the *question* it had been built for — "is the low tail clean?" —
+> stayed on the table, and **two people independently specified experiments that separated an
+> outcome nothing could separate any more**, one of them the person who had written the
+> retraction an hour earlier. Noticing this takes more than care: the retraction was explicit,
+> recent, and agreed, and it still did not propagate to the next design. The defence is not to
+> remember harder. **Retract the question with the instrument, or write the gap into the output** —
+> a single line in a report saying "this is undetectable by anything present" stops a reader who
+> a remembered retraction does not, because it is where they are looking. It is the same move as
+> the run precondition gate: put the check where the reader is, not where the knowledge is.
+>
 > **Prefer operations that cannot be partially wrong; where you cannot have that, build the check
 > the measurement lacks.** Five times in one day an operation touched more than it was aimed at.
 > Four were silent — a server unregistered in Redis so the gateway routed elsewhere, a stale test
@@ -72,6 +84,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > verified.**
 
 ### Added
+
+- **`AckAheadOfSendInduction`, a PlayMode test that induces the one left-tail cause this package
+  can count, and reports which of four outcomes happened.** `AckLatencyEstimator.AckAheadOfSend`
+  guards against an acknowledgement naming a tick the session never sent — a reconnect onto a
+  server that has not reaped the previous session's `LastInputTick` — and it has read **0 on every
+  run since it was added**. A guard nobody has watched act is indistinguishable from one that
+  cannot act, which is the standard the run precondition gate was just held to by a deliberate
+  failure test.
+
+  It reports a **precondition block before any verdict**, in that gate's style: the last input
+  tick before the disconnect, the first `ack_tick` after it, **the max sent tick at the instant
+  that acknowledgement was observed**, and the elapsed time. The condition is induced iff the
+  stale acknowledgement exceeds *that* — the quantity the guard actually tests — and **not** the
+  first post-reconnect input tick, which is the obvious comparison and the wrong one: with a
+  previous session ending at tick 5, a client that has sent 1–6 while awaiting its first snapshot
+  makes `5 > 6` false and the guard correctly silent, while the obvious form reads `5 > 1` and
+  would report a `Runtime/` defect. The test built to catch a precondition check that does not
+  check the precondition must not contain one, so the walkthrough is in its remarks.
+
+  Four outcomes, only one of which bears on whether the condition arises at all: **induced and the
+  guard fired** (a result); **induced and it did not** (a `Runtime/` failure, not Inconclusive —
+  and its message says so, including that the left-tail question then reopens from a different
+  direction because this counter is the only working left-tail instrument in the package);
+  **the server still held the old state but the induction was too slow** (null about the *method*);
+  and **the server had already reaped the player** (the condition did not exist — the only reading
+  that is evidence, and only when repeated). It also states in its own output that a left-tail
+  contaminant from any other cause is undetectable by anything present, so that limitation travels
+  with the instrument rather than in someone's memory.
+
+  **First run: row one. The guard fires.** Last input tick before the disconnect 65, first
+  `ack_tick` after it 65, max sent tick when that was observed **1**, elapsed 61 ms, and
+  `AckAheadOfSend` **1**. The condition is real, reachable by an abrupt reconnect with the same
+  device id inside about sixty milliseconds, and the `ackTick > _maxSentTick` discard catches it.
+
+  **That changes what a future zero means, which is the durable half of this result.** Before
+  today `AckAheadOfSend == 0` was ambiguous between "the guard works" and "the guard cannot
+  work" — the same shape as a counter reading zero for two reasons. The guard has now been
+  observed acting, so a zero from here is **evidence of absence from an instrument known to
+  function**. What the run does *not* establish is the rate in normal operation: one deliberately
+  induced occurrence says the mechanism works, not how often a real client meets it.
 
 
 - `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
@@ -500,6 +552,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the measured bias removes that, and the corrected statistic then under-reads under contamination,
   which is the direction this package calls tolerable. **Safe on clean data and safe when wrong**,
   with no rate in the argument.
+
+  **And the porosity argument is weaker than it looked, which the induction run settled against
+  it.** That argument modelled contamination *reaching* the estimator and biasing the statistic.
+  The one left-tail cause this package can name does not reach it: `RecordAck` discards the whole
+  pending ring and returns before any observation is folded in, so those intervals never enter the
+  distribution at all. **The porosity argument therefore rests entirely on left-tail causes nobody
+  has identified**, which is a weaker footing than it had when it was first written down. It does
+  not change the proposal — that stopped depending on contamination rates once the harm asymmetry
+  became the primary argument, and the raw percentile's over-lead bias stands on every clean run
+  regardless — but the record should not leave the porosity case looking better supported than it
+  is.
 
   The left-tail rate remains unmeasured and is still worth measuring, for a narrower reason: it
   converts `AckAheadOfSend` from a guard nobody has watched act into a measurement. It has read 0

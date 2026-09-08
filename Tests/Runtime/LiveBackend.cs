@@ -140,6 +140,68 @@ namespace Cuvara.Netcode.Tests.PlayMode
     }
 
     /// <summary>
+    /// Is the live stack there? Shared reachability probe for the PlayMode measurements.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Ignore, never silent-pass.</b> A consuming project runs the whole PlayMode suite
+    /// without filtering by category, so the <c>[Category("LiveBackend")]</c> attribute does
+    /// nothing there; correctness has to live in the test. An ignored test with a reason is
+    /// visible in the report and names what is missing, where a test that quietly goes green
+    /// by doing nothing is the failure this repository has spent days eliminating.
+    /// </para>
+    /// <para>
+    /// <b>Known duplication.</b> <c>PredictionLatencyMeasurement</c> carries a private copy of
+    /// this logic. Consolidating the two means editing that file, which is verified in the
+    /// Editor against a live stack and whose changes decide whether a run counts — so it is
+    /// deliberately a separate change rather than folded in here. Recorded so the duplication
+    /// is a decision rather than an oversight.
+    /// </para>
+    /// </remarks>
+    public static class LiveBackendProbe
+    {
+        private const int TimeoutMs = 1500;
+
+        /// <summary>The first unreachable dependency, or null when all are up.</summary>
+        public static async UniTask<string> FirstUnreachableAsync()
+        {
+            string gateway = await ProbeAsync(
+                LiveBackendConfig.GatewayHost, LiveBackendConfig.GatewayPort, "gateway");
+            if (gateway != null) return gateway;
+
+            // Nakama is contacted first by a run, so an unreachable one fails earlier and
+            // more confusingly than the gateway. Both are checked.
+            return await ProbeAsync(
+                LiveBackendConfig.NakamaHost, LiveBackendConfig.NakamaPort, "Nakama");
+        }
+
+        private static async UniTask<string> ProbeAsync(string host, int port, string what)
+        {
+            try
+            {
+                using (var client = new System.Net.Sockets.TcpClient())
+                {
+                    System.Threading.Tasks.Task connect = client.ConnectAsync(host, port);
+                    System.Threading.Tasks.Task finished = await System.Threading.Tasks.Task
+                        .WhenAny(connect, System.Threading.Tasks.Task.Delay(TimeoutMs)).AsUniTask();
+
+                    if (finished != connect)
+                    {
+                        return $"no {what} at {host}:{port} — connect timed out after {TimeoutMs} ms";
+                    }
+
+                    await connect.AsUniTask();
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"no {what} at {host}:{port} — {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+    }
+
+    /// <summary>
     /// Minimal Nakama device authentication — enough to obtain a gateway JWT.
     /// </summary>
     /// <remarks>
