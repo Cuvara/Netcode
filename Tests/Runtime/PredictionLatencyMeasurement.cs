@@ -390,13 +390,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// With <see cref="ReplayedSteps"/>, this is the evidence that the loop closed.
             /// A high hit rate is the HEALTHY reading — the history path is the accurate one
             /// and replaying is its fallback — so a run of all hits and no replays says the
-            /// client's clock is tracking, not that nothing happened.
+            /// client's clock is tracking, not that nothing happened. Misses, on the other
+            /// hand, are not all replays: read <see cref="Adoptions"/> beside this, because
+            /// a miss with nothing to replay drops the lead instead.
             /// </remarks>
             public int HistoryHits;
 
             /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
             /// <inheritdoc cref="HistoryHits"/>
             public int HistoryMisses;
+
+            /// <summary>
+            /// Reconciles that took the server's position wholesale — the fallback ran and
+            /// rebuilt nothing on top of it. <c>LocalMovePredictor.Adoptions</c>.
+            /// </summary>
+            /// <remarks>
+            /// The third outcome, and the one that used to be invisible: a miss with
+            /// nothing left to replay discards the client's whole prediction lead, which is
+            /// the largest correction the predictor can make, while
+            /// <see cref="ReplayedSteps"/> and <see cref="HistoryHits"/> both stand still.
+            /// This is the counter that makes a low <see cref="ReplayedSteps"/> beside a
+            /// nonzero <see cref="HistoryMisses"/> readable rather than reassuring.
+            /// </remarks>
+            public int Adoptions;
 
             /// <summary>Round trip the session reported, milliseconds.</summary>
             public long RoundTripMs;
@@ -1257,11 +1273,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
             //
             // It was written when replaying was the only thing a reconcile could do, and it
             // asked the right question — did the loop close? — through the only counter that
-            // then answered it. Reconcile now has two paths. The history path compares the
+            // then answered it. Reconcile now has THREE outcomes. The history path compares the
             // client's own recorded position AT THE SNAPSHOT'S TICK against the authoritative
             // one, applies the difference, and returns: like for like, so there is nothing
             // left to replay and ReplayedSteps stays at zero. Replaying is the FALLBACK, for
-            // when the history does not reach back far enough.
+            // when the history does not reach back far enough. And a miss with nothing left
+            // to replay ADOPTS: it takes the server's position outright, which is not a
+            // comparison at all — so Adoptions is deliberately NOT added to the sum below.
+            // A run made entirely of adoptions HAS run its reconcile loop and has still
+            // never tested prediction against the server, which is what this guard asks.
             //
             // So the old guard reads "the fallback fired at least once", and a client whose
             // clock tracks the server perfectly hits the history path every time and trips
@@ -1278,7 +1298,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "replayed. Prediction ran open-loop, so its agreement with the server is " +
                 "untested and this measurement proves nothing about reconciliation. " +
                 "(Zero REPLAYED steps alone is not that: it is the normal reading when the " +
-                "history reaches every snapshot, which is what a client in step produces.)");
+                "history reaches every snapshot, which is what a client in step produces. " +
+                $"Adoptions: {withPrediction.Adoptions} — those are misses that compared " +
+                "nothing, and they do not count towards this guard.)");
 
             // NOT asserted: MaxCorrection > 0 on the healthy run.
             //
@@ -2114,6 +2136,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 run.SmoothedCorrections = predictor.SmoothedCorrections;
                 run.HistoryHits = predictor.HistoryHits;
                 run.HistoryMisses = predictor.HistoryMisses;
+                run.Adoptions = predictor.Adoptions;
                 run.EffectiveSpeed = predictor.EffectiveSpeed;
                 run.IntegrationTimestepMs = predictor.IntegrationTimestep * 1000f;
                 run.SmoothingSpanMs = predictor.EffectiveSmoothingSpan * 1000f;
@@ -2182,12 +2205,22 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  pending peak             {run.PendingPeak}\n" +
                 $"  reconciles               {run.Reconciles}\n" +
                 $"  replayed steps           {run.ReplayedSteps}   " +
-                    "(zero is the HEALTHY reading — replaying is the fallback for when the\n" +
-                "                             history does not reach the snapshot's tick; see the next line)\n" +
+                    "(zero is healthy ONLY WHEN 'missed' below is zero. This line USED to\n" +
+                "                             say zero was healthy outright, and that was wrong: a miss\n" +
+                "                             with nothing left to replay does not replay, it ADOPTS —\n" +
+                "                             read the two lines below together, never this one alone)\n" +
                 $"  reconciles from history  {run.HistoryHits} hit, {run.HistoryMisses} missed" +
                     ((run.HistoryHits + run.ReplayedSteps) == 0 && run.Reconciles > 0
                         ? "   <<< NOTHING closed the loop"
                         : "   <<< THE LOOP CLOSING — compared at the snapshot's own tick") + "\n" +
+                $"  adopted wholesale        {run.Adoptions} of {run.HistoryMisses} misses" +
+                    (run.Adoptions > 0
+                        ? "   <<< THE LEAD THROWN AWAY, not corrected — the\n" +
+                          "                             biggest move the predictor makes, and it moves no\n" +
+                          "                             other counter. Nonzero means the clock is behind the\n" +
+                          "                             snapshots: read TARGET LEAD and SNAPSHOT AGE"
+                        : "   (zero — every miss rebuilt something on top of the\n" +
+                          "                             server's answer)") + "\n" +
                 $"  corrections smoothed     {run.SmoothedCorrections}" +
                     "   (ANY nonzero error, over every reconcile — a floor, not a fault:\n" +
                 "                             ~2 per sample is what two free-running clocks cost\n" +

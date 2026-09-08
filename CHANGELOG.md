@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`LocalMovePredictor.Adoptions` — the third reconcile outcome now has a name and a
+  counter.** A reconcile was documented and instrumented as having two outcomes: answered
+  from the history (`HistoryHits`), or fallen back to replaying the ticks the server has not
+  seen (`ReplayedSteps`). There is a third. When the history misses *and* the fallback finds
+  nothing to rebuild — an empty pending buffer, and a snapshot tick that is not behind the
+  client's clock, so the held-forward path of #53 does not fire either — the predictor
+  replaces its prediction with the authoritative position outright and throws the whole
+  prediction lead away.
+
+  **That is the largest correction this class can make, and it moved no counter.**
+  `ReplayedSteps` stood still, because nothing was replayed. `HistoryHits` stood still,
+  because nothing was compared. The only reading that changed was `HistoryMisses` — whose
+  own summary says the reconcile "fell back to replaying", which is exactly what did not
+  happen. A live run reporting `reconciles from history 115 hit, 34 missed` reported
+  `replayed steps 2`: **32 wholesale adoptions, invisible on every instrument the class
+  had.**
+
+  **Why it stayed invisible is the part worth keeping.** The measurement report printed
+  `replayed steps 0   (zero is the HEALTHY reading …)` and `PREDICTION.md` said the same in
+  prose. Both were written when replaying was the only fallback there was, and both were
+  still *true of the case they were written about* — a client whose clock tracks the server
+  hits the history every time and legitimately replays nothing. What changed underneath them
+  was not the sentence but the set of things a miss could do, and neither text was gated on
+  the miss count. So the reading that meant "everything is fine" and the reading that meant
+  "the lead is being discarded fifteen times a second" printed as the same zero, under a
+  note asserting the first.
+
+  `Adoptions` is measured by comparing `ReplayedSteps` across the fallback rather than by
+  testing the branch conditions, so a replay that runs its loop and produces no step — a
+  lapsed hold, a movement model refusing every step — is counted as the adoption it is.
+  What is counted is the outcome, not the route to it.
+
+- `adopted wholesale` line in `PredictionLatencyMeasurement`'s report, beside `reconciles
+  from history`, printing the count against the miss count so the next live run reads the
+  two together.
+
+- `ReconcileAdoptionTests`, pinning all four reconcile states through the public surface: a
+  hit never adopts; a miss with pending input replays; a miss whose snapshot is *behind* the
+  clock rebuilds the held lead (#53) and does not adopt; and a miss with nothing to replay
+  adopts, with every pre-existing counter asserted to stand still — which is the defect,
+  stated as a test.
+
+### Changed
+
+- **The `replayed steps 0` remark is corrected rather than removed**, in both the report and
+  `PREDICTION.md`. It claimed zero replayed steps was "the HEALTHY reading" outright; it is
+  healthy **only when the miss count is zero**. `PREDICTION.md` now quotes the old claim,
+  says why it was wrong, and gives the three outcomes in a table — a reader who remembers the
+  old advice finds it addressed instead of finding silence.
+- `NETCODE.md`'s measurement-guard table said the harness asserts `ReplayedSteps > 0`. It has
+  asserted `HistoryHits + ReplayedSteps > 0` since the history path landed. Corrected, and
+  `Adoptions` is documented as deliberately excluded from that sum: an adoption compares
+  nothing, so a run made entirely of adoptions has run its reconcile loop and still never
+  tested prediction against the server.
+
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**

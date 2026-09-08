@@ -940,6 +940,14 @@ Two details are load-bearing:
 `HistoryHits` / `HistoryMisses` say which path answered. The replay remains as the fallback
 for a snapshot older than the ring.
 
+**A miss is not always a replay.** With the pending buffer empty and the snapshot's tick not
+behind the client's clock, the fallback finds nothing to rebuild and the prediction is
+*replaced* by the authoritative position — the whole lead discarded. `Adoptions` counts
+that outcome; it is the largest correction the predictor can make, and it moves no other
+counter. Nonzero means the client's clock has not reached the ticks the snapshots describe.
+See `PREDICTION.md`, "`replayed steps 0` — what this section used to say, and why it was
+wrong".
+
 ### The two clocks are steered together, and the target lead is zero
 
 `SeedBaseTick` aligns the clocks at join and never speaks again. `SteerToServerTick`, called
@@ -1190,7 +1198,7 @@ that is perfectly accurate — both simply look right. So the test fails unless:
 | Guard | What its absence would mean |
 |---|---|
 | `PendingCount > 0` | inputs never reached the buffer; nothing ran ahead of the server |
-| `ReplayedSteps > 0` | prediction ran open-loop, never rewound to an authoritative position |
+| `HistoryHits + ReplayedSteps > 0` | prediction ran open-loop, never compared against an authoritative position. Not `ReplayedSteps` alone — a client in step hits the history every time and replays nothing. `Adoptions` is excluded on purpose: an adoption compares nothing. |
 | a forced-divergence run corrects | corrections are stuck at zero regardless of disagreement |
 | `EffectiveSpeed == server speed` | replay integrated at the wrong speed, so every step is wrong by the ratio |
 
@@ -1199,7 +1207,8 @@ Without those, a green result would prove only that the numbers were collected.
 **A correction of `0.000` on the healthy run is not a fault.** On localhost, with no loss
 and `Shared.GameLogic` bit-exact on both sides, zero divergence is the designed outcome —
 it is what ADR-10, the FMA-denying split in `Integrate` and the golden vectors are for.
-`ReplayedSteps` answers "is reconciliation alive?"; `LastCorrection` answers "do the two
+`HistoryHits + ReplayedSteps` answers "is reconciliation alive?" — `ReplayedSteps` alone
+does not, and neither does adding `Adoptions` to it; `LastCorrection` answers "do the two
 sides disagree?", and the healthy answer to the second is *no*. An earlier version of this
 harness conflated them and failed a correct run.
 

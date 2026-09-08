@@ -294,6 +294,49 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
         public int HistoryMisses { get; private set; }
 
+        /// <summary>
+        /// Reconciles that took the authoritative position <b>wholesale</b> — the fallback
+        /// ran and rebuilt nothing on top of it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>The third reconcile outcome, and the largest correction this class can
+        /// make.</b> A history HIT compares like for like and moves the prediction by the
+        /// disagreement alone. A history MISS normally replays the base ticks the server
+        /// has not seen, which keeps everything the client did after the snapshot's tick.
+        /// An ADOPTION does neither: the fallback found nothing to replay — an empty
+        /// pending buffer, and a snapshot tick that is not behind the client's clock, so
+        /// the held-forward branch (#53) does not fire either — and the prediction is set
+        /// to the server's position with the client's entire lead thrown away.
+        /// </para>
+        /// <para>
+        /// <b>A nonzero value means the prediction was reset that many times, not
+        /// corrected.</b> It reads on a live server as a backward tug at the snapshot rate
+        /// whose size is the lead — the artefact #53 named — but where #53 was the motion
+        /// being dropped, this is the drop itself going uncounted:
+        /// <see cref="ReplayedSteps"/> does not move, <see cref="HistoryHits"/> does not
+        /// move, and only <see cref="HistoryMisses"/> hints that anything happened at all.
+        /// A run measured at 115 hits and 34 misses reported <c>replayed steps 2</c>; the
+        /// other 32 misses were adoptions, and no counter in the class showed them.
+        /// </para>
+        /// <para>
+        /// <b>Zero is the healthy reading, and it is implied by
+        /// <see cref="HistoryMisses"/> being zero</b> — a hit can never adopt. Nonzero
+        /// therefore always comes with misses, and says the client's clock has not reached
+        /// the tick the snapshot describes, so the history cannot answer for a moment the
+        /// client has not lived through yet. Read it against the lead and the snapshot age,
+        /// not against the correction magnitudes: the correction here is not a
+        /// disagreement about position, it is the lead being discarded.
+        /// </para>
+        /// <para>
+        /// Counted by comparing <see cref="ReplayedSteps"/> across the fallback rather than
+        /// by testing the branch conditions, so a replay that runs its loop and produces no
+        /// step — a lapsed hold, a movement model that refuses every step — is counted as
+        /// the adoption it is. What is counted is the outcome, not the route to it.
+        /// </para>
+        /// </remarks>
+        public int Adoptions { get; private set; }
+
         private Vec2 _tickStart;
         private long _tickStartTick;
 
@@ -987,6 +1030,12 @@ namespace Cuvara.Netcode.Prediction
 
             DropAcknowledged(ackTick);
 
+            // What the fallback rebuilds is measured, not assumed: if neither branch below
+            // runs a single step, `replayed` is still exactly `authoritative` and this
+            // reconcile ADOPTED the server's position rather than correcting towards it.
+            // See Adoptions for why that outcome needs a name of its own.
+            int stepsBeforeReplay = ReplayedSteps;
+
             // Rewind to what the server says, then re-run the base-tick timeline it has
             // not seen. Not one step per pending input: the server integrates the held
             // direction on every base tick in the window, including ticks where no packet
@@ -1144,6 +1193,11 @@ namespace Cuvara.Netcode.Prediction
                         ReplayedSteps++;
                     }
                 }
+            }
+
+            if (ReplayedSteps == stepsBeforeReplay)
+            {
+                Adoptions++;
             }
 
             // Same reasoning as the history path: a tick-start marker captured before this
@@ -1673,6 +1727,7 @@ namespace Cuvara.Netcode.Prediction
             Snaps = 0;
             SmoothedCorrections = 0;
             ReplayedSteps = 0;
+            Adoptions = 0;
             CoalescedInputs = 0;
             Reconciles = 0;
             DroppedInputs = 0;
