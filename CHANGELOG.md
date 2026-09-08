@@ -231,6 +231,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reading, and says so explicitly when one frame equals one base tick, because a floor quoted
   without the frame rate it was taken at is not a reading.
 
+- **The quantile ladder survives a clock rate the environment gate refuses, and that is a property
+  worth relying on rather than a coincidence.** Every acknowledgement observation is a difference
+  of two readings of the *same* client clock, so a clock running fast by `(1+e)` scales every
+  observation by `(1+e)` and nothing else. A uniform scaling maps a straight line to a straight
+  line: `C + q·S` becomes `(1+e)C + q·(1+e)S`, so **slope and intercept inflate together and the
+  shape is untouched**. The two things the ladder is read for — *did the wait sweep* (slope against
+  the snapshot interval) and *what share of the floor is `FloorPercentile`* (`0.1·slope` over the
+  total) — are both ratios, and both are therefore exactly skew-invariant. Only the *absolute*
+  constant is inflated.
+
+  Confirmed on the first ladder run, which had a 90 697 ppm arm the gate refuses. That skew alone
+  predicts a slope of 4.363 base ticks against 4.31 measured (−1.2%), and it explains the arm's
+  "55.0 Hz" tick rate as the *same* artifact rather than a second fault: `60 / 1.0907 = 55.01`. A
+  fast client clock makes a healthy 60 Hz server look slow by exactly the factor it inflates
+  intervals by. De-skewed, the refused arm and the clean arm agree on the pipeline constant to
+  0.03 base ticks (0.5 ms).
+
+  **Three limits, because "readable" is not "unconditional".** *(1)* The ladder is skew-invariant
+  in shape but skew-**blind** in attribution: a client running 9% fast and a server running 9% slow
+  predict identical ladders, and nothing in this instrument separates them. *(2)* Only a *uniform*
+  scaling is harmless — a clock that changes rate within the observation window smears the line,
+  and the reported residual is the detector for exactly that. *(3)* **The inflation reaches
+  behaviour, not just the report.** `ConservativeFloorTicks` feeds the steering lead in these same
+  units, so a client whose clock runs fast by `e` over-leads by `e` times the floor. At 9% and a
+  0.77-tick floor that is 0.07 of a base tick — small, but it is a real over-lead in the direction
+  this estimator exists to avoid, and it is not visible in any counter that reports the floor
+  alone.
+
 ### Notes
 
 - **The recommendation was simulated against the real estimator before it was proposed, and the
