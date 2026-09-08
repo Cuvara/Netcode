@@ -151,6 +151,67 @@ namespace Cuvara.Netcode.Prediction
         public const double SweepHighQuantile = 0.90;
 
         /// <summary>
+        /// Observations required before the span half of <see cref="SweptEnough"/> means
+        /// anything: the smallest count at which BOTH sweep quantiles land strictly inside the
+        /// sorted observations rather than on an extremum.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Below this the span test is <c>max - min</c> again — the exact statistic the
+        /// guard was rewritten to stop being.</b> <see cref="Quantile"/> truncates
+        /// <c>q * n</c> to an index, so at <c>n = 8</c> the tenth percentile is index 0 and the
+        /// ninetieth is index 7: the minimum and the maximum. The low end escapes the minimum
+        /// at <c>n = 10</c> and the high end escapes the maximum only at <c>n = 11</c>
+        /// (<c>(int)(0.9 * 10) = 9</c>, which is still the last index of ten), so the whole of
+        /// <c>8 .. 10</c> is a window in which the guard's own remarks do not describe what it
+        /// computes.
+        /// </para>
+        /// <para>
+        /// <b>Measured consequence, and why this is a refusal rather than a statistic change.</b>
+        /// A body at 30-44 ms of a 67 ms interval with one near-instant observation — the
+        /// gather-catch shape <see cref="FloorPercentile"/> already documents — occupies three
+        /// buckets, so occupancy passes, and reads a span of 39 ms against a 33 ms requirement
+        /// at <c>n = 8</c> where the same data reads 14 ms and is refused from <c>n = 10</c> on.
+        /// Certified as swept, its floor is taken at index 0 as well: <b>0.20 base ticks against
+        /// a body minimum of 1.81</b>, which is the ten-times under-read this estimator's
+        /// history is made of. And a floor is not merely added when it appears —
+        /// <c>WorldViewBinder.TargetLeadTicks</c> makes it DISPLACE the round-trip fallback — so
+        /// a verdict inside this window does reach the lead, and reaches it twice.
+        /// </para>
+        /// <para>
+        /// <b>Why the floor and not an interpolated quantile.</b> Interpolating would make the
+        /// index meaningful at every count, but it changes <see cref="FloorSeconds"/> as well as
+        /// the span, and <see cref="FloorPercentile"/> is under a deliberately isolated
+        /// measurement — shipping a new quantile estimator underneath it would confound exactly
+        /// the reading that constant's remarks say must be read rather than argued. Leaning on
+        /// occupancy alone in the window was the other candidate and is worse: it drops the
+        /// extent test in the one window where the extent test is wrong, when the two are kept
+        /// precisely because neither implies the other. Refusing until the arithmetic is honest
+        /// costs three observations — about 0.2 s at a 15 Hz send rate, against the 120-140
+        /// observations a live arm collects — and it can only withhold a floor, never invent
+        /// one, which is the only safe direction here.
+        /// </para>
+        /// <para>
+        /// Derived from the quantiles rather than written as 11, so that changing either
+        /// constant cannot silently reopen the window.
+        /// </para>
+        /// </remarks>
+        public static readonly int MinimumSweepSamples = SmallestInteriorSampleCount();
+
+        private static int SmallestInteriorSampleCount()
+        {
+            for (var n = MinimumSamples; n <= ObservationCapacity; n++)
+            {
+                if ((int)(SweepLowQuantile * n) > 0 && (int)(SweepHighQuantile * n) < n - 1)
+                {
+                    return n;
+                }
+            }
+
+            return ObservationCapacity;
+        }
+
+        /// <summary>
         /// Buckets the snapshot interval is divided into, and how many of them the observations
         /// must occupy.
         /// </summary>
@@ -330,7 +391,13 @@ namespace Cuvara.Netcode.Prediction
             get
             {
                 if (_ackIntervalMin == double.MaxValue) return false;
-                if (_obsCount < MinimumSamples) return false;
+
+                // NOT MinimumSamples. Below MinimumSweepSamples the two quantiles below ARE
+                // the minimum and the maximum, so the span test is max - min and this guard
+                // silently becomes the thing it was rewritten to stop being. See that
+                // constant for the distribution that gets through the window and for why the
+                // answer is a refusal rather than a better statistic.
+                if (_obsCount < MinimumSweepSamples) return false;
 
                 double lo = Quantile(SweepLowQuantile);
                 double hi = Quantile(SweepHighQuantile);

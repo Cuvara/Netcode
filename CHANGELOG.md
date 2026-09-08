@@ -228,6 +228,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The live-backend reachability probe is one implementation, and it is the stricter of the two
+  that existed.** `PredictionLatencyMeasurement` carried a private copy of `LiveBackendProbe`,
+  left in place deliberately because consolidating meant editing the file whose gates decide
+  whether a measurement run counts. The two copies were **not** equivalent: the private one
+  observed a faulted connect explicitly and checked `TcpClient.Connected` afterwards, where the
+  shared one relied on awaiting the connect to throw and never checked whether the socket actually
+  opened. So the consolidation moved the **private** body up into `LiveBackendProbe` rather than
+  pointing the stricter caller at the looser shared one — the caller whose verdict decides whether
+  a run counts must not have its gate changed by a de-duplication.
+
+  Established as behaviour-preserving for that caller mechanically, not by reading: the removed
+  private body and the promoted shared body are identical after normalising whitespace, comments,
+  namespace qualification and the timeout constant's name (both 1500 ms). Nothing else in
+  `PredictionLatencyMeasurement` was touched — not the validity gate, the run precondition, the
+  config provenance line, the quantile ladder or the report; the only edits are the deleted
+  members, the call site, and two `using` directives left unused by the deletion.
+
+  `LiveBackendProbe`'s **other** caller, `AckAheadOfSendInduction`, does change: it inherits the
+  faulted-connect handling and the `Connected` check, so a connect that completes without throwing
+  and leaves the socket closed is now reported unreachable instead of reachable, and a reason
+  string reads the base exception's message without its type name. Both are the stricter verdict;
+  neither is a threshold.
+
 
 - **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
   is a real cost in feel and it is accepted deliberately, because the term it buys is currently
@@ -258,6 +281,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tested prediction against the server.
 
 ### Fixed
+
+- **`SweptEnough` no longer offers a span verdict while its two quantiles ARE the minimum and the
+  maximum.** `AckLatencyEstimator.Quantile` truncates `q * n` to an index, so at `n = 8` — the
+  sample floor — the tenth percentile is index 0 and the ninetieth is index 7. The span half of
+  the guard was therefore `max - min` in that window: **precisely the statistic the guard was
+  rewritten to stop being, reappearing as its own first verdict.** The low end escapes the minimum
+  at `n = 10` and the high end escapes the maximum only at `n = 11` — `(int)(0.9 * 10)` is 9,
+  which is still the last index of ten — so the window is `8 .. 10`, one observation wider than a
+  reading of the constants suggests.
+
+  **It is not covered by the occupancy half.** Occupancy cannot be satisfied by two observations
+  in any arrangement, which is why the guard is not wholly defeated here, but three of eight
+  buckets is a low bar for a body that is merely narrow rather than locked. Replayed: the
+  gather-catch shape this class already documents, with a body at 30–44 ms of a 67 ms interval and
+  one near-instant observation, occupies three buckets and reads a span of **39 ms against a 33 ms
+  requirement at `n = 8`**, where the same distribution reads **14 ms and is refused from `n = 10`
+  on**. The floor it certifies is taken at index 0 as well: **0.20 base ticks against a body
+  minimum of 1.81**, the ten-times under-read this estimator's history is made of.
+
+  **And a verdict in that window reaches the lead twice.** `WorldViewBinder.TargetLeadTicks` makes
+  an arriving floor *displace* the round-trip fallback rather than add to it, so a false
+  `HasEstimate` both inserts a floor measured from nothing and deletes the term that was standing
+  in for it.
+
+  Fixed by `MinimumSweepSamples`, a refusal rather than a better statistic: no span verdict until
+  both quantiles land strictly inside the sorted observations. It is **derived from
+  `SweepLowQuantile`/`SweepHighQuantile` rather than written as 11**, so changing either constant
+  cannot silently reopen the window. Two candidates were rejected. Interpolating the quantile would
+  make the index meaningful at every count but changes `FloorSeconds` as well as the span, and
+  `FloorPercentile` is under a deliberately isolated measurement whose whole point is that the
+  statistic must be read rather than argued — a new quantile estimator underneath it would confound
+  exactly that reading. Leaning on occupancy alone inside the window drops the extent test in the
+  one window where the extent test is wrong, when the two are kept precisely because neither
+  implies the other. The cost of the refusal is three observations — about 0.2 s at a 15 Hz send
+  rate, against the 120–140 a live arm collects — and it can only withhold a floor, never invent
+  one, which is the only safe direction here.
+
+  Pinned by `TheFirstVerdictIsNotTakenFromTheExtremes`, which sweeps every prefix from
+  `MinimumSamples` upward rather than testing one count, and by
+  `TheSweepFloorIsWhereBothQuantilesBecomeInterior`, which asserts the floor is the *smallest*
+  count with interior quantiles so it cannot drift upward and cost evidence for nothing. Both fail
+  on a clean rebuild without the change (`n = 8`: expected False, was True), as does
+  `NothingIsOfferedBeforeTheFloorMeansAnything`, whose bound moved from `MinimumSamples` to
+  `MinimumSweepSamples` because its own swept fixture was being certified at `n = 8` from the
+  extremes too.
+
+  **Recorded because it was not.** Both of this entry's items existed only in a conversation until
+  now, which is the failure this release is named about.
 
 - **The acknowledgement floor is converted to base ticks with the measured wire rate, not the
   advertised one.** `WorldViewBinder` converted the same kind of quantity two ways: the

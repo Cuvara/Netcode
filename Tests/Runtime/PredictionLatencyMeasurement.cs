@@ -2,9 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Sockets;
 using System.Threading;
-using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
 using Cuvara.Netcode.Client;
@@ -1185,7 +1183,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             // report and names what is missing. A test that quietly goes green by doing
             // nothing is the failure this repository has spent two days eliminating, and
             // it is not being reintroduced in the one place whose job is honest numbers.
-            string unreachable = await FirstUnreachableAsync();
+            string unreachable = await LiveBackendProbe.FirstUnreachableAsync();
             if (unreachable != null)
             {
                 Assert.Ignore(
@@ -1661,68 +1659,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 "healthy run above is meaningless rather than reassuring.");
         });
 
-        /// <summary>
-        /// Names the first backend endpoint that cannot be reached, or null when both can.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// <b>Cheap and bounded on purpose</b> — a TCP connect with a short timeout, not
-        /// the auth flow. The point is to decide whether to run at all, and a probe that
-        /// took as long as the thing it guards would be its own problem.
-        /// </para>
-        /// <para>
-        /// <b>Any exception here is treated as "unreachable", never as a failure.</b> A
-        /// throw from the probe is the same situation as a refused connection — no
-        /// backend — and surfacing it as a test failure would recreate exactly the bug
-        /// this method exists to fix.
-        /// </para>
-        /// </remarks>
-        private static async UniTask<string> FirstUnreachableAsync()
-        {
-            string gateway = await ProbeAsync(
-                LiveBackendConfig.GatewayHost, LiveBackendConfig.GatewayPort, "gateway");
-            if (gateway != null) return gateway;
-
-            // Nakama is contacted first by the run, so an unreachable one fails earlier
-            // and more confusingly than the gateway. Both are checked.
-            return await ProbeAsync(
-                LiveBackendConfig.NakamaHost, LiveBackendConfig.NakamaPort, "Nakama");
-        }
-
-        private const int ProbeTimeoutMs = 1500;
-
-        private static async UniTask<string> ProbeAsync(string host, int port, string what)
-        {
-            try
-            {
-                using (var client = new TcpClient())
-                {
-                    Task connect = client.ConnectAsync(host, port);
-                    Task finished = await Task.WhenAny(connect, Task.Delay(ProbeTimeoutMs)).AsUniTask();
-
-                    if (finished != connect)
-                    {
-                        return $"no {what} at {host}:{port} — connect timed out after {ProbeTimeoutMs} ms";
-                    }
-
-                    if (connect.IsFaulted)
-                    {
-                        // Observed deliberately: an unobserved faulted Task would surface
-                        // later as an unrelated error in whatever test runs next.
-                        string why = connect.Exception?.GetBaseException().Message ?? "connect failed";
-                        return $"no {what} at {host}:{port} — {why}";
-                    }
-
-                    return client.Connected
-                        ? null
-                        : $"no {what} at {host}:{port} — the socket did not open";
-                }
-            }
-            catch (Exception ex)
-            {
-                return $"no {what} at {host}:{port} — {ex.Message}";
-            }
-        }
+        // The reachability probe lives in LiveBackendProbe (Tests/Runtime/LiveBackend.cs).
+        // This file used to carry a private copy; the copy here was the stricter of the two
+        // and is what was promoted, so the verdict this gate reads is unchanged.
 
         /// <param name="forceDivergence">
         /// Send a zero vector while predicting a non-zero one, so the server acknowledges
