@@ -321,31 +321,161 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// The contribution is the floor less the part of the wait's range never sampled, so it
-        /// is bounded by the evidence rather than by a rounding rule.
+        /// The contribution is the floor less the quantile's OWN construction bias, so it lands
+        /// on the pipeline constant instead of a tenth of a snapshot interval above it.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This is the discriminating test for the floor-statistic change, and it replaces
+        /// the one that pinned <c>FloorSeconds - UnsweptSeconds</c>.</b> That term subtracted
+        /// the unsampled remainder of the wait's range — about <c>S / phases</c> — from a floor
+        /// inflated by <c>0.1 · S</c>. Those are unrelated quantities and they nearly cancelled
+        /// only because the shipped cadences visit 13 and 23 phases, either side of the 10 that
+        /// would make it exact; the remainder <c>S · (0.1 − 1/phases)</c> changes SIGN below ten
+        /// phases. A term that is correct for its current inputs is not a working term.
+        /// </para>
+        /// <para>
+        /// <b>Every number here is derived from the run, not chosen.</b> The bias asserted is
+        /// <c>FloorPercentile · S</c> with <c>S</c> the estimator's own measured snapshot
+        /// interval, and the tolerance is HALF that bias — so the test separates the corrected
+        /// reading from the uncorrected one by construction, at any snapshot rate, rather than
+        /// by a constant that could be widened until a run passed. Against the uncorrected term
+        /// the second assertion fails by the full <c>0.1 · S</c>.
+        /// </para>
+        /// </remarks>
         [TestCase(0.0)]
         [TestCase(0.0083)]     // half a base tick
         [TestCase(0.0167)]     // one base tick
         [TestCase(0.0333)]     // two base ticks
-        public void TheContributionIsTheFloorLessItsOwnUncertainty(double uplinkPlusAge)
+        public void TheContributionRemovesTheQuantilesOwnConstructionBias(double uplinkPlusAge)
         {
             var e = Drive(uplinkPlusAge, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
 
-            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.HasEstimate, Is.True, "precondition: the sweep must have been verified");
+
+            double intervalTicks = e.AckIntervalSeconds * BaseHz;
+            Assert.That(intervalTicks, Is.GreaterThan(1.0),
+                "precondition: the snapshot interval must have been measured, since the bias "
+                + "under test is a fraction of it");
+
+            double trueTicks = uplinkPlusAge * BaseHz;
+            double bias = AckLatencyEstimator.FloorPercentile * intervalTicks;
+            double tolerance = bias * 0.5;
+
+            // THE DEFECT ITSELF, read off the real estimator rather than assumed.
+            Assert.That(e.FloorTicks - trueTicks, Is.EqualTo(bias).Within(tolerance),
+                "one observation is `constant + wait` and the wait sweeps a snapshot interval, "
+                + "so the tenth percentile sits 0.1 * S above the constant BY CONSTRUCTION — on "
+                + "every clean run, contamination or not. That is the inflation, measured.");
+
+            Assert.That(e.ConservativeFloorTicks, Is.EqualTo((float)trueTicks).Within(tolerance),
+                "and the contribution must have that bias removed, landing on the pipeline "
+                + "constant. `FloorSeconds - UnsweptSeconds` does not: on a fully swept link "
+                + "the unswept remainder goes to zero and the whole 0.1 * S inflation survives "
+                + "into the lead, which is the over-lead direction this estimator exists to "
+                + "avoid.");
+
+            Assert.That(e.FloorTicks - e.ConservativeFloorTicks, Is.EqualTo(bias).Within(tolerance),
+                "and WHAT IS REMOVED must be that bias, independently of the constant — this is "
+                + "the claim stated directly rather than through the answer. `UnsweptSeconds` "
+                + "removes about S/phases instead, which is a different quantity that merely "
+                + "resembles it at the two cadences this package ships.");
+
             Assert.That(e.ConservativeFloorTicks, Is.LessThanOrEqualTo(e.FloorTicks),
                 "biased low, never high: an over-lead is the defect this exists to remove, "
                 + "arriving from the other side.");
+        }
 
-            double expected = Math.Max(0.0, (e.FloorSeconds - e.UnsweptSeconds) * BaseHz);
-            Assert.That(e.ConservativeFloorTicks, Is.EqualTo((float)expected).Within(1e-4),
-                "the bias is the measured unswept remainder and nothing else — no tuned "
-                + "fraction, no rounding rule, so it shrinks to zero as the sweep completes.");
+        /// <summary>
+        /// What was subtracted is reported, and it is the fitted slope's tenth — so a reader can
+        /// check the correction rather than infer it from two printed floors.
+        /// </summary>
+        [Test]
+        public void TheSubtractedBiasIsReportedAndIsTheLaddersOwnSlope()
+        {
+            var e = Drive(0.0167, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
 
-            Assert.That(e.ConservativeFloorTicks,
-                Is.LessThanOrEqualTo((float)(uplinkPlusAge * BaseHz) + 0.5f),
-                "and it must not exceed the true constant by more than the residual "
-                + "uncertainty, or it is over-leading on evidence it does not have.");
+            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.FloorCorrectionApplied, Is.True,
+                "a cleanly swept link must produce a straight ladder and an applied correction");
+            Assert.That(e.FloorCorrectionRefusals, Is.EqualTo(0),
+                "and must never have fallen back on the way there");
+
+            Assert.That(e.FloorTicks - e.ConservativeFloorTicks,
+                Is.EqualTo(e.FloorBiasTicks).Within(1e-3f),
+                "what the floor lost must equal what is reported as subtracted, or the reported "
+                + "figure is decoration");
+
+            Assert.That(e.FloorBiasTicks,
+                Is.EqualTo((float)(AckLatencyEstimator.FloorPercentile * e.LadderSlopeTicks))
+                    .Within(1e-3f),
+                "the bias is the run's OWN slope times the percentile — self-correcting, rather "
+                + "than an assumed snapshot interval");
+
+            Assert.That(e.LadderSlopeTicks,
+                Is.EqualTo((float)(e.AckIntervalSeconds * BaseHz)).Within(e.AckIntervalSeconds * BaseHz * 0.25),
+                "and on a swept link that slope IS the snapshot interval, which is the check "
+                + "that the line describes the quantity it is supposed to");
+        }
+
+        /// <summary>
+        /// A distribution the affine sweep model does not describe is REFUSED, visibly, rather
+        /// than corrected by a slope that means nothing.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The bias subtracted above exists only because the quantiles are affine in <c>q</c>.
+        /// Where they are not, there is no <c>0.1 · S</c> to remove and a fitted slope is a
+        /// number from a falsified model. <b>A fallback is another claim about the same
+        /// quantity</b>, and the two available here were the raw percentile — which is the known
+        /// over-lead bias, the defect — and nothing. Nothing wins, because an under-lead merely
+        /// leaves residual in place.
+        /// </para>
+        /// <para>
+        /// What this test really pins is that the refusal is NOT SILENT. A contribution of zero
+        /// reads identically to "the link is instant" in every other counter, so
+        /// <c>FloorCorrectionRefusals</c> and <c>FloorCorrectionApplied</c> have to move.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ALadderThatIsNotStraightRefusesTheCorrectionVisibly()
+        {
+            // A BIMODAL distribution: two swept bands with a gap between them. Each band on
+            // its own is affine in q, and the pair is not — the ladder steps across the gap
+            // instead of rising through it, which is exactly the model being false rather than
+            // the data being noisy. Both bands sweep a whole snapshot interval, so the sweep
+            // guard is satisfied and a floor IS offered; the refusal under test therefore comes
+            // from the ladder's shape and from nothing else.
+            //
+            // This is not a hypothetical shape. A bimodal-under-load regime is the one the
+            // percentile's original justification of record appealed to.
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 160; i++)
+            {
+                double phase = (i % 40) / 40.0;
+                latencies.Add(i % 2 == 0
+                    ? 0.0050 + phase * SnapshotPeriod                        // the near band
+                    : 0.0050 + SnapshotPeriod * 3.0 + phase * SnapshotPeriod); // the far band
+            }
+
+            var e = DriveDistribution(latencies.ToArray());
+
+            Assert.That(e.HasEstimate, Is.True,
+                "precondition: a floor IS offered here, so the refusal under test is about the "
+                + "ladder's shape and not about the sweep guard");
+            Assert.That(e.FloorTicks, Is.GreaterThan(0f), "precondition");
+
+            Assert.That(e.FloorCorrectionApplied, Is.False,
+                "the points are not on a line, so the model that predicts the bias does not "
+                + "describe this distribution and there is nothing to subtract");
+            Assert.That(e.FloorCorrectionRefusals, Is.GreaterThan(0),
+                "and the substitution must be COUNTED. An invisible fallback is how three "
+                + "defects reached this package this month.");
+            Assert.That(e.ConservativeFloorTicks, Is.EqualTo(0f),
+                "refused, not repaired: a distribution the model does not describe is not "
+                + "handed to a statistic chosen to survive it.");
+            Assert.That(e.FloorBiasTicks, Is.EqualTo(0f),
+                "and nothing may be reported as subtracted when nothing was");
         }
 
         /// <summary>

@@ -419,12 +419,38 @@ namespace Cuvara.Netcode.Tests.PlayMode
             public float AckFloorMeasuredTicks;
 
             /// <summary>
-            /// What the lead actually received from it: the floor less its own unswept
-            /// uncertainty. Printed beside the raw floor because the gap between them is the
-            /// measurement's own error bar, and reading only one of the two is how the
+            /// What the lead actually received from it: the floor less the tenth percentile's
+            /// own construction bias. Printed beside the raw floor because the gap between them
+            /// is exactly what was subtracted, and reading only one of the two is how the
             /// truncated version looked healthy while contributing nothing.
             /// </summary>
             public float AckFloorContributionTicks;
+
+            /// <summary>
+            /// The bias removed from the floor, in base ticks — <c>FloorPercentile × slope</c>,
+            /// with the slope fitted from the run's own ladder.
+            /// </summary>
+            public float AckFloorBiasTicks;
+
+            /// <summary>The fitted ladder slope the correction was computed from, base ticks.</summary>
+            public float AckFloorLadderSlopeTicks;
+
+            /// <summary>The worst ladder residual on the estimator's own fit, base ticks.</summary>
+            public float AckFloorLadderResidualTicks;
+
+            /// <summary>Whether the last acknowledgement's contribution is corrected or refused.</summary>
+            public bool AckFloorCorrected;
+
+            /// <summary>
+            /// Acknowledgements that offered a floor whose ladder was refused, so the lead got
+            /// NOTHING from the estimator.
+            /// </summary>
+            /// <remarks>
+            /// <b>Printed whether it is zero or not.</b> A contribution of zero reads identically
+            /// to "the link is instant" in every other figure on this report, and an invisible
+            /// fallback is how three defects reached this package.
+            /// </remarks>
+            public int AckFloorCorrectionRefusals;
 
             /// <summary>Inputs an acknowledgement drained without timing. See AckLatencyEstimator.</summary>
             public int AckFloorSuperseded;
@@ -2183,6 +2209,11 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
             run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
+            run.AckFloorBiasTicks = binder.AckLatency.FloorBiasTicks;
+            run.AckFloorLadderSlopeTicks = binder.AckLatency.LadderSlopeTicks;
+            run.AckFloorLadderResidualTicks = binder.AckLatency.LadderWorstResidualTicks;
+            run.AckFloorCorrected = binder.AckLatency.FloorCorrectionApplied;
+            run.AckFloorCorrectionRefusals = binder.AckLatency.FloorCorrectionRefusals;
             run.AckFloorSuperseded = binder.AckLatency.Superseded;
             run.AckFloorAhead = binder.AckLatency.AckAheadOfSend;
             run.AckFloorOffered = binder.AckLatency.HasEstimate;
@@ -2406,7 +2437,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  ladder intercept         {intercept:F2} base ticks   " +
                     "<<< the pipeline constant implied by the LINE,\n" +
                 "                             independent of any single quantile. FloorPercentile is the\n" +
-                $"                             tenth, so the floor above should read about this + {slope * 0.10:F2}.\n" +
+                $"                             tenth, so the RAW floor above should read about this + {slope * 0.10:F2},\n" +
+                "                             and the CORRECTED one — `ack floor in the lead` — should read\n" +
+                "                             about the intercept itself. That is the whole of the floor\n" +
+                "                             correction, stated as a falsifiable comparison rather than a\n" +
+                "                             claim: if the two disagree, the correction is not doing what\n" +
+                "                             this line says it does.\n" +
                 // q00's DISTANCE FROM THE LINE -- REPORTED AS A DATUM, NOT AS A DETECTOR.
                 //
                 // It is natural to read this as the left-tail test: a spurious short observation
@@ -2584,10 +2620,29 @@ namespace Cuvara.Netcode.Tests.PlayMode
                             : "   <<< NOT OFFERED: the wait never swept, so the\n" +
                               "                             minimum is not evidence about the floor. The lead keeps\n" +
                               "                             the round-trip fallback.") + "\n" +
+                $"  ack floor bias removed   {run.AckFloorBiasTicks:F2} base ticks   " +
+                    $"(= FloorPercentile {AckLatencyEstimator.FloorPercentile:F2} x the\n" +
+                $"                             estimator's own ladder slope {run.AckFloorLadderSlopeTicks:F2} t. The floor is a\n" +
+                "                             QUANTILE of `constant + wait`, so on a swept link it sits that\n" +
+                "                             far above the constant BY CONSTRUCTION, on every clean run.)\n" +
                 $"  ack floor in the lead    {run.AckFloorContributionTicks:F2} base ticks   " +
-                    "(the floor less its unswept uncertainty — what the\n" +
-                "                             lead actually received. Fractional on purpose: truncating\n" +
-                "                             this to whole ticks is what left the term open.)\n" +
+                    (run.AckFloorCorrected
+                        ? "<<< the CORRECTED floor — what the lead actually\n" +
+                          "                             received. Fractional on purpose: truncating this to whole\n" +
+                          "                             ticks is what left the term open.\n"
+                        : "<<< CORRECTION REFUSED — the lead got NOTHING\n" +
+                          "                             from the estimator. The ladder is not straight, so the\n" +
+                          "                             affine model that predicts the bias does not describe this\n" +
+                          "                             distribution and there is nothing to subtract. Refused\n" +
+                          "                             rather than handed to a statistic chosen to survive it.\n") +
+                "  ack floor correction     " +
+                    (run.AckFloorCorrected ? "applied" : "REFUSED") + ", " +
+                    $"{run.AckFloorCorrectionRefusals} refusal(s), ladder worst residual " +
+                    $"{run.AckFloorLadderResidualTicks:F2} t\n" +
+                    $"                             (tolerance is {AckLatencyEstimator.LadderStraightnessFraction:F2} x the fitted slope = " +
+                    $"{run.AckFloorLadderSlopeTicks * (float)AckLatencyEstimator.LadderStraightnessFraction:F2} t;\n" +
+                    "                             printed whether or not it fired, because a zero contribution\n" +
+                    "                             reads exactly like an instant link everywhere else here)\n" +
                 $"  ack floor refused        {run.AckFloorRefused}   " +
                     "(observations too long to be a floor — stalls, not routes)\n" +
                 $"  ack floor ack-ahead      {run.AckFloorAhead}" +

@@ -252,6 +252,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neither is a threshold.
 
 
+- **The acknowledgement floor that steers the lead is now bias-corrected:
+  `quantile(0.10) − 0.10 × measured_slope`.** `AckLatencyEstimator` fits its observation ring as a
+  ladder and subtracts the tenth percentile's own construction bias, using the slope this run
+  measured rather than an assumed snapshot interval. It replaces a subtraction of `UnsweptSeconds`
+  — a different quantity that resembled the bias only at the cadences this package ships. **When
+  the ladder is not straight the correction is refused and the contribution is zero, counted by
+  `FloorCorrectionRefusals` and reported by the harness and the probe whether or not it fires.**
+  New surface: `FloorCorrectionApplied`, `FloorCorrectionRefusals`, `FloorBiasTicks`,
+  `LadderSlopeTicks`, `LadderWorstResidualTicks`, `LadderQuantiles`,
+  `LadderStraightnessFraction`. The evidence, the alternatives rejected, and the retired term's
+  sign-flip arithmetic are under **Limitations** and **Open terms** below.
 - **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
   is a real cost in feel and it is accepted deliberately, because the term it buys is currently
   worth multiple base ticks of standing reconcile error. Recorded here so it is a trade on the
@@ -656,8 +667,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this estimator exists to avoid, and it is not visible in any counter that reports the floor
   alone.
 
-- **OPEN: `FloorPercentile` is now measured as the inflating term, and that does not by itself say
-  what should replace it.** Across four arms, two snapshot rates and two containers, the floor
+- **IMPLEMENTED — the floor is now `quantile(0.10) − 0.10 × measured_slope`.** The proposal
+  recorded below is executed as written. `AckLatencyEstimator` fits its own observation ring as a
+  ladder through the same six quantiles the harness prints, and `ConservativeFloorTicks` — the
+  term that actually reaches the lead — subtracts `FloorPercentile × slope` from the percentile.
+  The slope is fitted per run, so the correction follows the link instead of assuming `S`.
+
+  *The live evidence it was executed on, and none of it is new here.* Across **eight arms, two
+  snapshot rates and two containers** the ladder was straight (worst residual 0.03–0.11 base
+  ticks against slopes near 2.1) and the reported floor tracked `intercept + 0.1 × slope` to two
+  decimals — `0.16 + 0.207 = 0.37` against 0.37 measured at 30 Hz — while the true pipeline
+  constant on loopback is 0.14–0.28 base ticks. The load run put no bimodality on the table and
+  the induction run showed the one nameable left-tail cause never reaches the statistic, so the
+  argument that carries this is the one that needs no rate: **the raw tenth percentile over-leads
+  on every clean run by construction, and the corrected one is unbiased on clean data and
+  under-reads under contamination.** Safe on clean data and safe when wrong.
+
+  *The guard, and a fallback that is not silent.* The bias `0.1 · S` exists only because the
+  quantiles are affine in `q`, so the correction is applied only when the ladder is straight —
+  worst residual within `LadderStraightnessFraction` (0.10) of the fitted slope, the same
+  scale-free rule the harness already prints its verdict with, cleared by a factor of two or more
+  on all eight measured arms without having been chosen to let them through. The six quantiles
+  must also land on six distinct samples, checked as a property of the ring rather than encoded
+  as a second sample threshold. **When the fit is refused the contribution is zero, not the raw
+  percentile** — a fallback is another claim about the same quantity, and the raw percentile IS
+  the defect, while an under-lead merely leaves residual in place. It is not the total-loss shape
+  `Math.Floor` had: that fired on every healthy fast link, this fires only where the model is
+  falsified. And it is visible in four places rather than none — `FloorCorrectionApplied`,
+  `FloorCorrectionRefusals`, `FloorBiasTicks`, `LadderSlopeTicks` / `LadderWorstResidualTicks` —
+  printed by the measurement harness and the clock-sync probe **whether or not they fired**,
+  because a zero contribution reads exactly like an instant link in every other counter.
+
+  *Discrimination.* `TheContributionRemovesTheQuantilesOwnConstructionBias` drives the real
+  estimator over a swept link at four true constants and asserts both that the raw floor sits
+  `0.1 · S` above the constant and that the contribution does not. Against the previous term it
+  fails all four cases on a clean rebuild; with the correction all four pass. The tolerance is
+  half the bias and is derived from the estimator's own measured snapshot interval, so it
+  separates the two readings by construction at any snapshot rate rather than by a number that
+  could be widened until a run passed.
+
+  **The record of the proposal, unchanged, follows — including the alternatives rejected and the
+  reasons, because the reasons are what would have to be revisited if this is ever reopened.**
+
+- **The measurement that implicated `FloorPercentile`, and why every candidate looked alike on
+  it.** Across four arms, two snapshot rates and two containers, the floor
   tracks `intercept + 0.1 × slope` — at 30 Hz, `0.16 + 0.207 = 0.37` against 0.37 measured. The
   pipeline constant on loopback is **0.14–0.28 base ticks (2.3–4.7 ms)**, across eight arms
   measured after this entry was first written — the four it cites, plus the two under an 8-player
@@ -700,7 +753,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distribution is refused rather than handed to a statistic chosen to survive it. In the class's
   own words, *a statistic cannot repair a guard*.
 
-  **PROPOSAL, WITH ITS DECIDING MEASUREMENT STILL UNRUN — do not read this as settled.**
+  **THE PROPOSAL, AS RECORDED — now implemented; see the entry above.**
   `floor = quantile(0.10) − 0.10 × measured_slope`. The percentile stays; its now-measured bias is
   subtracted using the ladder's own slope per run, so the correction is self-correcting rather
   than assuming `S`. On clean data it lands within 0.05 of the constant.
@@ -804,14 +857,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Open terms
 
 
-The two counter terms named here have been fixed; what remains is the one term below, which
-needs a change of a different size. Named rather than left to be rediscovered.
+The two counter terms named here have been fixed; what remains is the one term below. Named
+rather than left to be rediscovered. **That term, `ConservativeFloorTicks`, IS closed in this
+release** — not on its own terms but as a consequence of the floor-statistic change above; its
+entry is kept in place, with its arithmetic, because the shape it demonstrates outlives it.
 
-- **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
-  number chosen for an unrelated reason.** This is recorded as a defect rather than an
-  observation, because a term that works only for its current inputs is not a working term.
+- **RETIRED BY CONSEQUENCE — `ConservativeFloorTicks` no longer subtracts `UnsweptSeconds`.**
+  Not fixed on its own terms: **subtracting a *measured* bias removes the reason to subtract an
+  unrelated quantity that happens to be about the same size.** The term now subtracts
+  `FloorPercentile × slope`, and `UnsweptSeconds` survives as a diagnostic — it is still a true
+  statement about how much of the wait's range was seen, it is simply not the bias. The
+  arithmetic below is kept rather than deleted, because **the reason this was a defect is not
+  that the number was wrong; it is that the number was right for its inputs**, and that shape is
+  what a reader needs to recognise elsewhere.
 
-  It subtracts `UnsweptSeconds` — on a swept link about `S / phases` — from a floor inflated by
+  It subtracted `UnsweptSeconds` — on a swept link about `S / phases` — from a floor inflated by
   `0.1 · S`. **Those are unrelated quantities.** One is the part of the wait's range never
   sampled; the other is the offset of a chosen order statistic from the minimum. Nothing connects
   them, and they nearly cancel only because the two shipped cadences visit 13 phases (15 Hz) and
@@ -827,11 +887,20 @@ needs a change of a different size. Named rather than left to be rediscovered.
   | 10 | 0 | exact, by coincidence |
   | 8 | `4 · (0.1 − 0.125)` = **−0.10** | under-lead |
 
-  So both shipping configurations sit on the over-lead side — the direction this estimator exists
+  So both shipping configurations sat on the over-lead side — the direction this estimator exists
   to avoid — by about a tenth of a base tick, and a cadence recommendation that happened to select
-  8 phases would silently invert that with nothing in any counter changing. The phase count is
-  chosen by `InputCadence` for reasons that have nothing to do with `FloorPercentile`; the two
-  constants are coupled only by this accident.
+  8 phases would silently have inverted that with nothing in any counter changing. The phase count
+  is chosen by `InputCadence` for reasons that have nothing to do with `FloorPercentile`; the two
+  constants were coupled only by this accident. **That coupling is now gone, and with it the
+  dependence of the lead's sign on a cadence decision made for other reasons.**
+
+  *One thing the retirement makes visible that the arithmetic above predicts.* Because the old
+  remainder was small at the shipped cadences, a test that discriminates the two terms cannot
+  discriminate them by much there: on the 13-phase arm the retired term removed 0.16 base ticks
+  where 0.41 was owed, so the discriminating test separates them by 0.25 t and no more.
+  **A near-cancellation is exactly why this survived review, and it is also why the test that
+  catches it looks unimpressive.** A test that failed loudly would have needed a cadence nobody
+  ships.
 
   **It is not urgent and it is not small in the way that matters.** The magnitude is a tenth of a
   tick; the defect is that the term's correctness is not a property of the term. Whatever is

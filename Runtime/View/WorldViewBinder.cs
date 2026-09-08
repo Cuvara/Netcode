@@ -588,11 +588,14 @@ namespace Cuvara.Netcode.View
             // second step of the live 2.00 against a floor of 1.00 -- so truncation did not
             // merely cost accuracy here, it was the reason the term stayed open.
             //
-            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it in the
-            // units that are actually uncertain: the part of the wait's range never swept,
-            // measured rather than assumed. The reading still cannot exceed the evidence held,
-            // and it now goes to zero only when nothing swept, instead of whenever the link is
-            // fast enough that the constant is under one base tick.
+            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it where the
+            // bias actually IS: the floor is the tenth percentile of `constant + wait`, so on a
+            // swept link it sits 0.1 * S above the constant BY CONSTRUCTION, on every clean run.
+            // That measured offset is what it subtracts, using the ladder slope fitted from the
+            // run's own observations. It reads zero -- and says so, via FloorCorrectionRefusals
+            // -- only when the ladder is not straight and the model predicting the bias is
+            // therefore false, instead of whenever the link is fast enough that the constant is
+            // under one base tick.
             float ackLead = AckLatency.HasEstimate ? AckLatency.ConservativeFloorTicks : 0f;
 
             // THE FLOOR DISPLACES THE ROUND TRIP RATHER THAN ADDING TO IT, BECAUSE THEY
