@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-08
+
 > **The failure mode behind this release: reasoning about one property and gating on another.**
 >
 > Every defect in this release was found by noticing that a statement believed to be evidence was
