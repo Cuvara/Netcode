@@ -64,6 +64,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing, so a run made entirely of adoptions has run its reconcile loop and still never
   tested prediction against the server.
 
+### Open terms
+
+Both were found while instrumenting the adopt path, both are real, and neither is fixed
+here — each needs its own change with its own test rather than a silent rider on this one.
+Named rather than left to be rediscovered.
+
+- **The two-argument `Reconcile(Vec2, long)` overload can adopt while incrementing nothing
+  at all.** `HistoryMisses` is gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`,
+  so a two-arg caller whose pending buffer is empty takes the authoritative position
+  wholesale and moves neither `HistoryHits`, nor `HistoryMisses`, nor `ReplayedSteps`.
+  `Adoptions` is the first counter that sees it — it is measured off the fallback's outcome
+  and has no such gate — but the hit/miss pair still reads as though no reconcile occurred.
+  Not the live path: `com.cuvara.dots` drives the three-argument form. A consumer that
+  cannot supply the snapshot tick is on it, which is exactly the caller least able to
+  diagnose the result.
+
+- **`Reset()` clears `Adoptions` but not `HistoryHits` / `HistoryMisses`.** It already
+  cleared `ReplayedSteps`, `Snaps`, `Reconciles`, `DroppedInputs`, `RejectedInputs` and
+  `CoalescedInputs` and left the history pair alone; `Adoptions` was added to the cleared
+  set because it is the sibling of `ReplayedSteps`, which makes the asymmetry visible rather
+  than creating it. The consequence is specific and worth stating: **after a reconnect, any
+  ratio between `Adoptions` and `HistoryMisses` is meaningless**, because the numerator
+  restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
+  therefore only readable within one session.
+
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**

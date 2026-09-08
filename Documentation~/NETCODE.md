@@ -1161,6 +1161,30 @@ verifiable later. Do not infer behaviour from a pin diff in either direction: a 
 moved may change nothing, and a pin that did not move does not mean the server's input
 handling stood still.
 
+## Running the EditMode tests without Unity
+
+Most of `Tests/Editor/` is pure C# — the predictor, the estimators, the codec, the
+interning — and runs under a throwaway `dotnet` project in a few seconds, which is worth
+having when the Editor is busy or unavailable. The project lives outside the package (it is
+scratch, not an artefact): a `net10.0` csproj with `EnableDefaultCompileItems` off, globbing
+`Runtime/**` and `Tests/Editor/**` from the package, referencing `Shared.GameLogic` out of
+the Unity `PackageCache`, `UniTask.dll` and `UnityEngine.CoreModule.dll` out of the Editor
+install, and stubbing the handful of Unity types the pure paths still name. `Runtime/DI`,
+`Runtime/Bootstrap` and the golden-vector fixtures are excluded — they need the real Editor.
+
+> ### `dotnet test` can pass against code you already changed
+>
+> **The sources are outside the project directory, and an incremental build can miss an edit
+> to them and silently re-run the previous assembly.** The symptom is the worst one
+> available: a before-run that PASSES when it must FAIL. It cost a false negative while
+> verifying that `ReconcileAdoptionTests` actually discriminates — the counter increment had
+> been commented out, the test reported green, and the only reason the technique was not
+> reported as sound is that the result was too good to believe.
+>
+> **`rm -rf bin obj` before any run whose answer you intend to trust**, and always before a
+> deliberate before-run. A green result from a stale assembly is a true statement about the
+> wrong artefact, which is the failure mode this whole release is about.
+
 ## Measuring what prediction removes
 
 `Tests/Runtime/PredictionLatencyMeasurement.cs` is a **PlayMode** test that connects to a
