@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-08
+
 > **The defect: a constant that was correct, used for something it does not describe.**
 >
 > Every send loop in this package took its cadence from `GameConstants.DefaultTickRate`, under a
