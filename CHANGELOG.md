@@ -163,6 +163,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bar while the verdict flips to REFUSED.** A lock is not a subtle statistical condition on screen;
   it is one bar.
 
+- `PredictionLatencyMeasurement` reports the **acknowledgement quantile ladder** — `q = 0, 0.10,
+  0.25, 0.50, 0.75, 0.90` off one ring in one pass — with an ordinary least squares fitted through
+  it, plus the client frame rate that bounds all of them. **The point is to stop choosing between
+  statistics.** If one observation is `constant + wait` and the wait sweeps a snapshot interval,
+  the quantiles are affine in `q`: the **slope** says whether the sweep covered the whole interval,
+  and the **intercept** is the pipeline constant recovered independently of any single quantile —
+  which is what the open question about `FloorPercentile` actually needs. A ladder that is not
+  straight *falsifies* the model rather than returning a plausible number from it, which is a
+  property two order statistics could never have; the reported residual is the test, and its
+  tolerance is a fraction of the fitted slope rather than a constant somebody can tune. Both
+  numbers were already computable and neither was shown.
+
 ### Changed
 
 - **Direction changes now reach the server up to 10 ms later: +5 ms mean, +10 ms worst case.** This
@@ -201,6 +213,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ClockSyncProbe` reports which of the two constraints is binding rather than showing one
   undifferentiated REFUSED: **two refusals that look identical and mean different things is the
   defect this release is named after.**
+
+- **At exactly 60 fps against a 60 Hz base tick the pipeline constant is not recoverable at any
+  value, and this is a second face of the same law.** Acknowledgements are read on a render frame,
+  so no observation can be finer than a frame period. At 60 fps that period is 16.67 ms — *exactly
+  one base tick* — and since sends and acknowledgement reads both land on frames, **every
+  observation is an integer number of base ticks**. Simulated across injected constants of 0.00,
+  0.10, 0.50 and 1.00 base ticks, the estimator returns the same quantiles (2.00 / 2.00 / 4.00)
+  in all four cases: the constant is not merely imprecise, it is absent from the output.
+
+  A PlayMode run with no vsync usually sits far above 60 fps and therefore resolves fractional
+  ticks — which is how the first live run to offer a floor produced a p10 of 0.47 base ticks
+  (7.83 ms). That value is itself proof the client was above 128 fps, since no observation can be
+  shorter than one frame. **The frame rate is not a nuisance parameter for this measurement; with
+  the `k`-law above it is one of the two things that decide whether the quantity exists in the
+  output at all.** `PredictionLatencyMeasurement` now prints the client frame rate next to every
+  reading, and says so explicitly when one frame equals one base tick, because a floor quoted
+  without the frame rate it was taken at is not a reading.
 
 ### Notes
 

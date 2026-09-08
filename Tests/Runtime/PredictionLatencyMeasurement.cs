@@ -518,6 +518,51 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="AckObservations"/>
             public float AckObservationMedian;
 
+            /// <summary>
+            /// The quantiles <see cref="AckObservationLadderQuantiles"/> of the estimator's own
+            /// observation ring, in base ticks — read as a LINE, not as a set of candidates.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>Why six points and not the two that were here before.</b> One observation is
+            /// <c>constant + wait</c>, and the wait sweeps uniformly across a snapshot interval
+            /// once the send cadence is offset from the snapshot cadence. If that model holds,
+            /// the quantiles are AFFINE in <c>q</c>: <c>quantile(q) = C + q · S</c>, with
+            /// <c>S</c> the snapshot interval in base ticks. So the ladder answers two
+            /// questions that no single statistic can:
+            /// </para>
+            /// <list type="bullet">
+            /// <item><description>
+            /// the <b>slope</b> says whether the sweep really covers a whole snapshot interval.
+            /// A slope near <c>S</c> means the wait swept; a slope well under it means the
+            /// observations occupy only part of the range and the floor is measuring something
+            /// narrower than advertised.
+            /// </description></item>
+            /// <item><description>
+            /// the <b>intercept</b> is the pipeline constant, recovered independently of any
+            /// one quantile — which is the whole point. <c>FloorPercentile</c> is the tenth,
+            /// so the floor reads <c>C + 0.1 · S</c> and is biased UP by <c>0.1 · S</c> by
+            /// construction on a uniformly swept link. On the first live run to offer a floor
+            /// at all, that predicted <c>C ≈ 0.07</c> from p10 and <c>C ≈ 0.15</c> from the
+            /// median against a measured floor of 0.47 — agreeing to 1.3 ms, and implicating
+            /// the statistic rather than the route.
+            /// </description></item>
+            /// </list>
+            /// <para>
+            /// <b>Two points were not enough, and that is the reason this exists.</b> The
+            /// reading above is a two-point fit, and a span between two order statistics has
+            /// been silent about the distribution it stood for three separate times in this
+            /// work. A regression through six is not a stronger statistic; it is a different
+            /// kind of claim — it can be INCONSISTENT, and an inconsistent ladder falsifies the
+            /// model rather than returning a plausible number from it.
+            /// </para>
+            /// </remarks>
+            public float[] AckObservationLadder;
+
+            /// <summary>The quantiles <see cref="AckObservationLadder"/> is sampled at.</summary>
+            public static readonly double[] AckObservationLadderQuantiles =
+                { 0.00, 0.10, 0.25, 0.50, 0.75, 0.90 };
+
             /// <summary>Fits that failed to reproduce over a doubled baseline.</summary>
             /// <inheritdoc cref="RateCorroborated"/>
             public int FitsUncorroborated;
@@ -2098,6 +2143,15 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckObservations = binder.AckLatency.Samples;
             run.AckObservationP10 = binder.AckLatency.ObservationQuantileTicks(0.10);
             run.AckObservationMedian = binder.AckLatency.ObservationQuantileTicks(0.50);
+
+            // The whole ladder off the SAME ring, in one pass, so the six points describe one
+            // distribution rather than six moments of a moving one.
+            run.AckObservationLadder = new float[Run.AckObservationLadderQuantiles.Length];
+            for (var q = 0; q < Run.AckObservationLadderQuantiles.Length; q++)
+            {
+                run.AckObservationLadder[q] =
+                    binder.AckLatency.ObservationQuantileTicks(Run.AckObservationLadderQuantiles[q]);
+            }
             run.StalenessTicks = binder.Staleness.StalenessTicks;
             run.TargetLeadTicks = binder.TargetLeadTicks();
             run.SnapshotGapTicks = binder.TickRate.SnapshotTickGap;
@@ -2194,6 +2248,158 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         // ---- reporting ----
 
+        /// <summary>
+        /// The client's own frame rate, and what it does to the resolution of every
+        /// acknowledgement observation on this run.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This number was already being computed and was not printed, which made every
+        /// quantile below it uninterpretable.</b> Acknowledgements are read on a render frame,
+        /// so an observation cannot be finer than a frame period — the frame rate is not a
+        /// nuisance parameter here, it decides whether the pipeline constant is measurable at
+        /// all.
+        /// </para>
+        /// <para>
+        /// <b>The degenerate case is exactly 60 fps against a 60 Hz base tick.</b> A frame is
+        /// then 16.67 ms, which is precisely ONE base tick; sends and acknowledgement reads
+        /// both land on frames, so every observation is an integer number of base ticks and
+        /// the constant is unrecoverable at any value. Simulated, that run returns quantiles
+        /// of 2.00 / 2.00 / 4.00 whatever constant is injected. A PlayMode run with no vsync
+        /// is usually far above 60 and therefore resolves fractional ticks — the first live
+        /// run to offer a floor showed a p10 of 0.47 t = 7.83 ms, which is itself proof the
+        /// client was above 128 fps, since no shorter observation can exist than one frame.
+        /// </para>
+        /// <para>
+        /// So a reading is quoted with the frame rate it was taken at, or it is not a reading.
+        /// </para>
+        /// </remarks>
+        private static string DescribeClientFrameRate(Run run)
+        {
+            if (run.ObservedFps <= 0f)
+            {
+                return "  client frame rate        not measured\n";
+            }
+
+            float frameMs = 1000f / run.ObservedFps;
+            float frameTicks = run.TickRateInUse > 0 ? run.TickRateInUse / run.ObservedFps : 0f;
+
+            // One base tick per frame is the case where the ladder cannot resolve anything.
+            bool degenerate = frameTicks > 0.95f && frameTicks < 1.05f;
+
+            return
+                $"  client frame rate        {run.ObservedFps:F0} fps ({frameMs:F2} ms/frame" +
+                    (frameTicks > 0f ? $" = {frameTicks:F2} base ticks)" : ")") +
+                    "   <<< the resolution limit of every ack\n" +
+                "                             observation below: acknowledgements are read on a frame, so\n" +
+                "                             nothing finer than one frame can be measured\n" +
+                    (degenerate
+                        ? "                             *** ONE FRAME == ONE BASE TICK: every observation is an\n" +
+                          "                             integer number of ticks and the pipeline constant is NOT\n" +
+                          "                             recoverable from this run at any value. ***\n"
+                        : string.Empty);
+        }
+
+        /// <summary>
+        /// The acknowledgement-observation quantiles as a LINE: the six points, the slope
+        /// fitted through them, and the intercept that slope implies.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This exists because choosing between two statistics is not a measurement.</b>
+        /// One observation is <c>constant + wait</c> and the wait sweeps a snapshot interval,
+        /// so the quantiles should be <c>C + q · S</c> — a straight line whose slope is the
+        /// swept range and whose intercept is the pipeline constant. Reading it that way
+        /// recovers <c>C</c> without trusting any single quantile, which is what the argument
+        /// over <c>FloorPercentile</c> actually needs.
+        /// </para>
+        /// <para>
+        /// <b>Read the slope first.</b> If it is near the snapshot interval the sweep is real
+        /// and the intercept means something. If it is well under, the observations cover only
+        /// part of the range: the floor is then measuring a narrower distribution than the
+        /// model assumes and the intercept is not the constant. A ladder that is not straight
+        /// falsifies the model instead of returning a number from it, which is the property
+        /// two points could never have.
+        /// </para>
+        /// <para>
+        /// The fit is an ordinary least squares through the six <c>(q, quantile)</c> pairs.
+        /// Deliberately not weighted and deliberately not clever: the point is to see whether
+        /// the points lie on a line, and a residual is more informative here than a better
+        /// estimator would be.
+        /// </para>
+        /// </remarks>
+        private static string DescribeAckLadder(Run run)
+        {
+            float[] ladder = run.AckObservationLadder;
+            double[] quantiles = Run.AckObservationLadderQuantiles;
+
+            if (ladder == null || ladder.Length != quantiles.Length || run.AckObservations == 0)
+            {
+                return "  ack quantile ladder      not sampled (no observations were timed)\n";
+            }
+
+            var points = new System.Text.StringBuilder();
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                if (i > 0) points.Append("  ");
+                points.Append($"q{quantiles[i] * 100:00}={ladder[i]:F2}");
+            }
+
+            // Ordinary least squares through (q, ticks).
+            double meanQ = 0, meanY = 0;
+            for (var i = 0; i < ladder.Length; i++) { meanQ += quantiles[i]; meanY += ladder[i]; }
+            meanQ /= ladder.Length;
+            meanY /= ladder.Length;
+
+            double sxy = 0, sxx = 0;
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                double dq = quantiles[i] - meanQ;
+                sxy += dq * (ladder[i] - meanY);
+                sxx += dq * dq;
+            }
+
+            double slope = sxx > 0 ? sxy / sxx : 0.0;
+            double intercept = meanY - slope * meanQ;
+
+            // How far the points stray from the line: a straight ladder is the evidence that
+            // the sweep model applies at all.
+            double worst = 0;
+            for (var i = 0; i < ladder.Length; i++)
+            {
+                double residual = Math.Abs(ladder[i] - (intercept + slope * quantiles[i]));
+                if (residual > worst) worst = residual;
+            }
+
+            // The interval the wait is supposed to sweep, from the estimator's own measurement
+            // of it rather than from a configured rate.
+            double intervalTicks = run.SnapshotGapTicks;
+            string slopeVerdict = intervalTicks <= 0
+                ? "(no snapshot interval measured to compare against)"
+                : slope >= intervalTicks * 0.75
+                    ? $"~ the {intervalTicks} t snapshot interval: the wait swept it"
+                    : $"WELL UNDER the {intervalTicks} t snapshot interval: the wait covered only\n" +
+                      "                             part of the range, so the intercept is NOT the constant";
+
+            return
+                $"  ack quantile ladder      {points}   (base ticks, one ring, one pass)\n" +
+                $"  ladder slope             {slope:F2} t per unit q   {slopeVerdict}\n" +
+                $"  ladder intercept         {intercept:F2} base ticks   " +
+                    "<<< the pipeline constant implied by the LINE,\n" +
+                "                             independent of any single quantile. FloorPercentile is the\n" +
+                $"                             tenth, so the floor above should read about this + {slope * 0.10:F2}.\n" +
+                $"  ladder worst residual    {worst:F2} base ticks   " +
+                    // Scale-free rather than a magic number: a straight ladder should not
+                    // stray by more than a tenth of the range it spans. Tying the tolerance
+                    // to the fitted slope keeps it meaningful at any snapshot rate, and
+                    // stops it being a constant somebody later tunes to make a run look good.
+                    (worst > Math.Abs(slope) * 0.10
+                        ? "<<< the points are NOT on a line; the sweep model does\n" +
+                          "                             not describe this distribution and the intercept above is\n" +
+                          "                             not a constant. Read the ladder, not the fit.\n"
+                        : "(the points lie on a line, so the model holds here)\n");
+        }
+
         private static void Report(Run run)
         {
             var visible = run.Samples.Where(s => !s.VisibleTimedOut).Select(s => s.InputToVisibleMs).ToList();
@@ -2249,6 +2455,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     HoldWindowNote(run) + "\n" +
                 $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
+                DescribeClientFrameRate(run) +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
                     WireRateNote(run) + "\n" +
                 // ── THE CLOCK OFFSET ────────────────────────────────────────────────────
@@ -2301,6 +2508,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     "(the estimator's OWN distribution — the\n" +
                 "                             harness floor below is 20 samples at a different phase and is\n" +
                 "                             not a reference for it)\n" +
+                DescribeAckLadder(run) +
                 $"  ACK FLOOR (estimator)    {run.AckFloorMeasuredTicks:F2} base ticks" +
                     (run.AckFloorOffered
                         ? "   <<< IN THE LEAD — uplink + snapshot age, the term\n" +
