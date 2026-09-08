@@ -119,8 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > | Round trip computed unconditionally | Mechanism. Structural; its live magnitude on loopback is **zero**, so it has never been exercised. |
 > | Tenth-percentile floor | **Weakest.** Introduced on one loaded run, its justifying test now fails at its own precondition once the sweep guard works, and it is retained only because reverting it in the same commit would have made the sweep fix unattributable. |
 >
-> **And the set has never been validated as a whole against a stable measurement.** Every fix is
-> individually justified; the nine of them have never run together against a measurement capable of
+> **And the set has never been measured as a set — which is the risk, not the count.** Nine fixes
+> validated individually against a measurement with a 2.6× environmental spread is a weaker
+> position than nine fixes validated together against a stable one, and **no amount of per-fix
+> confidence adds up to the second**. Every fix is individually justified; the nine of them have never run together against a measurement capable of
 > resolving them, and the one time two landed together the result could not be attributed. Two runs
 > of one identical commit produced a **2.6× spread in apparent clock skew, a 4× spread in
 > correction count, and opposite floor decisions** — so a single run of any commit is worth very
@@ -402,6 +404,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on this one named open term. Every assertion stands where it was — the 1.5-step correction
   budget and the budget of 2 corrections above one step included; neither was widened.
 
+
+- **The measurement refuses a run it cannot measure, instead of reporting its numbers.** A run whose
+  client does not observe the snapshot stream at the rate the server sends it has not measured
+  prediction; it has measured whatever made the stream look slow — and every lead term is derived
+  from that stream. Six runs of near-identical code gave ON-arm wire rates of 57.1, 59.5, 60.1,
+  55.6, 55.8 and 58.0 Hz against an advertised 60, with **two runs of a single commit differing by
+  2.6× in apparent clock skew, 4× in correction count, and disagreeing on whether a floor could be
+  offered at all.** The cause is not known after six runs of looking — and a validity gate needs a
+  precondition, not a diagnosis. Past a 2% gap the run is `Inconclusive`: **refused, not clamped and
+  not annotated**, because a discarded run costs seven minutes and a silently annotated one gets
+  quoted six months later. The refusal carries the numbers it refused, printed where the verdict
+  would have been, so a reader grepping for corrections finds the refusal rather than a figure. The
+  threshold is set from those six runs and is **weak evidence** — a 2% gate discards four of them,
+  the two it keeps are the two whose corrections were lowest, n=2, and the same runs produced the
+  hypothesis. If a later run passes the gate and still reads badly, that is the gate being wrong
+  rather than the fix. Precedent: the loadtest harness already refuses a run whose entity count does
+  not match what was requested, for the same reason — **a run that failed its preconditions produces
+  numbers that look like results.**
 
 - **A saturated provisional age is refused instead of being delivered as the clamp — the clamp
   value *was* the defect.** `Math.Min(StalenessTicks, gap)` reads as a safety ceiling and behaves

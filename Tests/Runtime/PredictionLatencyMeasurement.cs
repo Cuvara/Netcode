@@ -98,6 +98,30 @@ namespace Cuvara.Netcode.Tests.PlayMode
         private const int Repeats = 3;
 
         /// <summary>Frames of zero input before a sample, to settle.</summary>
+        /// <summary>
+        /// How far the observed wire rate may sit from the advertised one before a run is
+        /// refused as unmeasurable.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Set from the data rather than from taste. Six runs of near-identical code gave ON-arm
+        /// wire rates of 57.1, 59.5, 60.1, 55.6, 55.8 and 58.0 Hz against 60 — −4.8%, −0.8%,
+        /// +0.2%, −7.3%, −7.0% and −3.3%. A 2% gate discards four of the six, which is severe;
+        /// the two it keeps are also the two whose corrections were lowest, which is weak
+        /// evidence that it selects the runs worth reading. <b>Weak because n=2 and because the
+        /// same six runs produced the hypothesis</b> — if a later run passes the gate and still
+        /// reads badly, that is the gate being wrong rather than the fix.
+        /// </para>
+        /// <para>
+        /// Deliberately unrelated to <c>TickRateEstimator.DisagreementTolerance</c> (15%), which
+        /// asks a different question: whether the client is predicting at the WRONG RATE, where
+        /// the nearest realistic pair is 15 against 20 Hz. A distorted observation of the right
+        /// rate is a different fault and wants a much tighter band. Collapsing the two into one
+        /// threshold is how a constant ends up needing repeated adjustment.
+        /// </para>
+        /// </remarks>
+        private const double WireRateValidityFraction = 0.02;
+
         private const int SettleTicks = 6;
 
         /// <summary>Give up on a sample after this long and report it, rather than hang.</summary>
@@ -1172,6 +1196,49 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Report(withoutPrediction);
             Report(diverging);
             ReportComparison(withPrediction, withoutPrediction);
+
+            // ---- VALIDITY GATE: is this run measurable at all? ----
+            //
+            // A run whose client does not observe the snapshot stream at the rate the server
+            // sends it has not measured prediction; it has measured whatever made the stream
+            // look slow. Six runs of near-identical code produced ON-arm wire rates of 57.1,
+            // 59.5, 60.1, 55.6, 55.8 and 58.0 Hz against an advertised 60 -- a 7% spread on one
+            // machine, with two runs of a SINGLE commit differing by 2.6x in apparent clock skew,
+            // 4x in correction count, and disagreeing on whether a floor could be offered at all.
+            // The cause is not known after six runs of looking.
+            //
+            // It does not have to be. A validity gate needs a precondition, not a diagnosis, and
+            // this one is cheaper to DETECT than to eliminate. The loadtest harness already
+            // refuses a run whose entity count does not match what was requested, for the same
+            // reason: a run that failed its preconditions produces numbers that look like
+            // results.
+            //
+            // REFUSED, NOT CLAMPED AND NOT ANNOTATED. A discarded run costs seven minutes; a
+            // silently annotated one gets quoted six months later. Inconclusive rather than
+            // failed, because nothing here says the code is wrong -- only that this run cannot
+            // say whether it is.
+            if (withPrediction.MeasuredTickRate > 0f && withPrediction.TickRateInUse > 0)
+            {
+                double wireGap = (withPrediction.MeasuredTickRate - withPrediction.TickRateInUse)
+                                 / (double)withPrediction.TickRateInUse;
+
+                if (Math.Abs(wireGap) > WireRateValidityFraction)
+                {
+                    Assert.Inconclusive(
+                        $"UNMEASURABLE RUN, not a result: the client observed the snapshot " +
+                        $"stream at {withPrediction.MeasuredTickRate:F1} Hz against an advertised " +
+                        $"{withPrediction.TickRateInUse} Hz, {wireGap * 100.0:+0.0;-0.0}%, past the " +
+                        $"{WireRateValidityFraction * 100.0:F0}% validity gate. Every lead term is " +
+                        "derived from that stream, so the corrections below describe whatever made " +
+                        "it look slow rather than describing prediction. Re-run; if it persists, " +
+                        "the machine is not currently capable of this measurement. " +
+                        $"(clock rate difference {withPrediction.SkewPpm:F0} ppm, " +
+                        $"corrections > ONE STEP {withPrediction.CorrectionsAboveOneStep} of " +
+                        $"{withPrediction.SmoothedCorrections}, max " +
+                        $"{(withPrediction.ExpectedStepFromWire > 0f ? withPrediction.MaxCorrection / withPrediction.ExpectedStepFromWire : float.NaN):F2}" +
+                        " steps — recorded here so the refusal carries the numbers it refused.)");
+                }
+            }
 
             // ---- Guards that make the numbers mean something ----
 
