@@ -101,6 +101,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrows it, and it narrows it in the other direction: a 1 says the reading is the fallback, not
   that a doubled gap was mistaken for a single one.
 
+  **A live reading consistent with this, offered as a lead rather than a result.** On a PlayMode
+  run against the dev stack on `develop` — the old statistic, before this change — the cadence
+  line read **75.91 ms while the same line printed a 66.7 ms nominal: 14% HIGH**, which is the
+  strict direction the minimum was documented as being unable to reach. For the minimum of the
+  gaps to be 75.91 ms, *every* observed gap must have been at least that — which is the condition
+  above: no gap spanning exactly one interval. **It is not proof.** The nominal on that line is the
+  *send* rate, the run's true snapshot cadence was not independently measured, and a genuinely
+  slower server cadence explains the same number without any phase lock. It is recorded because it
+  is the first live reading that points at the condition at all, and because the alternative is
+  testable by anyone who reads the server's configured snapshot rate off the same run.
+
 - **Jitter and loss together still cost accuracy, in the lenient direction, in proportion to the
   run length the link delivers.** The window is as long as the longest run of consecutive
   delivered snapshots, capped at eight. On the jitter fixture the reading is 4.2% low with no
@@ -719,6 +730,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assertion any replacement must keep, and `AnIdealCadenceIsMeasuredExactly_DropsOrNot` is the
   drop case that disqualified the obvious fix — kept precisely so the next candidate is measured
   against loss **before** it is believed rather than after.
+
+  **FIXED in `## [Unreleased]`, and corrected here in place rather than left standing, per the
+  convention this file adopted one entry above.** The two pinned readings did their job: the next
+  attempt had to come past them and one of them killed a candidate. What did *not* survive contact
+  is the recommendation recorded in the paragraph above — *"a robust statistic over a ring of
+  gaps — the same minimum-to-percentile move this class has already made twice"*. The ring of gaps
+  was right; **the minimum-to-percentile move was wrong, and measurably so**: a raw low percentile
+  of the gaps reads 72.222 ms against this same 66.667 cadence, 8.3% HIGH, on the very fixture it
+  was recommended for. The shipped statistic averages a telescoping window instead. **A remedy
+  recorded alongside a defect is a hypothesis and inherits none of the defect's evidence** — the
+  defect here was measured and the remedy beside it was not, and they were written in the same
+  paragraph in the same voice.
+
+  Also corrected: the claim above that the reading is *"LENIENT, never strict, and cannot produce
+  an over-lead on its own"* is **conditional, and was stated unconditionally**. It holds only while
+  the link delivers at least one gap spanning exactly one cadence interval. Under loss phase-locked
+  to the arrival jitter that gap is absent and the old minimum reads **strict** — 122.222 ms at one
+  snapshot in two, 72.222 at one in four, against 66.667. That is a property of the arrivals, not
+  of the statistic, and it applies to the minimum described here exactly as it applies to what
+  replaced it. See the `Limitations` entry under `## [Unreleased]`.
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
