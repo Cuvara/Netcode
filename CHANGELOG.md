@@ -55,6 +55,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > version, the acceptance test is "does it work **on top of the previous version**", not "does it
 > work".
 >
+> **The sharpest instance, because it is a fallback rather than a reading.** The fitted rate is
+> refused *because its slope is untrusted* — and the fallback asserts **slope = zero**, which is
+> the same untrusted quantity set to a different value, and the one that grows without bound. A
+> fallback is not automatically the safe option: it is another claim about the same thing, and it
+> needs the same scrutiny as the estimate it replaces. Measured, that claim cost 45.56 base ticks
+> of age against a true 0.09, which saturated its own clamp and delivered the warm-up fallback the
+> release exists to remove.
+>
+> And a note on instruments, since three of the defects above were in them rather than in the
+> mechanism: **instruments are cheaper to fix than mechanisms, and not cheaper to get wrong.** A
+> wrong instrument costs a full measurement cycle and sends the reader to the wrong layer — one
+> label here asserted the opposite of what the code did, on the exact line an investigation had
+> come down to.
+>
 > Two rules come out of it, and they are worth more than any single fix here. **Never read a zero
 > as evidence without the counter beside it that says a measurement happened** — hence
 > `staleness fit` printing fits/refused/baseline, the wire-rate gap printing a percentage instead
