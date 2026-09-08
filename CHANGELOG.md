@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > from the code's model of it** — acknowledgements arrive on the snapshot cadence and the send
 > time moves, because that is what actually happens.
 >
+> *When two mechanisms produce the same counter, testing either against the pooled data tests
+> neither.* A signature for one cause of reconcile misses was refuted across seven runs — by a run
+> whose misses came from the *other* cause, already identified and already fixed. Controlled to the
+> subset where the first mechanism cannot operate, the signature holds 3 for 3, which is not a
+> finding at n=3 but makes the verdict *untested*, not *refuted*. **Note the direction: this one
+> discards something possibly true, where the other three accept things that are false.** A warning
+> written only against false acceptance leaves it invisible. Defence: before testing a second
+> cause, exclude the runs the first can explain — and say which subset the claim is about.
+>
 > *Some defects cannot be found before a release by construction.* Importing a sample twice is a
 > hard compile error, and the second copy only exists after a **version bump** — so it lands on
 > the first person to update and never on the person who imported. Pre-release testing imports
