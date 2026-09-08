@@ -458,6 +458,39 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="StalenessFitted"/>
             public long TickErrorTicks;
 
+            /// <summary>
+            /// The same quantity's range over the whole run, sampled every frame.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// <b>One instantaneous sample of this cannot be read as a settled offset, and
+            /// reading it as one cost a round of investigation.</b> The error is an integer
+            /// difference re-evaluated at each snapshot, so it quantises: a clock sitting
+            /// steadily between two ticks reports one value or the next depending on where the
+            /// snapshot fell, and <see cref="TickErrorTicks"/> is whichever the LAST steer
+            /// happened to see.
+            /// </para>
+            /// <para>
+            /// A band of width 1 straddling the target is a clock in step. A band of width 1
+            /// sitting entirely off it is a genuine standing offset. A single number cannot
+            /// tell those apart, and they have opposite meanings.
+            /// </para>
+            /// </remarks>
+            public long TickErrorMin = long.MaxValue;
+
+            /// <inheritdoc cref="TickErrorMin"/>
+            public long TickErrorMax = long.MinValue;
+
+            /// <summary>Whether the error band was ever sampled at all. False on a prediction-OFF run.</summary>
+            /// <remarks>
+            /// <c>LocalMovePredictor.SteerToServerTick</c> returns immediately when the
+            /// predictor is disabled, so <c>TickError</c> is never assigned and reads its
+            /// initial 0. <b>A prediction-OFF run's clock error is not a zero, it is an
+            /// absence</b> — it is not a baseline the prediction-ON figure can be compared
+            /// against, and it was read as one.
+            /// </remarks>
+            public bool TickErrorSampled;
+
             public float MaxCorrection;
             public float EffectiveSpeed;
             public bool Predicting;
@@ -1687,6 +1720,16 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     if (predictor != null)
                     {
                         run.PendingPeak = Math.Max(run.PendingPeak, predictor.PendingCount);
+
+                        // The band, not just the last value. See Run.TickErrorMin.
+                        if (predictor.IsEnabled)
+                        {
+                            long err = predictor.TickError;
+                            if (err < run.TickErrorMin) run.TickErrorMin = err;
+                            if (err > run.TickErrorMax) run.TickErrorMax = err;
+                            run.TickErrorSampled = true;
+                        }
+
                         corrections.Poll();
                     }
 
@@ -2023,6 +2066,16 @@ namespace Cuvara.Netcode.Tests.PlayMode
                         : "   (server seconds per client second, from the fitted line)") + "\n" +
                 $"  clock error (last steer) {run.TickErrorTicks} base ticks" +
                     ClockErrorNote(run) + "\n" +
+                $"  clock error band         " +
+                    (run.TickErrorSampled
+                        ? $"{run.TickErrorMin} .. {run.TickErrorMax} base ticks   " +
+                          (run.TickErrorMax - run.TickErrorMin <= 1
+                              ? "(width <= 1: quantisation, read the band\n" +
+                                "                             and not the last sample)"
+                              : "   <<< the error MOVES over the run — a single\n" +
+                                "                             sample of it says nothing")
+                        : "NOT SAMPLED — the predictor is off, so the steer never ran and\n" +
+                          "                             the last-steer figure above is an unassigned 0, not a zero error") + "\n" +
                 $"  --- smoothness (per render frame, while moving) ---\n" +
                 $"  frames with NO movement  {run.StillFramePercent:F1}%   <- the stutter; " +
                     "high means the avatar teleports once per input and is frozen between\n" +
@@ -2335,7 +2388,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
                        "Feed the fitted rate to the clock.";
             }
 
-            return "   <<< the clock is not tracking the steering target";
+            // NOT "the clock is not tracking". This branch used to say that, and on this
+            // package it can no longer support the claim: the droop test above is computed
+            // from SkewPpm, and since the fitted rate is fed to the clock through
+            // SetClockRateScale the drift it tests for is ~0 by design — so the droop branch
+            // never fires and EVERY error of 2 or more falls through to here regardless of
+            // cause. An alarming string that is reached by construction is not a finding.
+            //
+            // Read the band on the next line instead. And note the target this is measured
+            // against MOVED when the acknowledgement floor entered the lead: the same clock
+            // reads one lower per tick of TargetLeadTicks, so this figure is not comparable
+            // across builds that changed the lead arithmetic.
+            return "   (2+ ticks off the target — read the band below before\n" +
+                   "                             concluding anything; the droop test above cannot\n" +
+                   "                             fire once the fitted rate is fed to the clock)";
         }
 
         private static string LeadNote(Run run)

@@ -54,6 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was first wired in: the floor was never steering anything, the round trip had stopped steering
   anything, and a truncated floor put nothing back.
 
+- **The measurement reports the clock error as a band, and stops asserting a cause it cannot
+  support.** `clock error (last steer)` is one instantaneous integer sample of a quantity that
+  quantises, so a clock sitting steadily between two ticks reports one value or the next
+  depending on where the last snapshot fell — a band of width 1 straddling the target is a
+  clock in step, a band of width 1 sitting off it is a standing offset, and a single number
+  cannot tell those apart. A `clock error band` line now prints the range sampled every frame.
+  Two related traps are closed with it: a prediction-OFF run's `0` is an **absence**, not a
+  zero — `SteerToServerTick` returns immediately when the predictor is disabled, so `TickError`
+  is never assigned — and is now printed as `NOT SAMPLED`; and the fall-through note read
+  "the clock is not tracking the steering target" for any error of 2 or more, which since
+  v0.33.0 fed the fitted rate to the clock is *every* such error, because the droop branch it
+  falls through from is computed from a `SkewPpm` drift that is now ~0 by design. An alarming
+  string reached by construction is not a finding. The note also records that this figure is
+  measured against `serverTick + TargetLeadTicks`, so it is **not comparable across builds that
+  changed the lead arithmetic** — the same clock reads one lower per tick the lead gained.
+
 - **`InputToVisibleMovement_WithAndWithoutPrediction` is no longer `[Ignore]`d.** It was ignored
   on this one named open term. Every assertion stands where it was — the 1.5-step correction
   budget and the budget of 2 corrections above one step included; neither was widened.
