@@ -100,6 +100,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > difference are then sorted correctly without anyone having to be right about which is
 > happening.
 >
+> **How each fix in this release was validated, because they are not equal.** One was confirmed on
+> the run it was written for, by a check that needed no judgement. The rest are *mechanism-
+> supported*: the defect reproduces in isolation, a test discriminates against the pre-fix code,
+> and the arithmetic accounts for the measured numbers — which is real evidence and is **not** the
+> same as "measured to work". A reader hunting a regression should distrust them in this order,
+> weakest first.
+>
+> | Fix | Validation |
+> |---|---|
+> | Saturated provisional age refused | **Confirmed.** Falsifier stated in advance — large skew *and* `TARGET LEAD 4` would mean failure. Measured: 90 833 ppm, lead **0**. |
+> | Age gated on corroboration (`AgeIsFitted`) | **Confirmed on one run.** `reconciles from history` 39 hit/120 missed → 147/15, age 45.56 → 0.09. Single run, and a single run is now known to be worth little. |
+> | Rate gated on corroboration (`RateCorroborated`) | Mechanism. Delay-floor step reproduces the artefact in a test; live readings of 220 ppm idle against 90 636 loaded on one machine. |
+> | Sweep guard: span between quantiles + bucket occupancy | Mechanism. Two tests fail against the extremes-based span. First *observed* discriminating in run 2 (p10–median spread 3.09 offered, 0.28 refused) — after the fix, not as validation of it. |
+> | Acknowledgement floor carried as a fraction | Mechanism. `Math.Floor` demonstrably returned 0 for both live readings (0.14, 0.68). |
+> | Acknowledgements from a previous session discarded | Mechanism. Reproduces in a test; **never observed live** — `ack floor ack-ahead` has read 0 on every run since it was added. |
+> | Newest-retired input timed, superseded counted | Mechanism. The min-over-a-group identity is arithmetic; the sweep-span corruption reproduces in a test. |
+> | Round trip computed unconditionally | Mechanism. Structural; its live magnitude on loopback is **zero**, so it has never been exercised. |
+> | Tenth-percentile floor | **Weakest.** Introduced on one loaded run, its justifying test now fails at its own precondition once the sweep guard works, and it is retained only because reverting it in the same commit would have made the sweep fix unattributable. |
+>
+> **And the set has never been validated as a whole against a stable measurement.** Every fix is
+> individually justified; the nine of them have never run together against a measurement capable of
+> resolving them, and the one time two landed together the result could not be attributed. Two runs
+> of one identical commit produced a **2.6× spread in apparent clock skew, a 4× spread in
+> correction count, and opposite floor decisions** — so a single run of any commit is worth very
+> little, and much of the attribution in this work rested on exactly that. That is a limitation of
+> how this release was validated, not a footnote about process.
+>
 > **The conclusion, which is not about any of the individual defects.** Nine fixes came out of
 > this work and not one of them was found by reasoning about the code. Every advance came from a
 > measurement: a counter printed beside another counter, a band printed instead of a sample, a
