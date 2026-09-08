@@ -432,5 +432,94 @@ namespace Cuvara.Netcode.Tests.Editor
                 "and the floor that follows must be the real constant, not the 1 ms the stale "
                 + "acknowledgements would have pinned it to for the rest of the epoch.");
         }
+
+        /// <summary>
+        /// Feed a distribution directly, one observation per acknowledgement, so a shape
+        /// measured on a live run can be replayed exactly.
+        /// </summary>
+        private static AckLatencyEstimator DriveDistribution(double[] latencies)
+        {
+            var e = new AckLatencyEstimator();
+            double now = ClockOffset;
+            long tick = 0;
+
+            foreach (double latency in latencies)
+            {
+                tick++;
+                e.RecordSent(tick, now);
+                e.RecordAck(tick, now + latency, BaseHz);
+                now += SnapshotPeriod;
+            }
+
+            return e;
+        }
+
+        /// <summary>
+        /// The floor must describe the pipeline the client is running in, not the best moment
+        /// the route has ever had.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This replays the run that broke the extremum, and it reproduces both numbers.</b>
+        /// Inside a loaded test suite the measured input-to-acknowledgement distribution was
+        /// min 23.1 ms, p90 32.5, max 74.3 — with a handful of observations near 3 ms where an
+        /// input happened to arrive immediately before a gather. Those are real; they are also
+        /// a useless description of what the pipeline costs. A minimum filter found them and
+        /// reported 0.17 base ticks while the harness measured 1.54 on the same wire, the lead
+        /// fell back to 0, and the correction went to 2.8 wire-sized steps.
+        /// </para>
+        /// <para>
+        /// The original argument for a minimum — that a mean measures the jitter sitting on top
+        /// of the floor — is right about jitter and wrong about this, because under load the
+        /// constant itself has two modes. A tenth-percentile quantile keeps the argument (it is
+        /// still far below the mean, so stalls above it are still ignored) and refuses to be
+        /// defined by one lucky observation.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void ARareBestCaseCannotDefineTheFloor()
+        {
+            // The live shape: a few near-instant observations, a body at 23-33 ms, a tail to 74.
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 140; i++)
+            {
+                if (i % 47 == 0) latencies.Add(0.0028);              // caught a gather: 3 of 140
+                else if (i % 11 == 0) latencies.Add(0.0325 + (i % 5) * 0.0084);   // the tail, to 74
+                else latencies.Add(0.0231 + (i % 7) * 0.0014);      // the body, 23-31
+            }
+
+            var e = DriveDistribution(latencies.ToArray());
+
+            Assert.That(e.HasEstimate, Is.True,
+                "precondition: this distribution spans far more than half a snapshot interval, "
+                + "so the sweep guard is satisfied — as it was on the live run that produced it");
+
+            Assert.That(e.FloorSeconds, Is.GreaterThan(0.0150),
+                "the floor must describe the pipeline the client is running in. The extremum "
+                + "here is 2.8 ms, which is 0.17 base ticks — the exact figure a live suite run "
+                + "reported while the same wire measured 1.54.");
+
+            Assert.That(e.FloorSeconds, Is.LessThan(0.0300),
+                "and it must still be a FLOOR, not a mean: well below the 32 ms p90 and the "
+                + "74 ms tail, or every stall above it starts steering the clock.");
+        }
+
+        /// <summary>
+        /// On a clean link the quantile must still land on the constant, or the change above
+        /// bought robustness under load by giving up accuracy everywhere else.
+        /// </summary>
+        [TestCase(0.0)]
+        [TestCase(0.0167)]
+        [TestCase(0.0333)]
+        public void OnACleanLinkTheQuantileStillFindsTheConstant(double uplinkPlusAge)
+        {
+            var e = Drive(uplinkPlusAge, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
+
+            Assert.That(e.HasEstimate, Is.True, "precondition");
+            Assert.That(e.FloorSeconds, Is.EqualTo(uplinkPlusAge).Within(SnapshotPeriod * 0.25),
+                "with the wait sweeping and no second mode, a tenth of the observations are "
+                + "within a tenth of an interval of the constant, so the quantile and the "
+                + "extremum agree — which is why the run measured alone was never wrong.");
+        }
     }
 }

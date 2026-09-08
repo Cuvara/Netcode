@@ -118,6 +118,52 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public const double MinimumSweepFraction = 0.5;
 
+        /// <summary>
+        /// Where in the observation distribution the floor is taken from.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Not the minimum, and that is a correction to this class's original argument.</b>
+        /// The reasoning was the one <see cref="TickRateEstimator.SnapshotTickGap"/> and the
+        /// staleness envelope both make: the interesting quantity is the floor, and a mean
+        /// measures the jitter sitting on top of it. That holds when the observations are a
+        /// constant plus a wait that sweeps — the model this was built on. It does NOT hold
+        /// when the constant itself has a loaded and an unloaded mode, and under load it has
+        /// exactly that.
+        /// </para>
+        /// <para>
+        /// Measured, on the same build against the same stack minutes apart: run alone, the
+        /// harness's input-to-acknowledgement minimum was 0.76 base ticks and the estimator's
+        /// extremum 0.71 — agreement. Run inside the full suite, the harness measured 1.54 and
+        /// the extremum 0.17, a ninefold gap. Nothing was stale and nothing was mis-timed: the
+        /// loaded run's distribution ran at 23 ms typical with a p90 of 32, and a minimum over
+        /// ~140 observations found the two or three that had caught a gather immediately, which
+        /// is a real thing the route once did and a useless description of what it costs. The
+        /// lead has to cover the pipeline the client is actually running in.
+        /// </para>
+        /// <para>
+        /// A low quantile keeps the whole point of the original argument — it is far below the
+        /// mean, so jitter and stalls above it are still ignored — while refusing to be set by
+        /// a single lucky observation. A tenth is low enough that a healthy sweep still pulls it
+        /// down to the constant and high enough that one outlier in a hundred cannot define it.
+        /// </para>
+        /// </remarks>
+        public const double FloorPercentile = 0.10;
+
+        /// <summary>
+        /// Observations the quantile is taken over. A ring, oldest dropped.
+        /// </summary>
+        /// <remarks>
+        /// At a 15 Hz send rate 128 is about eight seconds — deliberately the same memory the
+        /// two-epoch minimum had, so a route that has genuinely become slower is still followed
+        /// within about ten seconds rather than held down by the start of the session.
+        /// </remarks>
+        private const int ObservationCapacity = 128;
+
+        private readonly double[] _observations = new double[ObservationCapacity];
+        private readonly double[] _sortScratch = new double[ObservationCapacity];
+        private int _obsHead, _obsCount;
+
         private double _epochMin = double.MaxValue;
         private double _epochMax = double.MinValue;
         private double _previousEpochMin = double.MaxValue;
@@ -258,12 +304,22 @@ namespace Cuvara.Netcode.Prediction
         }
 
         /// <summary>The measured floor in seconds, or 0 before <see cref="HasEstimate"/>.</summary>
+        /// <remarks>
+        /// The <see cref="FloorPercentile"/> quantile of the observations held, not their
+        /// minimum. See that constant for why, and for the measurement that changed it.
+        /// </remarks>
         public double FloorSeconds
         {
             get
             {
-                double best = Math.Min(_epochMin, _previousEpochMin);
-                return best == double.MaxValue ? 0.0 : best;
+                if (_obsCount == 0) return 0.0;
+
+                Array.Copy(_observations, _sortScratch, _obsCount);
+                Array.Sort(_sortScratch, 0, _obsCount);
+
+                int index = (int)(FloorPercentile * _obsCount);
+                if (index >= _obsCount) index = _obsCount - 1;
+                return _sortScratch[index];
             }
         }
 
@@ -440,8 +496,22 @@ namespace Cuvara.Netcode.Prediction
                 else
                 {
                     Samples++;
+
+                    // The epoch min/max are the SWEEP evidence and nothing else; the floor
+                    // itself is a quantile over the ring below.
                     if (latency < _epochMin) _epochMin = latency;
                     if (latency > _epochMax) _epochMax = latency;
+
+                    if (_obsCount == ObservationCapacity)
+                    {
+                        _observations[_obsHead] = latency;
+                        _obsHead = (_obsHead + 1) % ObservationCapacity;
+                    }
+                    else
+                    {
+                        _observations[(_obsHead + _obsCount) % ObservationCapacity] = latency;
+                        _obsCount++;
+                    }
                 }
             }
 
@@ -477,6 +547,8 @@ namespace Cuvara.Netcode.Prediction
             _lastAckAt = 0;
             _lastAckTick = 0;
             _maxSentTick = 0;
+            _obsHead = 0;
+            _obsCount = 0;
             Samples = 0;
             Refused = 0;
             Superseded = 0;

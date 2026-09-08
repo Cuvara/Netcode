@@ -184,9 +184,18 @@ where the missing term measures ~17 ms.
 
 `AckLatencyEstimator` measures the constant properly. The client knows when it sent input
 tick N and when it first saw a snapshot with `ack_tick >= N`; that interval is
-`uplink + wait for the next snapshot + age`, the wait is what varies, and its minimum
-converges on `uplink + age` — the exact quantity, no new wire traffic, the same minimum-filter
-argument the staleness estimator already makes. Call `WorldViewBinder.NoteInputSent(tick)`
+`uplink + wait for the next snapshot + age`, the wait is what varies, and its **low quantile**
+converges on `uplink + age` — the exact quantity, no new wire traffic.
+
+It is a quantile and not a minimum, and that distinction was bought with a defect. The
+minimum-filter argument the staleness estimator makes — a mean would measure the jitter sitting
+on top of the floor — holds when the observations are a constant plus a sweeping wait. It does
+not hold when the constant itself has a loaded and an unloaded mode, and under load it has
+exactly that: a loaded run measured 23 ms typical with a p90 of 32, and an extremum over ~140
+observations found the two or three that had caught a gather immediately and reported **0.17
+base ticks while the same wire measured 1.54**. A tenth-percentile floor keeps the argument —
+still far below the mean, so stalls above it are still ignored — and cannot be defined by one
+lucky observation. See `AckLatencyEstimator.FloorPercentile`. Call `WorldViewBinder.NoteInputSent(tick)`
 beside `LocalMovePredictor.RecordInput`, or the estimator only has one end of the interval and
 offers nothing.
 
@@ -254,13 +263,17 @@ completes rather than whenever the link is fast.
 | Line | What it is |
 |---|---|
 | `ACK FLOOR (harness)` | the smallest input→ack seen across the ~20 *sample* inputs, one per sample iteration. An upper bound on `uplink + age`. |
-| `ACK FLOOR (estimator)` | the estimator's minimum over every observation, sample and settle inputs alike — several times as many, at a different phase against the snapshot cadence. |
+| `ACK FLOOR (estimator)` | the estimator's tenth-percentile floor over every observation, sample and settle inputs alike — several times as many, at a different phase against the snapshot cadence. |
 
-So the estimator's line is expected to sit **at or below** the harness's, and on a healthy
-localhost run both should be a fraction of a base tick with the estimator's the smaller of the
-two. A minimum over more, better-swept observations is legitimately lower; that is what a
-minimum filter is for. What would be a fault is the estimator reading *above* the harness — that
-is a phase lock, and `ACK FLOOR (estimator) … NOT OFFERED` is what should happen instead.
+So the estimator's line is expected to sit **at or a little below** the harness's, in *both* an
+idle and a loaded context — and the pair diverging is the signal to read first. Two ways it has
+actually diverged, each with its own counter beside it:
+
+- the estimator far **below** the harness (0.17 against 1.54): either a rare best-case defining
+  the floor, which `FloorPercentile` now prevents, or acknowledgements from a session the server
+  has not reaped, which `ack floor ack-ahead` names;
+- the estimator **above** the harness: a phase lock, in which case nothing should be offered at
+  all and `ACK FLOOR (estimator) … NOT OFFERED` is what prints.
 
 ### Reading a correction figure
 

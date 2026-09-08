@@ -54,6 +54,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was first wired in: the floor was never steering anything, the round trip had stopped steering
   anything, and a truncated floor put nothing back.
 
+- **The floor is a tenth-percentile quantile of the observations, not their minimum.** The
+  minimum-filter argument this estimator was built on — a mean would measure the jitter sitting
+  on top of the floor — holds when the observations are a constant plus a sweeping wait. It does
+  not hold when the constant itself has a loaded and an unloaded mode, and under load it has
+  exactly that. Measured on one build against one stack minutes apart: run alone, harness 0.76
+  base ticks against an estimator extremum of 0.71 — agreement; run inside the full PlayMode
+  suite, harness **1.54 against 0.17**, a ninefold gap, the lead falling back to 0 and the
+  correction to 2.8 wire-sized steps. Nothing was stale and nothing was mis-timed: the loaded
+  distribution ran at 23 ms typical with a p90 of 32, and the extremum found the two or three
+  observations that had caught a gather immediately. Those are real, and they are a useless
+  description of what the pipeline costs — the lead has to cover the pipeline the client is
+  running in. A tenth keeps the whole point of the original argument (still far below the mean,
+  so stalls above it are still ignored) while refusing to be defined by one lucky observation,
+  and on a clean link where there is no second mode it agrees with the extremum, which is why
+  the run measured alone was never wrong. `ARareBestCaseCannotDefineTheFloor` replays the live
+  distribution and reproduces 0.0028 s — 0.17 base ticks — from the extremum exactly.
+
 - **An acknowledgement naming a tick the client never sent is discarded rather than timed.**
   `ack_tick` is defined as *this client's* newest accepted input tick, so one greater than the
   newest tick this client has stamped cannot be about this client's inputs — it is a server
