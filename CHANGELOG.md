@@ -218,22 +218,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was first wired in: the floor was never steering anything, the round trip had stopped steering
   anything, and a truncated floor put nothing back.
 
-- **The floor is a tenth-percentile quantile of the observations, not their minimum.** The
-  minimum-filter argument this estimator was built on — a mean would measure the jitter sitting
-  on top of the floor — holds when the observations are a constant plus a sweeping wait. It does
-  not hold when the constant itself has a loaded and an unloaded mode, and under load it has
-  exactly that. Measured on one build against one stack minutes apart: run alone, harness 0.76
-  base ticks against an estimator extremum of 0.71 — agreement; run inside the full PlayMode
-  suite, harness **1.54 against 0.17**, a ninefold gap, the lead falling back to 0 and the
-  correction to 2.8 wire-sized steps. Nothing was stale and nothing was mis-timed: the loaded
-  distribution ran at 23 ms typical with a p90 of 32, and the extremum found the two or three
-  observations that had caught a gather immediately. Those are real, and they are a useless
-  description of what the pipeline costs — the lead has to cover the pipeline the client is
-  running in. A tenth keeps the whole point of the original argument (still far below the mean,
-  so stalls above it are still ignored) while refusing to be defined by one lucky observation,
-  and on a clean link where there is no second mode it agrees with the extremum, which is why
-  the run measured alone was never wrong. `ARareBestCaseCannotDefineTheFloor` replays the live
-  distribution and reproduces 0.0028 s — 0.17 base ticks — from the extremum exactly.
+- **The sweep guard measures its span between the tenth and ninetieth percentiles, not between
+  the extremes — and the floor goes back to the minimum as a result.** `SweptEnough` is what
+  decides whether a minimum is evidence about the pipeline constant, and its span was
+  `max - min`, which **a single observation satisfies**. Measured live on a client sending at
+  15 Hz into a 15 Hz snapshot stream — the phase-locked case this class's remarks warn about by
+  name — the input-to-acknowledgement distribution was `min 5.5 ms, median 58.8, p90 62.2`: a
+  lock with one outlier. `max - min` read 57 ms against a 33 ms requirement and passed. The floor
+  then landed on the locked mode at **3.33 base ticks while the harness's own observed minimum
+  was 0.33** — ten times high, in the opposite direction from every failure this estimator had
+  produced before, straight into the steering lead, which reached 8 and pushed the reconcile's
+  compare point past the retained history (**39 hits against 120 misses**, where a healthy run
+  had 138 against 3). Between quantiles, one outlier moves nothing and the same data is refused.
+  A second flaw in the same guard is fixed with it: the snapshot interval the requirement is
+  scaled by is itself the smallest gap between acknowledgements, so latency spread was shrinking
+  the requirement it was supposed to set.
+
+- **The tenth-percentile floor introduced earlier in this cycle is reverted to the minimum.** It
+  was added because an extremum reported 0.17 base ticks on a loaded run whose observed minimum
+  was 1.39. That reasoning was sound and aimed at the wrong layer: the distribution it was
+  solving for is one whose wait never swept, and the guard should have refused it outright rather
+  than being asked to floor it well. With the sweep measured between quantiles that distribution
+  *is* refused, no floor is offered, and there is nothing left for a percentile to protect
+  against — while a quantile above the minimum biases the lead upward, which is the over-lead
+  direction. **A statistic cannot repair a guard, and reaching for a more robust one is a sign
+  the guard above it is admitting data it should not.**
 
 - **An acknowledgement naming a tick the client never sent is discarded rather than timed.**
   `ack_tick` is defined as *this client's* newest accepted input tick, so one greater than the

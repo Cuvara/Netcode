@@ -119,36 +119,67 @@ namespace Cuvara.Netcode.Prediction
         public const double MinimumSweepFraction = 0.5;
 
         /// <summary>
-        /// Where in the observation distribution the floor is taken from.
+        /// The quantiles the sweep is measured between.
         /// </summary>
         /// <remarks>
         /// <para>
-        /// <b>Not the minimum, and that is a correction to this class's original argument.</b>
-        /// The reasoning was the one <see cref="TickRateEstimator.SnapshotTickGap"/> and the
-        /// staleness envelope both make: the interesting quantity is the floor, and a mean
-        /// measures the jitter sitting on top of it. That holds when the observations are a
-        /// constant plus a wait that sweeps — the model this was built on. It does NOT hold
-        /// when the constant itself has a loaded and an unloaded mode, and under load it has
-        /// exactly that.
+        /// <b>Not the minimum and maximum, and that distinction is the whole guard.</b> The
+        /// span used to be <c>max - min</c>, which a SINGLE observation satisfies: one lucky
+        /// sample far from the rest makes a phase-locked link look swept, and the guard then
+        /// certifies exactly the distribution it exists to refuse.
         /// </para>
         /// <para>
-        /// Measured, on the same build against the same stack minutes apart: run alone, the
-        /// harness's input-to-acknowledgement minimum was 0.76 base ticks and the estimator's
-        /// extremum 0.71 — agreement. Run inside the full suite, the harness measured 1.54 and
-        /// the extremum 0.17, a ninefold gap. Nothing was stale and nothing was mis-timed: the
-        /// loaded run's distribution ran at 23 ms typical with a p90 of 32, and a minimum over
-        /// ~140 observations found the two or three that had caught a gather immediately, which
-        /// is a real thing the route once did and a useless description of what it costs. The
-        /// lead has to cover the pipeline the client is actually running in.
+        /// Measured live, on a client sending at 15 Hz into a 15 Hz snapshot stream — the
+        /// phase-locked case this class's remarks warn about by name — the input-to-ack
+        /// distribution was <c>min 5.5 ms, median 58.8, p90 62.2</c>. That is not a spread, it
+        /// is a lock with one outlier; <c>max - min</c> read 57 ms against a 33 ms requirement
+        /// and passed. The floor then landed on the locked mode at <b>3.33 base ticks</b> while
+        /// the harness's own observed minimum was <b>0.33</b> — ten times high, in the opposite
+        /// direction from every failure this estimator had produced before, and it went
+        /// straight into the steering lead.
         /// </para>
         /// <para>
-        /// A low quantile keeps the whole point of the original argument — it is far below the
-        /// mean, so jitter and stalls above it are still ignored — while refusing to be set by
-        /// a single lucky observation. A tenth is low enough that a healthy sweep still pulls it
-        /// down to the constant and high enough that one outlier in a hundred cannot define it.
+        /// Between the tenth and ninetieth percentiles, one outlier moves nothing. The same
+        /// data reads a span of about 12 ms and is correctly refused. This is the third time in
+        /// this class that a statistic taken from extremes turned out to be silent about the
+        /// distribution it was standing in for.
         /// </para>
         /// </remarks>
-        public const double FloorPercentile = 0.10;
+        public const double SweepLowQuantile = 0.10;
+
+        /// <inheritdoc cref="SweepLowQuantile"/>
+        public const double SweepHighQuantile = 0.90;
+
+        /// <summary>
+        /// Where in the observation distribution the floor is taken from: the minimum.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>This was briefly a tenth-percentile quantile, and reverting it is the honest
+        /// outcome of fixing the sweep guard.</b> The quantile was introduced because an
+        /// extremum over ~140 observations reported 0.17 base ticks on a loaded run whose
+        /// input-to-acknowledgement distribution had a minimum of 1.39 — a real best moment,
+        /// and a useless description of what the pipeline cost.
+        /// </para>
+        /// <para>
+        /// That reasoning was sound and aimed at the wrong layer. The distribution it was
+        /// solving for — a tight body at 23–33 ms with a handful of near-instant observations —
+        /// is one whose wait term never swept, and <see cref="SweptEnough"/> should have refused
+        /// it outright rather than being asked to floor it well. It did not, because its span
+        /// was taken from the extremes and a single outlier satisfied it. With the sweep
+        /// measured between quantiles instead, that distribution is refused, no floor is offered
+        /// at all, and there is nothing left for a percentile to protect against.
+        /// </para>
+        /// <para>
+        /// So the minimum returns, and on a genuinely swept distribution it is the right
+        /// estimator for the original reason: a mean measures the jitter sitting on top of the
+        /// floor, and a quantile above the minimum biases the lead UPWARD, which is the
+        /// over-lead direction. The lesson is not about which statistic — it is that a
+        /// statistic cannot repair a guard, and reaching for a more robust one is a sign the
+        /// guard above it is admitting data it should not.
+        /// </para>
+        /// </remarks>
+        public const double FloorPercentile = 0.0;
 
         /// <summary>
         /// Observations the quantile is taken over. A ring, oldest dropped.
@@ -253,13 +284,30 @@ namespace Cuvara.Netcode.Prediction
             get
             {
                 if (_ackIntervalMin == double.MaxValue) return false;
+                if (_obsCount < MinimumSamples) return false;
 
-                double lo = Math.Min(_epochMin, _previousEpochMin);
-                double hi = Math.Max(_epochMax, _previousEpochMax);
-                if (lo == double.MaxValue || hi == double.MinValue) return false;
+                double lo = Quantile(SweepLowQuantile);
+                double hi = Quantile(SweepHighQuantile);
 
                 return hi - lo >= _ackIntervalMin * MinimumSweepFraction;
             }
+        }
+
+        /// <summary>
+        /// The requested quantile of the observations held, in seconds, or 0 when there are
+        /// none. Sorted per call; the ring is 128 entries and this runs at the snapshot rate.
+        /// </summary>
+        private double Quantile(double q)
+        {
+            if (_obsCount == 0) return 0.0;
+
+            Array.Copy(_observations, _sortScratch, _obsCount);
+            Array.Sort(_sortScratch, 0, _obsCount);
+
+            int index = (int)(q * _obsCount);
+            if (index >= _obsCount) index = _obsCount - 1;
+            if (index < 0) index = 0;
+            return _sortScratch[index];
         }
 
         /// <summary>The snapshot interval as measured from acknowledgement arrivals, seconds.</summary>
@@ -308,20 +356,7 @@ namespace Cuvara.Netcode.Prediction
         /// The <see cref="FloorPercentile"/> quantile of the observations held, not their
         /// minimum. See that constant for why, and for the measurement that changed it.
         /// </remarks>
-        public double FloorSeconds
-        {
-            get
-            {
-                if (_obsCount == 0) return 0.0;
-
-                Array.Copy(_observations, _sortScratch, _obsCount);
-                Array.Sort(_sortScratch, 0, _obsCount);
-
-                int index = (int)(FloorPercentile * _obsCount);
-                if (index >= _obsCount) index = _obsCount - 1;
-                return _sortScratch[index];
-            }
-        }
+        public double FloorSeconds => Quantile(FloorPercentile);
 
         /// <summary>The same floor in base ticks, or 0 before <see cref="HasEstimate"/>.</summary>
         /// <remarks>

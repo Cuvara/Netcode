@@ -446,40 +446,44 @@ namespace Cuvara.Netcode.Tests.Editor
             foreach (double latency in latencies)
             {
                 tick++;
-                e.RecordSent(tick, now);
-                e.RecordAck(tick, now + latency, BaseHz);
+
+                // ACKNOWLEDGEMENTS ARRIVE ON THE SNAPSHOT CADENCE; the SEND time is what moves.
+                // That is the real shape and it matters here: the estimator measures the
+                // snapshot interval as the smallest gap between acknowledgements, so stamping
+                // the acks at `now + latency` would let the latency spread shrink the measured
+                // interval and, with it, the sweep requirement itself.
                 now += SnapshotPeriod;
+                e.RecordSent(tick, now - latency);
+                e.RecordAck(tick, now, BaseHz);
             }
 
             return e;
         }
 
         /// <summary>
-        /// The floor must describe the pipeline the client is running in, not the best moment
-        /// the route has ever had.
+        /// A tight distribution with a handful of outliers must be REFUSED, not floored — and
+        /// the sweep guard is what has to refuse it.
         /// </summary>
         /// <remarks>
         /// <para>
-        /// <b>This replays the run that broke the extremum, and it reproduces both numbers.</b>
-        /// Inside a loaded test suite the measured input-to-acknowledgement distribution was
-        /// min 23.1 ms, p90 32.5, max 74.3 — with a handful of observations near 3 ms where an
-        /// input happened to arrive immediately before a gather. Those are real; they are also
-        /// a useless description of what the pipeline costs. A minimum filter found them and
-        /// reported 0.17 base ticks while the harness measured 1.54 on the same wire, the lead
-        /// fell back to 0, and the correction went to 2.8 wire-sized steps.
+        /// This replays a distribution measured live inside a loaded suite: a body at 23–33 ms,
+        /// a tail to 74, and three observations near 3 ms where an input happened to arrive
+        /// immediately before a gather. The extremum reported <b>0.17 base ticks</b> against an
+        /// observed minimum of 1.39, and the response at the time was to take a tenth-percentile
+        /// quantile instead.
         /// </para>
         /// <para>
-        /// The original argument for a minimum — that a mean measures the jitter sitting on top
-        /// of the floor — is right about jitter and wrong about this, because under load the
-        /// constant itself has two modes. A tenth-percentile quantile keeps the argument (it is
-        /// still far below the mean, so stalls above it are still ignored) and refuses to be
-        /// defined by one lucky observation.
+        /// <b>That was the wrong layer, and this test now pins the right one.</b> A distribution
+        /// this tight is one whose wait term never swept, so no floor should be offered from it
+        /// at any percentile — the minimum is unrepresentative and the quantile is merely less
+        /// obviously so. The guard failed to refuse it because its span was <c>max - min</c>,
+        /// which three outliers satisfy. Measured between quantiles, the span is about 10 ms
+        /// against a 33 ms requirement and the whole distribution is correctly refused.
         /// </para>
         /// </remarks>
         [Test]
-        public void ARareBestCaseCannotDefineTheFloor()
+        public void ATightDistributionWithOutliersIsRefusedRatherThanFloored()
         {
-            // The live shape: a few near-instant observations, a body at 23-33 ms, a tail to 74.
             var latencies = new System.Collections.Generic.List<double>();
             for (var i = 0; i < 140; i++)
             {
@@ -490,36 +494,69 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var e = DriveDistribution(latencies.ToArray());
 
-            Assert.That(e.HasEstimate, Is.True,
-                "precondition: this distribution spans far more than half a snapshot interval, "
-                + "so the sweep guard is satisfied — as it was on the live run that produced it");
+            Assert.That(e.SweptEnough, Is.False,
+                "the wait term never varied here — the body spans 8 ms of a 67 ms interval — so "
+                + "nothing about this link is evidence that its minimum is near the constant. "
+                + "Reading a span from max minus min let three outliers certify it as swept.");
 
-            Assert.That(e.FloorSeconds, Is.GreaterThan(0.0150),
-                "the floor must describe the pipeline the client is running in. The extremum "
-                + "here is 2.8 ms, which is 0.17 base ticks — the exact figure a live suite run "
-                + "reported while the same wire measured 1.54.");
-
-            Assert.That(e.FloorSeconds, Is.LessThan(0.0300),
-                "and it must still be a FLOOR, not a mean: well below the 32 ms p90 and the "
-                + "74 ms tail, or every stall above it starts steering the clock.");
+            Assert.That(e.HasEstimate, Is.False,
+                "and with no sweep there must be no floor at any percentile. Choosing a more "
+                + "robust statistic here treats the symptom: the guard above it is admitting "
+                + "data it should refuse.");
         }
 
         /// <summary>
-        /// On a clean link the quantile must still land on the constant, or the change above
-        /// bought robustness under load by giving up accuracy everywhere else.
+        /// On a genuinely swept link the floor still lands on the constant.
         /// </summary>
         [TestCase(0.0)]
         [TestCase(0.0167)]
         [TestCase(0.0333)]
-        public void OnACleanLinkTheQuantileStillFindsTheConstant(double uplinkPlusAge)
+        public void OnASweptLinkTheFloorStillFindsTheConstant(double uplinkPlusAge)
         {
             var e = Drive(uplinkPlusAge, seconds: 60.0, snapshotPeriod: SnapshotPeriod * 1.03);
 
             Assert.That(e.HasEstimate, Is.True, "precondition");
             Assert.That(e.FloorSeconds, Is.EqualTo(uplinkPlusAge).Within(SnapshotPeriod * 0.25),
-                "with the wait sweeping and no second mode, a tenth of the observations are "
-                + "within a tenth of an interval of the constant, so the quantile and the "
-                + "extremum agree — which is why the run measured alone was never wrong.");
+                "with the wait genuinely sweeping, the smallest observations sit on the "
+                + "constant. That is the case the minimum filter was always right for, and the "
+                + "only case a floor is now offered in at all.");
+        }
+
+        /// <summary>
+        /// The live phase lock, with its one outlier: a span taken from the extremes certifies
+        /// it, a span taken between quantiles refuses it.
+        /// </summary>
+        /// <remarks>
+        /// Measured on a client sending at 15 Hz into a 15 Hz snapshot stream — the case this
+        /// class's remarks warn about by name: <c>min 5.5 ms, median 58.8, p90 62.2</c>. The
+        /// wait is pinned near its maximum on all but one observation. <c>max - min</c> reads
+        /// 57 ms against a 33 ms requirement and passes; the floor then lands on the locked mode
+        /// at <b>3.33 base ticks</b> while the harness's own observed minimum is <b>0.33</b> —
+        /// ten times high, straight into the steering lead, which reached 8 and pushed the
+        /// reconcile's compare point past the retained history (39 hits against 120 misses,
+        /// where a healthy run had 138 against 3).
+        /// </remarks>
+        [Test]
+        public void APhaseLockWithOneOutlierCannotCertifyItselfAsSwept()
+        {
+            var latencies = new System.Collections.Generic.List<double>();
+            for (var i = 0; i < 140; i++)
+            {
+                // One observation in forty caught a gather; the rest are pinned near the top of
+                // the interval, which is what a phase lock looks like from here.
+                latencies.Add(i % 40 == 0 ? 0.0055 : 0.0555 + (i % 9) * 0.0008);
+            }
+
+            var e = DriveDistribution(latencies.ToArray());
+
+            Assert.That(e.SweptEnough, Is.False,
+                "one observation cannot be the evidence that a wait term varied. Between the "
+                + "tenth and ninetieth percentiles this data spans about 7 ms of a 67 ms "
+                + "interval, which is a lock, not a sweep.");
+
+            Assert.That(e.HasEstimate, Is.False,
+                "so no floor is offered, and the lead keeps the round-trip fallback rather than "
+                + "taking a reading ten times the observed minimum.");
         }
     }
 }
