@@ -112,6 +112,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the first live reading that points at the condition at all, and because the alternative is
   testable by anyone who reads the server's configured snapshot rate off the same run.
 
+- **A correction to a claim made in this branch's own review, kept rather than deleted:
+  `LocalMovePredictor.Adoptions` was proposed as the counter that would name a failing run's
+  large correction, and it was measured not to discriminate.** The reasoning was that adoption
+  discards the whole prediction lead, is the largest correction the predictor makes, and is
+  one-off — the right shape for a single 2.00-step event in a run whose other 27 corrections stayed
+  under one step. The counter was then read on six arms across two runs:
+
+  | run | arm | history hit/missed | adopted wholesale | corrections > 1 step |
+  |---|---|---|---|---|
+  | `develop` | main | 89 / 72 | **66 of 72 (92%)** | 1 of 28 |
+  | `develop` | divergence **control** | 63 / 98 | **97 of 98 (99%)** | 16 of 26 |
+  | branch | main | 59 / 102 | **100 of 102 (98%)** | 1 of 19 |
+  | branch | divergence **control** | 75 / 86 | **83 of 86 (97%)** | 17 of 29 |
+
+  **Adoption runs at 92–99% on every predicting arm, including the control built to fail.** A
+  counter that reads the same on the arm under test and on the deliberate-mismatch control cannot
+  separate them, so "the event has a name" is true and "the name explains this failure" is not.
+  The hypothesis was falsifiable and was falsified by the contrast, which is the only thing that
+  could have falsified it — **a counter nobody has contrasted is the same defect as a rate nobody
+  has measured**, and this one was proposed by someone who had made exactly that argument about
+  rates two messages earlier.
+
+  What the numbers do show is that adoption here is **downstream**: the lead rounds to zero, so
+  the pending buffer never holds enough to replay, so a history miss has nothing to rebuild and
+  adopts. Adoption throws away a lead of zero, which costs nothing — which is why 27 of 28
+  corrections stay under one step. The mechanism is real and it is a consequence of the bullet
+  above, not a cause of anything.
+
+- **The lead is an integer tick, so a measured `uplink + age` below half a base tick reaches the
+  predictor as ZERO — the measurement is finer than the quantity it feeds.** This is not caused by
+  this change and this change does not fix it; it is recorded because this branch measured the
+  cadence that scales the guard in front of that term, and a reader who follows the term downstream
+  should find out where it stops. `WorldViewBinder` composes the steering lead as
+  `lead += AckLatency.HasEstimate ? ackLead : rttLead` and then `int ticks = (int)Math.Round(lead)`.
+  Measured on two PlayMode runs against the dev stack: staleness `0.04` + corrected floor `0.35` =
+  **0.39 → 0**, and staleness `0.06` + corrected floor `0.10` = **0.16 → 0**. `TARGET LEAD 0` is
+  the correct rounding of a true sub-half-tick lead, not a defect.
+
+  **The precedent is in the same function and it is the same defect one threshold earlier**, which
+  is why this is worth naming rather than filing as arithmetic. The floor was once truncated with
+  `Math.Floor`, and the comment recording the change reads: *"Live it read 0.14 and 0.68 base ticks
+  and `Math.Floor` returned zero both times… truncation did not merely cost accuracy here, it was
+  the reason the term stayed open."* Moving to `Math.Round` recovered the `0.68` case and **halved
+  the problem rather than removing it**: the threshold moved from *any* fraction to *below half a
+  tick*, and on a localhost link `uplink + age` — measured at **0.14–0.28 base ticks** — is under
+  that threshold at every value it has ever been observed at. **On loopback the predictor cannot
+  express the constant this whole effort measured.** Whether the answer is a fractional lead, a
+  different consumer, or accepting that the term is only expressible on links slower than
+  localhost, is the owner's call and is deliberately not taken here.
+
 - **Jitter and loss together still cost accuracy, in the lenient direction, in proportion to the
   run length the link delivers.** The window is as long as the longest run of consecutive
   delivered snapshots, capped at eight. On the jitter fixture the reading is 4.2% low with no
