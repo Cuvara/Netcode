@@ -279,6 +279,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this estimator exists to avoid, and it is not visible in any counter that reports the floor
   alone.
 
+- **OPEN: `FloorPercentile` is now measured as the inflating term, and that does not by itself say
+  what should replace it.** Across four arms, two snapshot rates and two containers, the floor
+  tracks `intercept + 0.1 × slope` — at 30 Hz, `0.16 + 0.207 = 0.37` against 0.37 measured. The
+  pipeline constant on loopback is **0.16–0.27 base ticks (2.7–4.5 ms)**; everything above that in
+  the reported floor is the statistic. The pre-registered rule in `AckLatencyEstimator` says the
+  minimum returns if the floor is inflated, and its condition is now met.
+
+  **It should not be executed on this evidence, because every candidate is indistinguishable on
+  it.** Simulated against the real estimator on a clean sweep, the minimum, the tenth percentile
+  less `0.1·S`, the ladder intercept and the conservative floor all land within 0.05 of the true
+  constant. The four arms measured were all clean sweeps. **They diverge only under contamination,
+  and they diverge in opposite directions for the two kinds:**
+
+  | | right tail (server stalls) | left tail (spurious short observations) |
+  |---|---|---|
+  | minimum | **best** — a right tail cannot move it (0.20/0.50/1.02 against C of 0.20/0.50/1.00) | **fatal** — collapses onto the contaminant (0.03/0.07/0.15) |
+  | tenth percentile | inflated by the same `0.1·S` | survives while contamination stays under 10% |
+  | ladder intercept | **worst** — the tail bends the line and least squares drags the intercept down, under-reading by up to 0.18 | also degraded |
+
+  So the choice is not "which statistic is more robust" but **which contamination this system
+  actually produces** — and the left-tail case is exactly the one whose known cause
+  (`AckAheadOfSend`, a previous session's `LastInputTick`) has since been guarded, so its current
+  rate is unmeasured rather than known to be zero.
+
+  **The discriminating measurement is the ladder's own residual, under load.** Both contaminations
+  raise it decisively — 0.12–0.37 right-tailed and 0.14–0.26 left-tailed, against 0.02–0.05 on a
+  clean sweep — and the position of `q00` relative to the fitted line separates which. That points
+  at a fifth option the ladder makes possible for the first time, and which is what this class
+  already believes: **guard on straightness and keep a low statistic**, so that a contaminated
+  distribution is refused rather than handed to a statistic chosen to survive it. In the class's
+  own words, *a statistic cannot repair a guard*.
+
+  Not decided here, and deliberately: the load run has not been done, and choosing now would be
+  choosing on the one regime where the candidates agree.
+
+- **A cancellation in `ConservativeFloorTicks` that currently works for the wrong reason.** It
+  subtracts `UnsweptSeconds`, which on a swept link is about `S / phases`, from a floor inflated by
+  `0.1 · S`. Those are unrelated quantities, and they nearly cancel only because the shipped
+  cadence visits 13 phases (15 Hz) and 23 phases (30 Hz), both near the 10 that would make the
+  cancellation exact. **The sign of what remains flips with the phase count:** above 10 phases the
+  conservative floor over-reads by `S · (0.1 − 1/phases)` — about 0.09–0.11 base ticks in both
+  shipped configurations, an over-lead — and below 10 phases it under-reads. A cadence with 8
+  phases would silently turn the residual bias negative. Recorded because two unrelated quantities
+  that nearly cancel is the shape of coincidence this work has been unpicking all along, and
+  whichever way the statistic question is settled, this should be made explicit rather than left
+  as luck.
+
 ### Notes
 
 - **The recommendation was simulated against the real estimator before it was proposed, and the
