@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The measurement prints the fit's baseline and fit counts beside the ppm, and stops calling
+  an 8% wire-rate gap "(agrees)".** Two instruments that should have caught the rate artefact and
+  did not. A delay-floor step of *d* seconds fakes a slope of `d / baseline`, so the same ppm
+  means opposite things at different baselines — 90 000 ppm over 4 s is a 362 ms hitch, over 60 s
+  it would need 5.4 s of floor movement — and the reading could not be judged without the
+  baseline beside it. `staleness fit` now prints fitted/refused/baseline, and calls out
+  `fits 0` explicitly: **`SkewPpm` returns 0 when there is no fit, which is identical to what two
+  perfectly matched clocks produce.** That trap is documented in the estimator and caught us
+  anyway — a prediction-OFF arm reading "0 ppm" was taken for a control proving the loaded arm's
+  90 000 ppm artefactual, when it was an arm that never fitted a line at all (`Staleness.Sample`
+  is only reached on the predictor's path). Separately, `tick rate measured` now always prints
+  the percentage gap: `TickRateEstimator.DisagreementTolerance` is 15%, correctly sized to catch
+  a *wrong rate* (the nearest realistic pair is 15 against 20 Hz), so a client measuring 55.0 Hz
+  off a 60 Hz server "agreed" on every arm of a run whose clock was being steered 8% wrong. The
+  tolerance is **not** changed — a wrong rate and a distorted observation of the right rate are
+  different faults wanting different bands — but a gap of 3% or more is now called out as the
+  starved-frame-loop signature it is.
+
 - **A fitted clock rate no longer reaches the clock unless it reproduces over a doubled
   baseline.** `SnapshotStalenessEstimator` fits a line through two best-case samples, and that
   line is a *rate* only if the **minimum achievable delay was the same at both anchors**. The

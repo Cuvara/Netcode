@@ -474,6 +474,33 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <inheritdoc cref="RateCorroborated"/>
             public int FitsExtraordinary;
 
+            /// <summary>Baseline the current rate estimate was fitted over, in seconds.</summary>
+            /// <remarks>
+            /// <b>Print this next to the ppm or the ppm cannot be judged.</b> A delay-floor
+            /// step of <i>d</i> seconds fakes a slope of <c>d / baseline</c>, so the same
+            /// reading means completely different things at different baselines: 90 000 ppm
+            /// over 4 s is a 362 ms hitch, which is ordinary, while the same figure over 60 s
+            /// would need 5.4 s of floor movement, which is not. A bogus fit over a short
+            /// baseline and a real one over a long baseline are one glance apart here and
+            /// indistinguishable without it.
+            /// </remarks>
+            public double StalenessBaselineSeconds;
+
+            /// <summary>Lines fitted, and pairs refused for implying an impossible rate.</summary>
+            /// <remarks>
+            /// <b><c>fits 0</c> is why a 0 ppm reading must never be read as agreement.</b>
+            /// <c>SkewPpm</c> returns 0 when there is no fit, which is identical to what two
+            /// perfectly matched clocks produce — the estimator's own remarks call this out and
+            /// it caught us anyway: a prediction-OFF arm reading "0 ppm" was taken for a
+            /// control proving the loaded arm's 90 000 ppm was an artefact, when it was simply
+            /// an arm that never fitted a line. <c>Staleness.Sample</c> is only reached on the
+            /// predictor's path, so the OFF arm has no rate measurement at all to compare with.
+            /// </remarks>
+            public int StalenessFits;
+
+            /// <inheritdoc cref="StalenessFits"/>
+            public int StalenessFitsRefused;
+
             /// <summary>Rate correction the predictor's base-tick clock is running with.</summary>
             /// <remarks>1.0 means none is applied — the pre-fix behaviour.</remarks>
             public float ClockRateScale;
@@ -1914,6 +1941,9 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.RateCorroborated = binder.Staleness.RateCorroborated;
             run.FitsUncorroborated = binder.Staleness.FitsUncorroborated;
             run.FitsExtraordinary = binder.Staleness.FitsExtraordinary;
+            run.StalenessBaselineSeconds = binder.Staleness.BaselineSeconds;
+            run.StalenessFits = binder.Staleness.Fits;
+            run.StalenessFitsRefused = binder.Staleness.FitsRefused;
             run.RoundTripMs = client.Session?.RoundTripMs ?? 0L;
             run.AckFloorMeasuredTicks = binder.AckLatency.FloorTicks;
             run.AckFloorContributionTicks = binder.AckLatency.ConservativeFloorTicks;
@@ -2048,7 +2078,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  TICK RATE IN USE         {run.TickRateInUse} Hz" +
                     (run.TickRateIsFallback ? "  <- FALLBACK, server advertised none" : "  (advertised by the server)") + "\n" +
                 $"  tick rate measured       {run.MeasuredTickRate:F1} Hz off the wire" +
-                    (run.TickRateDisagrees ? "   <<< DISAGREES with the rate in use" : "   (agrees)") + "\n" +
+                    WireRateNote(run) + "\n" +
                 // ── THE CLOCK OFFSET ────────────────────────────────────────────────────
                 //
                 // Printed because its absence cost two investigations. A run reading
@@ -2099,6 +2129,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                 $"  ack floor superseded     {run.AckFloorSuperseded}   " +
                     "(inputs an ack drained without timing — a later input had\n" +
                 "                             already earned that ack, so the interval is not this pipeline)\n" +
+                $"  staleness fit            {run.StalenessFits} fitted, {run.StalenessFitsRefused} refused, " +
+                    $"baseline {run.StalenessBaselineSeconds:F1} s" +
+                    (run.StalenessFits == 0
+                        ? "\n                             <<< NO LINE WAS EVER FITTED. The ppm below is 0 because\n" +
+                          "                             there is no measurement, which is NOT the same as two clocks\n" +
+                          "                             that agree — do not read it as a control.\n"
+                        : "   (a floor step of d seconds fakes d/baseline\n" +
+                          "                             of slope, so the ppm below cannot be judged without this)\n") +
                 $"  clock rate difference    {run.SkewPpm:F0} ppm" +
                     (Math.Abs(run.SkewPpm) > 10_000
                         ? "   <<< the two clocks run at materially different rates\n" +
@@ -2426,6 +2464,53 @@ namespace Cuvara.Netcode.Tests.PlayMode
         /// and the whole of it comes back as position, at every start and stop.
         /// </para>
         /// </remarks>
+        /// <summary>
+        /// How the measured wire rate compares with the advertised one, as a percentage.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>"(agrees)" was hiding an 8% gap, and this is why the binary reading was wrong.</b>
+        /// <c>TickRateEstimator.DisagreementTolerance</c> is 15%, sized to catch a WRONG RATE —
+        /// the nearest realistic pair is 15 against 20 Hz, a 33% step, and the failure that
+        /// motivated it was 4x. Against that bar, a client measuring 55.0 Hz off a 60 Hz server
+        /// agrees, and the report said so on every arm of a run whose clock was being steered
+        /// 8% wrong.
+        /// </para>
+        /// <para>
+        /// The tolerance is not raised or lowered here, because it is right for what it is for:
+        /// a wrong rate and a distorted OBSERVATION of the right rate are different faults and
+        /// want different bands. A starved frame loop does not change the server's tick rate,
+        /// it changes what the client sees of it — and that is worth reading long before it
+        /// reaches 15%. So the gap is now always printed as a number, and a few percent is
+        /// called out as worth reading rather than silently folded into "agrees".
+        /// </para>
+        /// </remarks>
+        private static string WireRateNote(Run run)
+        {
+            if (run.MeasuredTickRate <= 0f || run.TickRateInUse <= 0)
+            {
+                return "   (no wire measurement)";
+            }
+
+            double gap = (run.MeasuredTickRate - run.TickRateInUse) / (double)run.TickRateInUse;
+            string pct = $"{gap * 100.0:+0.0;-0.0;0.0}%";
+
+            if (run.TickRateDisagrees)
+            {
+                return $"   <<< DISAGREES with the rate in use ({pct})";
+            }
+
+            if (Math.Abs(gap) >= 0.03)
+            {
+                return $"   <<< {pct} against the advertised rate. Inside the 15%\n" +
+                       "                             DisagreementTolerance, so not a wrong rate — but the client\n" +
+                       "                             is not seeing the stream at the rate the server sends it,\n" +
+                       "                             which is what a starved frame loop looks like from here.";
+            }
+
+            return $"   (agrees, {pct})";
+        }
+
         private static string ClockErrorNote(Run run)
         {
             if (Math.Abs(run.TickErrorTicks) <= 1)
