@@ -513,8 +513,17 @@ namespace Cuvara.Netcode.Prediction
                     // step fakes a slope of step/baseline, which halves when the baseline
                     // doubles. So the reference is only re-examined once the baseline has
                     // doubled, and a decay then disagrees by half of itself at every scale.
-                    // See CorroborationPpm for the measurement that made this necessary and
-                    // for why comparing consecutive fits is not enough.
+                    // See CorroborationPpm for the measurement that made this necessary.
+                    //
+                    // DO NOT SIMPLIFY THIS INTO "compare the last two fits". That is what it
+                    // was first, and it is subtly wrong in the one direction that matters: a
+                    // decaying slope changes less and less between neighbours, so it slips
+                    // under ANY fixed tolerance once the baseline is long enough and then
+                    // corroborates itself on a reading still thousands of ppm out. The
+                    // doubling is what makes the test scale-invariant -- a decay disagrees by
+                    // half of itself at every scale, a real rate agrees at every scale -- and
+                    // dropping it produces a guard that passes its own tests and fails on
+                    // exactly the case it exists for.
                     if (!_haveReferenceFit)
                     {
                         _referenceFitPpm = ppm;
