@@ -291,7 +291,14 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Reconciles answered by comparing at the snapshot's own tick.</summary>
         public int HistoryHits { get; private set; }
 
-        /// <summary>Reconciles that fell back to replaying, the history not reaching back far enough.</summary>
+        /// <summary>Reconciles that fell back to replaying, the history not having answered.</summary>
+        /// <remarks>
+        /// Counts every reconcile that did not take the history path, for whatever reason:
+        /// the ring not reaching back to the snapshot's tick, a tick of zero, or a caller on
+        /// the two-argument <see cref="Reconcile(Vec2,long)"/> that supplied no tick at all.
+        /// With <see cref="HistoryHits"/> it partitions <see cref="Reconciles"/> exactly,
+        /// which is what makes either one readable on its own.
+        /// </remarks>
         public int HistoryMisses { get; private set; }
 
         /// <summary>
@@ -1023,10 +1030,26 @@ namespace Cuvara.Netcode.Prediction
                 return;
             }
 
-            if (serverBaseTick != NoServerTick && serverBaseTick > 0)
-            {
-                HistoryMisses++;
-            }
+            // EVERY RECONCILE THAT REACHES HERE IS A MISS, including the ones that could not
+            // have been anything else.
+            //
+            // This counted only when a usable snapshot tick had been supplied, which mirrored
+            // the hit's gate -- and the mirror is wrong. The hit needs the tick because there
+            // is nothing to compare AT without one; the miss needs nothing, because it is the
+            // statement that the history did not answer, and an absent tick is a reason for
+            // that rather than an exemption from it.
+            //
+            // What the gate produced: a two-argument caller with an empty pending buffer took
+            // the authoritative position wholesale and moved neither HistoryHits, nor
+            // HistoryMisses, nor ReplayedSteps. Adoptions saw it -- it is measured off the
+            // fallback's outcome, below, and has no such gate -- but the pair a reader
+            // consults first reported that no reconcile had happened at all. That caller is
+            // the one that cannot supply a tick, and therefore the one least able to work out
+            // why its readings stood still.
+            //
+            // The invariant now holds for both overloads: after seeding,
+            // HistoryHits + HistoryMisses == Reconciles.
+            HistoryMisses++;
 
             DropAcknowledged(ackTick);
 
@@ -1728,6 +1751,15 @@ namespace Cuvara.Netcode.Prediction
             SmoothedCorrections = 0;
             ReplayedSteps = 0;
             Adoptions = 0;
+            // Cleared with the rest, and the asymmetry mattered: `adopted wholesale N of M
+            // misses` takes N from Adoptions and M from HistoryMisses, so leaving the pair
+            // standing while the numerator restarted made that ratio meaningless across a
+            // reconnect. Resolved this way rather than by leaving the others alone because
+            // Reset is a session boundary -- it already returns the position, the clock, the
+            // hold and the seeding to a fresh session -- and a counter that outlives it
+            // describes a different connection.
+            HistoryHits = 0;
+            HistoryMisses = 0;
             CoalescedInputs = 0;
             Reconciles = 0;
             DroppedInputs = 0;
