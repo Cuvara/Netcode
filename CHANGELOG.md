@@ -504,7 +504,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OPEN: `FloorPercentile` is now measured as the inflating term, and that does not by itself say
   what should replace it.** Across four arms, two snapshot rates and two containers, the floor
   tracks `intercept + 0.1 × slope` — at 30 Hz, `0.16 + 0.207 = 0.37` against 0.37 measured. The
-  pipeline constant on loopback is **0.16–0.27 base ticks (2.7–4.5 ms)**; everything above that in
+  pipeline constant on loopback is **0.14–0.28 base ticks (2.3–4.7 ms)**, across eight arms
+  measured after this entry was first written — the four it cites, plus the two under an 8-player
+  load and the two on the acknowledgement-floor rate fix; everything above that in
   the reported floor is the statistic. The pre-registered rule in `AckLatencyEstimator` says the
   minimum returns if the floor is inflated, and its condition is now met.
 
