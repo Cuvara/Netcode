@@ -25,9 +25,24 @@ namespace Cuvara.Netcode.Tests.Editor
     /// at both anchors. A starved frame loop raises that floor, the later anchor sits above the
     /// true line, and the slope absorbs the displacement as rate. One machine minutes apart read
     /// 220 ppm idle and 90 636 ppm inside a loaded suite, and the client ran its clock 8.3% slow
-    /// on the strength of it. Measured from outside the client, the server's own
-    /// <c>gameserver_achieved_tick_hz</c> read <b>60.013 Hz</b> during that same suite — so the
-    /// server was fine and the client's 55.0 Hz was its own distorted observation.
+    /// on the strength of it.
+    /// </para>
+    /// <para>
+    /// <b>What the server side actually says, stated carefully because the first version of this
+    /// remark overstated it.</b> Sampled from outside the client during the same suite,
+    /// <c>gameserver_achieved_tick_hz</c> holds at <b>59.99–60.02</b> and dips transiently — one
+    /// sample at <b>54.23</b> — while <c>tick_backlog_dropped_total</c> climbs by <b>38</b> over
+    /// the run. So the server is not running at 55 Hz sustained, and a constant 8.3% rate
+    /// difference is rejected; but it is not flawless either, and an earlier claim here that it
+    /// "read 60.013 Hz, so the server was fine" rested on a six-sample window that happened to be
+    /// quiet. A window with no drops is not a run with no drops.
+    /// </para>
+    /// <para>
+    /// <b>This test does not depend on which it is, and that is the point of gating on
+    /// corroboration rather than on a diagnosis.</b> A transient dip and a fit artefact are both
+    /// displacements that fail to reproduce over a doubled baseline; a genuinely slow server
+    /// would reproduce, and would be believed. The guard sorts them without anyone having to be
+    /// right about the cause.
     /// </para>
     /// </remarks>
     [TestFixture]
@@ -102,7 +117,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 + "across, so it reads differently every time the baseline grows. Applying it "
                 + "runs the client's clock several percent wrong on purpose — measured live at "
                 + "8.3% slow, a three-tick standing error and three whole steps of correction "
-                + "at every transition, while the server's own achieved_tick_hz read 60.013.");
+                + "at every transition, on a server whose own achieved_tick_hz averaged 60.");
         }
 
         [Test]
