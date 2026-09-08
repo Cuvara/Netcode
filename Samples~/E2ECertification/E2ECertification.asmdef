@@ -1,0 +1,18 @@
+{
+    "name": "E2ECertification",
+    "rootNamespace": "Samples.NetcodeE2E",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "Shared.GameLogic",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
