@@ -203,5 +203,137 @@ namespace Cuvara.Netcode.Tests.Editor
                 "being rebuilt, which is why Adoptions is measured off ReplayedSteps rather " +
                 "than off the branch conditions.");
         }
+
+        /// <summary>
+        /// THE DISCRIMINATING TEST for the two-argument overload. A caller that cannot
+        /// supply the snapshot's tick adopts the authoritative position wholesale and, before
+        /// this fix, moved neither <c>HistoryHits</c>, nor <c>HistoryMisses</c>, nor
+        /// <c>ReplayedSteps</c> — the hit/miss pair read as though no reconcile had occurred.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Both counters were gated on <c>serverBaseTick != NoServerTick &amp;&amp;
+        /// serverBaseTick &gt; 0</c>. The gate is right for the HIT — without a tick there is
+        /// nothing to compare at — and wrong for the MISS, because a reconcile that cannot
+        /// take the history path has, by definition, fallen back to replaying. The absent
+        /// tick is not a reason to say nothing happened; it is the reason the history could
+        /// not answer.
+        /// </para>
+        /// <para>
+        /// <b>Not the live path, which is why it matters.</b> <c>com.cuvara.dots</c> drives
+        /// the three-argument form. The caller on this overload is the one that cannot supply
+        /// a tick — and therefore the one least able to diagnose the result it gets.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TwoArgumentReconcile_ThatAdopts_CountsAMiss()
+        {
+            LocalMovePredictor p = Predictor();
+            AdvanceTicks(p, 10);
+
+            Assert.That(p.PendingCount, Is.Zero, "the buffer must be empty for this path");
+
+            int replayedBefore = p.ReplayedSteps;
+            var authoritative = new Vec2(7f, -3f);
+
+            // The two-argument overload: no snapshot tick, so the history path is unreachable
+            // and the fallback has nothing to replay.
+            p.Reconcile(authoritative, 0);
+
+            Assert.That(p.SimulatedPosition.X, Is.EqualTo(authoritative.X).Within(1e-5f));
+            Assert.That(p.SimulatedPosition.Y, Is.EqualTo(authoritative.Y).Within(1e-5f));
+            Assert.That(p.ReplayedSteps, Is.EqualTo(replayedBefore),
+                "nothing was rebuilt on top of the server's answer");
+            Assert.That(p.Adoptions, Is.EqualTo(1),
+                "Adoptions is measured off the fallback's outcome and has no gate, so it " +
+                "saw this before the fix did");
+
+            Assert.That(p.HistoryHits, Is.Zero,
+                "the two-argument form can never take the history path");
+            Assert.That(p.HistoryMisses, Is.EqualTo(1),
+                "a reconcile that could not be answered from the history is a MISS. Before " +
+                "the fix this read 0, so the hit/miss pair reported that no reconcile had " +
+                "happened at all while the prediction was being replaced outright.");
+        }
+
+        /// <summary>
+        /// The invariant the gate broke, asserted directly: after seeding, every reconcile is
+        /// exactly one of a hit or a miss.
+        /// </summary>
+        /// <remarks>
+        /// This is what stops the fix from being satisfied by a counter that increments
+        /// somewhere convenient. <c>Reconciles</c> counts every non-seeding call; the history
+        /// branch returns early having incremented <c>HistoryHits</c>, and every other route
+        /// out reaches the fallback. There is no third outcome for the PAIR to describe —
+        /// which is a different statement from there being a third outcome for the
+        /// <i>reconcile</i>, and <see cref="LocalMovePredictor.Adoptions"/> is that one.
+        /// </remarks>
+        [Test]
+        public void EveryReconcileIsAHitOrAMiss_WhicheverOverload()
+        {
+            LocalMovePredictor p = Predictor();
+            AdvanceTicks(p, 10);
+
+            p.Reconcile(new Vec2(1f, 0f), 0, p.BaseTick);       // three-arg, a hit
+            p.Reconcile(new Vec2(2f, 0f), 0, p.BaseTick + 2);   // three-arg, a miss
+            p.Reconcile(new Vec2(3f, 0f), 0);                   // two-arg, a miss
+            p.Reconcile(new Vec2(4f, 0f), 0, 0);                // three-arg, tick 0 — a miss
+
+            Assert.That(p.Reconciles, Is.EqualTo(4), "the seeding call counts nothing");
+            Assert.That(p.HistoryHits, Is.EqualTo(1));
+            Assert.That(p.HistoryMisses, Is.EqualTo(3),
+                "a snapshot tick that is absent, or zero, is a reason the history could not " +
+                "answer — not a reason to leave the reconcile uncounted.");
+            Assert.That(p.HistoryHits + p.HistoryMisses, Is.EqualTo(p.Reconciles),
+                "hits and misses partition the reconciles. Any gate that can drop a " +
+                "reconcile out of both is the defect this pins.");
+        }
+
+        /// <summary>
+        /// <see cref="LocalMovePredictor.Reset"/> must clear the history pair with every
+        /// other counter, or a ratio taken across a reconnect divides a restarted numerator
+        /// by a carried-over denominator.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The asymmetry could have been resolved the other way — by not clearing the rest —
+        /// and it should not be. <c>Reset</c> is documented as a session boundary and already
+        /// returns the predictor's <i>state</i> to a fresh session: position, clock, hold,
+        /// seeding. Counters that outlive that describe a different connection to a possibly
+        /// different entity, and the report line <c>adopted wholesale N of M misses</c> would
+        /// read <c>N</c> and <c>M</c> from opposite sides of the boundary. Making every
+        /// counter session-scoped is the only resolution under which a ratio between two of
+        /// them is readable at all.
+        /// </para>
+        /// <para>
+        /// Asserted nonzero first, so the test cannot pass against a predictor that never
+        /// counted anything.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void Reset_ClearsTheHistoryPair_WithEveryOtherCounter()
+        {
+            LocalMovePredictor p = Predictor();
+            AdvanceTicks(p, 10);
+
+            p.Reconcile(new Vec2(1f, 0f), 0, p.BaseTick);       // a hit
+            p.Reconcile(new Vec2(9f, 9f), 0, p.BaseTick + 2);   // a miss, and an adoption
+
+            Assert.That(p.HistoryHits, Is.GreaterThan(0), "precondition: something was counted");
+            Assert.That(p.HistoryMisses, Is.GreaterThan(0), "precondition: something was counted");
+            Assert.That(p.Adoptions, Is.GreaterThan(0), "precondition: something was counted");
+
+            p.Reset();
+
+            Assert.That(p.Reconciles, Is.Zero);
+            Assert.That(p.Adoptions, Is.Zero);
+            Assert.That(p.ReplayedSteps, Is.Zero);
+            Assert.That(p.HistoryHits, Is.Zero,
+                "left standing, this outlives the session it describes");
+            Assert.That(p.HistoryMisses, Is.Zero,
+                "the denominator of 'adopted wholesale N of M misses'. Left alone when the " +
+                "rest of the set was cleared, it made that line meaningless after a " +
+                "reconnect: the numerator restarted at zero and the denominator did not.");
+        }
     }
 }

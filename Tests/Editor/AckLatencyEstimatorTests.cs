@@ -656,5 +656,126 @@ namespace Cuvara.Netcode.Tests.Editor
                 "and it must be the SMALLEST such count — one fewer observation must still put "
                 + "a quantile on an extremum, or the floor is costing evidence for nothing.");
         }
+
+        /// <summary>
+        /// Feeds acknowledgements on a fixed <paramref name="cadence"/> whose ARRIVALS are
+        /// delayed by a bounded, non-negative jitter, and optionally drops some snapshots.
+        /// </summary>
+        /// <remarks>
+        /// A jitter that only ever delays is the physical case: an arrival is observed on a
+        /// render frame, so it can be seen late and never early. The delays cycle
+        /// deterministically rather than randomly, so a reading is a property of the
+        /// arithmetic and not of a seed.
+        /// </remarks>
+        private static AckLatencyEstimator DriveArrivals(
+            double cadence, double jitter, int count, int dropEvery = 0)
+        {
+            var e = new AckLatencyEstimator();
+            long tick = 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                tick++;
+                // Delays ramp 0 -> jitter over four arrivals and then reset, so every cycle
+                // contains the pair the defect is made of: one arrival maximally late followed
+                // by one on time, which shortens the gap between them by the whole jitter
+                // range. A pattern that never puts the extremes adjacent never shortens a gap
+                // by more than part of the range and understates the defect it is measuring.
+                double delay = jitter * (i % 4) / 3.0;
+                double at = ClockOffset + i * cadence + delay;
+
+                e.RecordSent(tick, at - 0.005);
+                if (dropEvery > 0 && i % dropEvery == dropEvery - 1) continue;
+                e.RecordAck(tick, at, BaseHz);
+            }
+
+            return e;
+        }
+
+        /// <summary>
+        /// PINS A KNOWN, DELIBERATELY UNFIXED DEFECT, with the measurement that sizes it.
+        /// <c>AckIntervalSeconds</c> is the cadence every sweep requirement is scaled by, and
+        /// taking it as the smallest gap between arrivals reads the cadence LESS the full
+        /// arrival jitter — here 50.0 ms against a true 66.7 ms, a quarter low.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a minimum is the wrong statistic here specifically.</b> Everywhere else in
+        /// this class a minimum is right because the quantity can only be inflated — a wait is
+        /// the constant plus something non-negative. A GAP is not that quantity. One arrival
+        /// late and the next on time shortens the gap between them by the whole of the first
+        /// arrival's delay, so the gap distribution straddles the cadence rather than sitting
+        /// above it, and its minimum is biased low by the jitter range rather than converging
+        /// on the cadence.
+        /// </para>
+        /// <para>
+        /// <b>The direction, which is what bounds the risk and why this can wait.</b> A
+        /// cadence that reads low makes <see cref="AckLatencyEstimator.SweptEnough"/>'s span
+        /// requirement and <c>OccupiedBuckets</c>' bucket width smaller, so the guard admits
+        /// data it should refuse. It is LENIENT, never strict, and therefore cannot produce an
+        /// over-lead on its own — asserted below rather than assumed, because that assertion
+        /// is the whole reason this is a recorded defect and not an incident.
+        /// </para>
+        /// <para>
+        /// <b>Why it is not fixed here.</b> The obvious correction — take the smallest mean of
+        /// two ADJACENT gaps, which telescope so that a single arrival's delay cancels exactly
+        /// — was implemented and measured rather than reasoned about. It fixes this case, and
+        /// on the drop case below it reads <b>99.999 ms against a true 66.667 ms</b>, because
+        /// at one snapshot in three lost no adjacent pair of gaps is free of a drop and every
+        /// pair mean is inflated by the missing arrival. That is 50% HIGH: it converts a
+        /// lenient guard into a strict one, which is the single direction this term is not
+        /// allowed to be wrong in. A correct fix needs a robust statistic over a ring of
+        /// gaps — the same minimum-to-percentile move this class has already made twice — and
+        /// that is a larger change than this was recorded as, deserving its own measurement
+        /// rather than being folded in behind one.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheSnapshotIntervalReadsLowByTheArrivalJitter()
+        {
+            const double Cadence = 4.0 / BaseHz;       // 66.7 ms, the 15 Hz snapshot rate
+            const double Jitter = 1.0 / BaseHz;        // one 60 fps frame
+
+            var e = DriveArrivals(Cadence, Jitter, count: 120);
+
+            Assert.That(e.AckIntervalSeconds, Is.LessThanOrEqualTo(Cadence + 1e-9),
+                "THE SAFETY PROPERTY. The estimate must stay on the lenient side of the true "
+                + "cadence: reading it HIGH would tighten every requirement scaled by it and "
+                + "could produce an over-lead. Any future fix must keep this assertion.");
+
+            Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence - Jitter).Within(1e-6),
+                "THE MEASUREMENT. The reading is the cadence less the WHOLE jitter range, not "
+                + "part of it, because the minimum finds the one adjacent pair where a "
+                + "maximally late arrival is followed by an on-time one. 50.0 ms against a "
+                + "66.7 ms cadence — 25% low — and every requirement scaled by it is weakened "
+                + "in the same proportion. Pinned so that a change to the statistic has to "
+                + "come here and say what it did.");
+        }
+
+        /// <summary>
+        /// The case that disqualified the obvious fix, kept as the standing requirement any
+        /// replacement statistic must meet: on a jitter-free cadence the estimate is exactly
+        /// the cadence, with or without dropped snapshots.
+        /// </summary>
+        /// <remarks>
+        /// A dropped snapshot doubles one gap. The present minimum ignores it, which is the
+        /// one thing the present minimum gets right. The adjacent-pair mean does not: at
+        /// <c>dropEvery = 3</c> every pair contains a drop and the reading goes 50% HIGH. This
+        /// fixture exists so that the next attempt at the jitter bias is measured against loss
+        /// before it is believed, rather than after.
+        /// </remarks>
+        [TestCase(0)]
+        [TestCase(5)]
+        [TestCase(3)]
+        public void AnIdealCadenceIsMeasuredExactly_DropsOrNot(int dropEvery)
+        {
+            const double Cadence = 4.0 / BaseHz;
+
+            var e = DriveArrivals(Cadence, jitter: 0.0, count: 120, dropEvery: dropEvery);
+
+            Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence).Within(1e-9),
+                "with no jitter there is nothing to correct, so the reading must not move — "
+                + "including when one snapshot in " + dropEvery + " is lost.");
+        }
     }
 }

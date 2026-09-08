@@ -649,14 +649,28 @@ namespace Cuvara.Netcode.Prediction
             // actually advanced. Minimum rather than mean for the same reason as everywhere else
             // here: a gap can be stretched by a late frame, never shortened below the cadence.
             //
-            // KNOWN LENIENCE, recorded rather than fixed here. A gap can be shortened below the
-            // cadence, by one arrival being late and the next on time: the minimum therefore
-            // reads the interval LESS the arrival jitter, and every requirement scaled by it --
-            // SweptEnough's, above all -- is weakened in proportion. On a 66 ms cadence with a
-            // frame of jitter that is about a quarter. It is the same shape as the two defects
-            // this guard has already had (a minimum standing in for a quantity it is silent
-            // about) and it deserves its own measurement rather than a fix folded in behind
-            // one.
+            // KNOWN LENIENCE, now MEASURED and still deliberately not fixed here. A gap can be
+            // shortened below the cadence, by one arrival being late and the next on time: the
+            // minimum therefore reads the interval LESS the arrival jitter, and every
+            // requirement scaled by it -- SweptEnough's, above all -- is weakened in
+            // proportion. It is the same shape as the two defects this guard has already had:
+            // a minimum standing in for a quantity it is silent about.
+            //
+            // MEASURED: on a 66.667 ms cadence with one 60 fps frame of jitter this reads
+            // 50.000 ms, exactly the cadence less the whole jitter range -- 25% low. See
+            // AckLatencyEstimatorTests.TheSnapshotIntervalReadsLowByTheArrivalJitter.
+            //
+            // WHY IT IS STILL NOT FIXED, which is a measurement and not a preference. The
+            // obvious correction is the smallest mean of two ADJACENT gaps: they telescope, so
+            // a single arrival's delay cancels exactly, and the result can never fall below
+            // this minimum. It was implemented and driven, and on a link losing one snapshot in
+            // three it read 99.999 ms against the same 66.667 ms cadence -- 50% HIGH -- because
+            // no adjacent pair of gaps is then free of a drop. The present error is LENIENT and
+            // cannot cause an over-lead; that one is STRICT and can. A correct fix needs a
+            // robust statistic over a ring of gaps rather than a running scalar, which is a
+            // larger change than this line. The drop case is pinned as a test --
+            // AnIdealCadenceIsMeasuredExactly_DropsOrNot -- so the next attempt is measured
+            // against loss before it is believed rather than after.
             if (ackTick > _lastAckTick)
             {
                 if (_lastAckTick > 0)

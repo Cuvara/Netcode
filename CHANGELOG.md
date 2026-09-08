@@ -330,6 +330,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Recorded because it was not.** Both of this entry's items existed only in a conversation until
   now, which is the failure this release is named about.
 
+- **A reconcile that could not consult the history is now counted as a miss, whichever overload
+  was called.** `HistoryMisses` was gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`
+  — the same condition as the history HIT, and the mirror is wrong. The hit needs the tick
+  because there is nothing to compare *at* without one; the miss needs nothing, because it is the
+  statement that the history did not answer, and an absent tick is a reason for that rather than
+  an exemption from it. A two-argument `Reconcile(Vec2, long)` caller with an empty pending buffer
+  therefore took the authoritative position wholesale and moved neither `HistoryHits`, nor
+  `HistoryMisses`, nor `ReplayedSteps`. `Adoptions` saw it — measured off the fallback's outcome,
+  with no such gate — but the pair a reader consults first reported that no reconcile had
+  occurred at all.
+
+  Not the live path: `com.cuvara.dots` drives the three-argument form. **The caller on the
+  two-argument overload is the one that cannot supply a tick, and therefore the one least able to
+  work out why its readings stood still** — the gate was silent exactly where diagnosis was
+  hardest.
+
+  The invariant now holds for both overloads and is asserted directly rather than left implied:
+  after seeding, **`HistoryHits + HistoryMisses == Reconciles`**. That partition is what makes
+  either counter readable on its own, and it is what stops the fix from being satisfied by an
+  increment placed somewhere convenient. `ReconcileAdoptionTests` gains
+  `TwoArgumentReconcile_ThatAdopts_CountsAMiss` and `EveryReconcileIsAHitOrAMiss_WhicheverOverload`.
+
+- **`Reset()` clears `HistoryHits` and `HistoryMisses` with every other counter.** It cleared
+  `ReplayedSteps`, `Snaps`, `Reconciles`, `Adoptions`, `DroppedInputs`, `RejectedInputs` and
+  `CoalescedInputs` and left the history pair standing. The consequence was specific: **after a
+  reconnect, any ratio between `Adoptions` and `HistoryMisses` was meaningless**, because the
+  numerator restarted at zero and the denominator did not — `adopted wholesale N of M misses` read
+  its two halves from opposite sides of the session boundary.
+
+  **The asymmetry could have been resolved the other way, and should not have been.** Nothing in
+  the record decided it. Clearing the pair wins because `Reset` is documented as a session
+  boundary and already returns the predictor's *state* to a fresh session — position, clock, hold,
+  seeding — so a counter that outlives it describes a different connection to a possibly different
+  entity. Making the whole set session-scoped is the only resolution under which a ratio between
+  any two of these counters is readable at all; making it all cumulative would leave every ratio
+  correct and every counter unattributable to the connection that produced it. Pinned by
+  `Reset_ClearsTheHistoryPair_WithEveryOtherCounter`, which asserts the counters nonzero first so
+  it cannot pass against a predictor that never counted anything.
+
 - **The acknowledgement floor is converted to base ticks with the measured wire rate, not the
   advertised one.** `WorldViewBinder` converted the same kind of quantity two ways: the
   round-trip term at `TargetLeadTicks` used `TickRate.EstimatedHz`, the rate measured off the
@@ -507,6 +546,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Limitations
 
+
+- **`AckLatencyEstimator._ackIntervalMin` reads the snapshot cadence about 25% low, measured; not
+  fixed, and the reason is itself a measurement.** This defect was in no changelog — it existed
+  only in a code comment and a conversation, which is the failure this release is named about, so
+  it is recorded here whether or not it is fixed.
+
+  `_ackIntervalMin` is the **smallest gap between acknowledgements**, used as the snapshot
+  interval that scales `SweptEnough`'s span requirement and `OccupiedBuckets`' bucket width.
+  Everywhere else in that class a minimum is the right statistic because the quantity can only be
+  inflated — a wait is the constant plus something non-negative. **A gap is not that quantity.**
+  One arrival late and the next on time shortens the gap between them by the whole of the first
+  arrival's delay, so the gap distribution *straddles* the cadence instead of sitting above it and
+  its minimum is biased low by the jitter range. Third instance in this class of a minimum
+  standing in for a quantity it is silent about.
+
+  **Measured:** on a 66.667 ms cadence with one 60 fps frame of jitter it reads **50.000 ms** —
+  exactly the cadence less the *whole* jitter range, **25% low** — and every requirement scaled by
+  it is weakened in the same proportion. A fixture whose jitter pattern never puts the extremes
+  adjacent reads only part of the range and understates the defect; the pinned one is built to put
+  a maximally late arrival next to an on-time one, because that pair is what the defect is made
+  of.
+
+  **The direction bounds the risk, and is asserted rather than assumed.** A cadence that reads low
+  makes the requirements smaller, so the guard admits data it should refuse: it is **lenient,
+  never strict, and cannot produce an over-lead on its own.**
+
+  **Why it is not fixed here, verified the way a defect is verified rather than reasoned about.**
+  The obvious correction is the smallest mean of two *adjacent* gaps — they telescope, so a single
+  arrival's delay cancels exactly, and since `g(n) + g(n+1) >= 2·min(g)` the result can never fall
+  below today's value. It was implemented and driven. It fixes the jitter case, and on a link
+  losing **one snapshot in three** it read **99.999 ms against the same 66.667 ms cadence — 50%
+  HIGH** — because no adjacent pair of gaps is then free of a drop and every pair mean is inflated
+  by the missing arrival. That converts a lenient guard into a strict one, which is the single
+  direction this term is not allowed to be wrong in, so it was reverted rather than shipped.
+
+  A correct fix needs a **robust statistic over a ring of gaps** rather than a running scalar —
+  the same minimum-to-percentile move this class has already made twice — which is a larger change
+  than this was recorded as and deserves its own measurement rather than being folded in behind
+  one.
+
+  Both readings are pinned as tests, so the next attempt has to come past them:
+  `TheSnapshotIntervalReadsLowByTheArrivalJitter` carries the 25% measurement *and* the leniency
+  assertion any replacement must keep, and `AnIdealCadenceIsMeasuredExactly_DropsOrNot` is the
+  drop case that disqualified the obvious fix — kept precisely so the next candidate is measured
+  against loss **before** it is believed rather than after.
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
@@ -720,28 +804,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Open terms
 
 
-Both were found while instrumenting the adopt path, both are real, and neither is fixed
-here — each needs its own change with its own test rather than a silent rider on this one.
-Named rather than left to be rediscovered.
-
-- **The two-argument `Reconcile(Vec2, long)` overload can adopt while incrementing nothing
-  at all.** `HistoryMisses` is gated on `serverBaseTick != NoServerTick && serverBaseTick > 0`,
-  so a two-arg caller whose pending buffer is empty takes the authoritative position
-  wholesale and moves neither `HistoryHits`, nor `HistoryMisses`, nor `ReplayedSteps`.
-  `Adoptions` is the first counter that sees it — it is measured off the fallback's outcome
-  and has no such gate — but the hit/miss pair still reads as though no reconcile occurred.
-  Not the live path: `com.cuvara.dots` drives the three-argument form. A consumer that
-  cannot supply the snapshot tick is on it, which is exactly the caller least able to
-  diagnose the result.
-
-- **`Reset()` clears `Adoptions` but not `HistoryHits` / `HistoryMisses`.** It already
-  cleared `ReplayedSteps`, `Snaps`, `Reconciles`, `DroppedInputs`, `RejectedInputs` and
-  `CoalescedInputs` and left the history pair alone; `Adoptions` was added to the cleared
-  set because it is the sibling of `ReplayedSteps`, which makes the asymmetry visible rather
-  than creating it. The consequence is specific and worth stating: **after a reconnect, any
-  ratio between `Adoptions` and `HistoryMisses` is meaningless**, because the numerator
-  restarted at zero and the denominator did not. `adopted wholesale N of M misses` is
-  therefore only readable within one session.
+The two counter terms named here have been fixed; what remains is the one term below, which
+needs a change of a different size. Named rather than left to be rediscovered.
 
 - **OPEN TERM — `ConservativeFloorTicks` is correct by coincidence, and its sign depends on a
   number chosen for an unrelated reason.** This is recorded as a defect rather than an
