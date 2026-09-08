@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The five remaining script-bearing samples gain an `.asmdef`, closing the double-import
+  compile error named as a known list in 0.34.0.** `ContentPipeline`, `E2ECertification`,
+  `InterpolationProbe`, `KcpProbe` and `WorldView` each get one, modelled on `ClockSyncProbe`.
+  Without an assembly definition a sample's scripts compile into the consuming project's
+  **default assembly**, and Unity's sample importer writes every import to a version-named
+  folder — `Assets/Samples/<package>/<version>/<sample>/` — so a project that imported an
+  earlier version and committed it has two copies on disk after an update. Both copies compile
+  together, every type is declared twice, and the default assembly fails with `CS0101` and
+  `CS0229`. The Editor is dead until one copy is deleted by hand.
+
+  **The property that makes this worth fixing pre-emptively rather than on report: it cannot be
+  found before a release.** The second copy only comes into existence at the moment of a version
+  bump, so the failure never lands on whoever imported the sample and tested it — it lands on the
+  first person to update afterwards, in a project the sample's author never saw. No amount of
+  care at import time surfaces it. 0.34.0 hit it live while importing that release's own headline
+  sample against a committed 0.28.1 copy.
+
+  0.34.0 fixed only `ClockSyncProbe` and deliberately named the other six, on the reasoning that
+  writing six sets of assembly references blind on the eve of a release was the larger risk. That
+  list is now closed, with one member removed from it rather than fixed: **`DemoBootstrap`
+  contains no `.cs` files at all** — a scene and a `NetworkBootstrapConfig` asset, nothing that
+  compiles — so it has no default-assembly footprint and cannot exhibit the defect. It is left
+  without an asmdef on purpose, not overlooked.
+
+  References were derived per sample from the types each source actually names, not copied
+  between samples, and they differ: `InterpolationProbe` and `KcpProbe` need only
+  `Cuvara.Netcode.Runtime`; `ContentPipeline`, `E2ECertification` and `WorldView` additionally
+  need `UniTask` and `Shared.GameLogic`. `UnityEngine.UIElements` and `UnityEngine.Networking`
+  are engine modules and are auto-referenced, which is why `ClockSyncProbe` lists neither despite
+  building its whole panel in UIElements.
+
+  **What this does not do.** Two imported copies now carry two asmdefs with the same assembly
+  name, which Unity reports as a duplicate-assembly-name error rather than compiling. That is
+  still an error, but it is scoped to the sample folders, names the offending assembly, and
+  leaves the rest of the project compiling — where `CS0101` in the default assembly takes
+  everything down at once and points at neither copy.
+
 ## [0.34.0] - 2026-09-08
 
 > **The failure mode behind this release: reasoning about one property and gating on another.**
