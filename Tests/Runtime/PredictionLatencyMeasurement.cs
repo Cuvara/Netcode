@@ -474,6 +474,20 @@ namespace Cuvara.Netcode.Tests.PlayMode
             /// <summary>Whether the wait term was seen to sweep, which is what makes a floor mean anything.</summary>
             public bool AckFloorSwept;
 
+            /// <summary>
+            /// The snapshot cadence the sweep requirements are scaled by, seconds, and how many
+            /// consecutive gaps it was averaged over.
+            /// </summary>
+            /// <remarks>
+            /// Printed because everything above is scaled by it and nothing showed it. A window
+            /// of 1 is the estimator saying it fell back to the bare minimum gap, which reads
+            /// the cadence about 25% low; anything above 1 is the windowed statistic.
+            /// </remarks>
+            public double AckIntervalSeconds;
+
+            /// <inheritdoc cref="AckIntervalSeconds"/>
+            public int AckIntervalWindow;
+
             /// <summary>Observations refused as implausible for a floor.</summary>
             public int AckFloorRefused;
 
@@ -2218,6 +2232,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
             run.AckFloorAhead = binder.AckLatency.AckAheadOfSend;
             run.AckFloorOffered = binder.AckLatency.HasEstimate;
             run.AckFloorSwept = binder.AckLatency.SweptEnough;
+            run.AckIntervalSeconds = binder.AckLatency.AckIntervalSeconds;
+            run.AckIntervalWindow = binder.AckLatency.AckIntervalWindow;
             run.AckFloorRefused = binder.AckLatency.Refused;
 
             var acked = run.Samples.Where(x => !x.AuthoritativeTimedOut)
@@ -2620,6 +2636,14 @@ namespace Cuvara.Netcode.Tests.PlayMode
                             : "   <<< NOT OFFERED: the wait never swept, so the\n" +
                               "                             minimum is not evidence about the floor. The lead keeps\n" +
                               "                             the round-trip fallback.") + "\n" +
+                $"  snapshot cadence (est)   {run.AckIntervalSeconds * 1000.0:F2} ms   " +
+                    (run.AckIntervalWindow >= 2
+                        ? $"(averaged over {run.AckIntervalWindow} consecutive gaps; every\n" +
+                          "                             requirement above is scaled by this)\n"
+                        : "<<< FELL BACK to the single smallest gap: no two\n" +
+                          "                             snapshots in a row survived, so this reads the cadence\n" +
+                          "                             about 25% LOW and every requirement above is that much\n" +
+                          "                             weaker. Lenient, not strict.\n") +
                 $"  ack floor bias removed   {run.AckFloorBiasTicks:F2} base ticks   " +
                     $"(= FloorPercentile {AckLatencyEstimator.FloorPercentile:F2} x the\n" +
                 $"                             estimator's own ladder slope {run.AckFloorLadderSlopeTicks:F2} t. The floor is a\n" +

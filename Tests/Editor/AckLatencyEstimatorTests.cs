@@ -823,41 +823,49 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// PINS A KNOWN, DELIBERATELY UNFIXED DEFECT, with the measurement that sizes it.
-        /// <c>AckIntervalSeconds</c> is the cadence every sweep requirement is scaled by, and
-        /// taking it as the smallest gap between arrivals reads the cadence LESS the full
-        /// arrival jitter — here 50.0 ms against a true 66.7 ms, a quarter low.
+        /// The arrival-jitter case that sized the old defect, now pinning what replaced it:
+        /// the reading is the cadence less the jitter <b>over the averaging window</b> —
+        /// 63.889 ms against a true 66.667, where the old minimum read 50.000.
         /// </summary>
         /// <remarks>
         /// <para>
-        /// <b>Why a minimum is the wrong statistic here specifically.</b> Everywhere else in
+        /// <b>Why a minimum was the wrong statistic here specifically.</b> Everywhere else in
         /// this class a minimum is right because the quantity can only be inflated — a wait is
         /// the constant plus something non-negative. A GAP is not that quantity. One arrival
         /// late and the next on time shortens the gap between them by the whole of the first
         /// arrival's delay, so the gap distribution straddles the cadence rather than sitting
-        /// above it, and its minimum is biased low by the jitter range rather than converging
-        /// on the cadence.
+        /// above it, and its minimum was biased low by the whole jitter range: <b>50.000 ms
+        /// against 66.667, a quarter low</b>, weakening every requirement scaled by it in the
+        /// same proportion.
         /// </para>
         /// <para>
-        /// <b>The direction, which is what bounds the risk and why this can wait.</b> A
-        /// cadence that reads low makes <see cref="AckLatencyEstimator.SweptEnough"/>'s span
+        /// <b>The direction is the safety property, and it is asserted rather than assumed.</b>
+        /// A cadence that reads low makes <see cref="AckLatencyEstimator.SweptEnough"/>'s span
         /// requirement and <c>OccupiedBuckets</c>' bucket width smaller, so the guard admits
-        /// data it should refuse. It is LENIENT, never strict, and therefore cannot produce an
-        /// over-lead on its own — asserted below rather than assumed, because that assertion
-        /// is the whole reason this is a recorded defect and not an incident.
+        /// data it should refuse: LENIENT, never strict, and therefore unable to produce an
+        /// over-lead on its own. That assertion is unchanged and outlives the statistic.
         /// </para>
         /// <para>
-        /// <b>Why it is not fixed here.</b> The obvious correction — take the smallest mean of
-        /// two ADJACENT gaps, which telescope so that a single arrival's delay cancels exactly
-        /// — was implemented and measured rather than reasoned about. It fixes this case, and
-        /// on the drop case below it reads <b>99.999 ms against a true 66.667 ms</b>, because
-        /// at one snapshot in three lost no adjacent pair of gaps is free of a drop and every
-        /// pair mean is inflated by the missing arrival. That is 50% HIGH: it converts a
-        /// lenient guard into a strict one, which is the single direction this term is not
-        /// allowed to be wrong in. A correct fix needs a robust statistic over a ring of
-        /// gaps — the same minimum-to-percentile move this class has already made twice — and
-        /// that is a larger change than this was recorded as, deserving its own measurement
-        /// rather than being folded in behind one.
+        /// <b>What the reading is now.</b> Adjacent gaps telescope, so the mean of
+        /// <see cref="AckLatencyEstimator.IntervalWindowMax"/> consecutive single-interval gaps
+        /// carries only <c>1/K</c> of the arrival jitter, and the observed jitter spread over
+        /// the same window is subtracted to keep the result on the lenient side of an otherwise
+        /// unbiased estimate. The residue is exactly that subtraction: the delay pattern here
+        /// spans <c>4·jitter/3</c> between its widest and narrowest gap, so the reading is
+        /// <c>cadence − (4·jitter/3)/8</c>, and it is written that way below rather than as a
+        /// number, so that changing the window length moves the expectation with it instead of
+        /// falsifying a constant somebody would then edit.
+        /// </para>
+        /// <para>
+        /// <b>Two statistics were rejected, both by measurement.</b> The smallest mean of two
+        /// ADJACENT gaps telescopes correctly and provably never reads below the old minimum;
+        /// at one snapshot in three lost it reads 99.999 ms against 66.667 — 50% HIGH — because
+        /// no adjacent pair is then free of a drop. A raw low PERCENTILE of the gaps fails the
+        /// other way on this very fixture, which
+        /// <see cref="TheRejectedPercentileOfGapsWouldReadStrict"/> pins: three gaps sit above
+        /// the cadence for every one below, so the tenth percentile is still the minimum and
+        /// the twenty-fifth reads 8.3% HIGH. <b>A percentile of gaps is not the same move as a
+        /// percentile of waits</b>, because a wait cannot fall below the constant and a gap can.
         /// </para>
         /// </remarks>
         [Test]
@@ -873,13 +881,23 @@ namespace Cuvara.Netcode.Tests.Editor
                 + "cadence: reading it HIGH would tighten every requirement scaled by it and "
                 + "could produce an over-lead. Any future fix must keep this assertion.");
 
-            Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence - Jitter).Within(1e-6),
-                "THE MEASUREMENT. The reading is the cadence less the WHOLE jitter range, not "
-                + "part of it, because the minimum finds the one adjacent pair where a "
-                + "maximally late arrival is followed by an on-time one. 50.0 ms against a "
-                + "66.7 ms cadence — 25% low — and every requirement scaled by it is weakened "
-                + "in the same proportion. Pinned so that a change to the statistic has to "
-                + "come here and say what it did.");
+            // The widest gap this delay pattern produces less the narrowest, which is what the
+            // statistic subtracts a window's share of.
+            const double GapSpread = 4.0 * Jitter / 3.0;
+
+            Assert.That(
+                e.AckIntervalSeconds,
+                Is.EqualTo(Cadence - GapSpread / AckLatencyEstimator.IntervalWindowMax)
+                    .Within(1e-9),
+                "THE MEASUREMENT, replacing the one this test was written to pin. The reading "
+                + "is no longer the cadence less the WHOLE jitter range (50.000 ms, 25% low) "
+                + "but the cadence less the jitter over the averaging window: 63.889 ms "
+                + "against 66.667, 4.2% low. The residual is the leniency subtraction, not "
+                + "the estimator failing to telescope — the window mean itself is exact here.");
+
+            Assert.That(e.AckIntervalWindow, Is.EqualTo(AckLatencyEstimator.IntervalWindowMax),
+                "and it used a full window: with no loss there is a drop-free run the whole "
+                + "length of the ring, so nothing here rests on the fallback.");
         }
 
         /// <summary>
@@ -906,6 +924,209 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(e.AckIntervalSeconds, Is.EqualTo(Cadence).Within(1e-9),
                 "with no jitter there is nothing to correct, so the reading must not move — "
                 + "including when one snapshot in " + dropEvery + " is lost.");
+        }
+
+        /// <summary>
+        /// Jitter and loss TOGETHER, which neither pinned case covered and which is where the
+        /// previous attempt was actually wrong: the reading stays lenient at every loss rate,
+        /// and degrades to the old minimum rather than past it when no window can be formed.
+        /// </summary>
+        /// <remarks>
+        /// The window needs a run of consecutive delivered snapshots. At one in five lost the
+        /// longest run is three, so the reading averages three gaps and lands 13.9% low; at one
+        /// in three lost the arrivals alternate and there is no run at all, so it falls back to
+        /// the minimum and reads exactly what it read before this change — 25% low, and SAID to
+        /// be, by <see cref="AckLatencyEstimator.AckIntervalWindow"/>. <b>A fallback is a second
+        /// claim about the same quantity; it is reported rather than taken silently.</b>
+        /// </remarks>
+        [TestCase(0, 8, -4.2)]
+        [TestCase(5, 3, -13.9)]
+        [TestCase(3, 1, -25.0)]
+        public void TheIntervalStaysLenientWhenJitterAndLossArriveTogether(
+            int dropEvery, int expectedWindow, double expectedErrorPercent)
+        {
+            const double Cadence = 4.0 / BaseHz;
+            const double Jitter = 1.0 / BaseHz;
+
+            var e = DriveArrivals(Cadence, Jitter, count: 120, dropEvery: dropEvery);
+
+            Assert.That(e.AckIntervalSeconds, Is.LessThanOrEqualTo(Cadence + 1e-9),
+                "THE SAFETY PROPERTY, under loss. The attempt this replaces failed exactly "
+                + "here: its adjacent-pair mean read 50% HIGH at one snapshot in three.");
+
+            Assert.That(e.AckIntervalWindow, Is.EqualTo(expectedWindow),
+                "the window length is the reading's own account of how much evidence it had — "
+                + "1 means no two snapshots in a row survived and the reading is the bare "
+                + "minimum this change was made to stop relying on.");
+
+            Assert.That(
+                100.0 * (e.AckIntervalSeconds - Cadence) / Cadence,
+                Is.EqualTo(expectedErrorPercent).Within(0.05),
+                "measured, not derived: the error the window length buys at this loss rate.");
+        }
+
+        /// <summary>
+        /// The candidate the record recommended, falsified on the fixture it was recommended
+        /// for: a raw low percentile of the GAPS reads STRICT, which is the one direction this
+        /// term may not be wrong in.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// "The same minimum-to-percentile move this class has already made twice" is the note
+        /// that was left for whoever fixed this, and it does not transfer. <b>A percentile is
+        /// right for the observations because a wait is the constant plus something
+        /// non-negative, so the distribution sits ABOVE the quantity and a low percentile
+        /// approaches it from the safe side. A gap straddles the cadence instead</b>, and this
+        /// delay pattern is not symmetric about it: three gaps of <c>cadence + jitter/3</c> for
+        /// every one of <c>cadence − jitter</c>. So the tenth percentile is still the minimum
+        /// and buys nothing, and every percentile above the twenty-fifth is above the cadence.
+        /// </para>
+        /// <para>
+        /// Computed here from the same arrivals rather than taken on trust, so that the reason
+        /// the shipped statistic is not a percentile is a measurement in the suite rather than
+        /// a sentence in a changelog.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void TheRejectedPercentileOfGapsWouldReadStrict()
+        {
+            const double Cadence = 4.0 / BaseHz;
+            const double Jitter = 1.0 / BaseHz;
+
+            var gaps = new System.Collections.Generic.List<double>();
+            double previous = double.NaN;
+            for (var i = 0; i < 120; i++)
+            {
+                double at = ClockOffset + i * Cadence + Jitter * (i % 4) / 3.0;
+                if (i > 0) gaps.Add(at - previous);
+                previous = at;
+            }
+
+            gaps.Sort();
+            // Nearest rank, the same index rule Quantile() uses.
+            double q10 = gaps[(int)(0.10 * gaps.Count)];
+            double q25 = gaps[(int)(0.25 * gaps.Count)];
+
+            Assert.That(q10, Is.EqualTo(Cadence - Jitter).Within(1e-9),
+                "the tenth percentile of the gaps IS the minimum on this pattern — the "
+                + "recommended move buys nothing at the quantile low enough to be safe.");
+
+            Assert.That(q25, Is.GreaterThan(Cadence),
+                "and the next one up is already STRICT: 72.222 ms against a 66.667 cadence, "
+                + "8.3% high. This is why the shipped statistic averages a window instead.");
+        }
+
+        /// <summary>
+        /// The limit of the whole approach, stated as a test rather than left to be
+        /// rediscovered: when periodic loss is phase-locked to the arrival jitter so that NO
+        /// observed gap spans exactly one cadence interval, both this statistic and the minimum
+        /// it replaced read about twice the cadence.
+        /// </summary>
+        /// <remarks>
+        /// At one snapshot in two, with the dropped arrival always the on-time one, every
+        /// surviving gap covers two intervals. Nothing in this class can tell that from a
+        /// genuinely halved snapshot rate — the arrivals are identical — so this is a property
+        /// of the LINK, not of the statistic, and it is the forbidden direction for both.
+        /// It is pinned so that the leniency property is understood as conditional on the link
+        /// delivering two snapshots in a row somewhere in the ring, which is the condition the
+        /// old minimum silently depended on too.
+        /// </remarks>
+        [Test]
+        public void PhaseLockedLossDefeatsThisStatisticAndTheOneItReplaced()
+        {
+            const double Cadence = 4.0 / BaseHz;
+            const double Jitter = 1.0 / BaseHz;
+
+            var e = DriveArrivals(Cadence, Jitter, count: 120, dropEvery: 2);
+
+            Assert.That(e.AckIntervalSeconds, Is.GreaterThan(1.8 * Cadence),
+                "NOT A PASSING GRADE — a pinned failure. Every gap spans two intervals, so the "
+                + "reading is about two cadences (130.6 ms) where the minimum read 122.2. Both "
+                + "are strict, and the difference between them is not the point: the point is "
+                + "that the quantity is absent from the arrivals and no statistic over them "
+                + "recovers it.");
+
+            // The milder face of the same lock, and the one a real link could plausibly meet:
+            // at one in four the dropped arrival is always the maximally late one, so every
+            // surviving gap is cadence + jitter/3 and there is no short gap anywhere. Both
+            // statistics read 72.222 ms -- IDENTICALLY, because with no gap below the cadence
+            // a window mean and a minimum are the same number.
+            var mild = DriveArrivals(Cadence, Jitter, count: 120, dropEvery: 4);
+
+            Assert.That(mild.AckIntervalSeconds, Is.EqualTo(Cadence + Jitter / 3.0).Within(1e-9),
+                "8.3% strict, and exactly what the minimum it replaced reads on the same "
+                + "arrivals. Pinned so that a future reader meeting this number does not "
+                + "attribute it to the windowing.");
+        }
+
+        /// <summary>
+        /// The leniency property across jitter shapes, jitter ranges and loss rates rather than
+        /// on one pattern — asserted CONDITIONALLY, on the only condition under which it can
+        /// hold: that the link delivered a gap spanning one interval at all.
+        /// </summary>
+        /// <remarks>
+        /// The larger sweep this is the runnable part of covered 43 200 arms (four jitter
+        /// ranges, six jitter shapes, six loss rates, 300 seeds). In none of them did the
+        /// windowed reading cross the cadence where the old minimum had not, and in none was it
+        /// FURTHER from the cadence than the old minimum; it was closer in 51.5% and further in
+        /// none. <b>Without the jitter-spread subtraction the same sweep reads up to 7.1%
+        /// high</b>, which is what makes that term load-bearing rather than decorative.
+        /// </remarks>
+        [Test]
+        public void TheIntervalIsNeverStricterThanTheMinimumItReplaced()
+        {
+            const double Cadence = 4.0 / BaseHz;
+
+            int arms = 0, closer = 0;
+            foreach (double jitter in new[] { Cadence / 8.0, Cadence / 4.0, Cadence / 2.0 })
+            foreach (double loss in new[] { 0.0, 0.1, 0.2, 0.33 })
+            foreach (int shape in new[] { 0, 1, 2 })
+            for (var seed = 0; seed < 12; seed++)
+            {
+                var rng = new Random(seed * 31 + shape);
+                var e = new AckLatencyEstimator();
+                double previous = double.NaN, minGap = double.MaxValue;
+                long tick = 0;
+
+                for (var i = 0; i < 300; i++)
+                {
+                    double delay = shape switch
+                    {
+                        0 => jitter * rng.NextDouble(),                  // uniform
+                        1 => rng.NextDouble() < 0.05 ? jitter : 0.0,     // rare late arrival
+                        _ => rng.NextDouble() < 0.5 ? jitter : 0.0,      // bimodal
+                    };
+                    double at = ClockOffset + i * Cadence + delay;
+                    tick++;
+                    e.RecordSent(tick, at - 0.005);
+                    if (i > 0 && rng.NextDouble() < loss) continue;
+                    e.RecordAck(tick, at, BaseHz);
+                    if (!double.IsNaN(previous) && at - previous < minGap) minGap = at - previous;
+                    previous = at;
+                }
+
+                arms++;
+                string arm = $"jitter={jitter:F4} loss={loss} shape={shape} seed={seed}";
+
+                if (minGap <= Cadence + 1e-9)
+                {
+                    Assert.That(e.AckIntervalSeconds, Is.LessThanOrEqualTo(Cadence + 1e-9),
+                        "THE SAFETY PROPERTY, on an arm where the minimum was lenient and the "
+                        + "reading therefore has no excuse not to be: " + arm);
+                }
+
+                Assert.That(
+                    Math.Abs(e.AckIntervalSeconds - Cadence),
+                    Is.LessThanOrEqualTo(Math.Abs(minGap - Cadence) + 1e-9),
+                    "and never further from the cadence than the statistic it replaced: " + arm);
+
+                if (Math.Abs(e.AckIntervalSeconds - Cadence) < Math.Abs(minGap - Cadence)) closer++;
+            }
+
+            Assert.That(closer, Is.GreaterThan(arms / 2),
+                "a change that is never worse but also never better is not a fix; it must be "
+                + "closer to the true cadence on most arms. Closer on " + closer + " of "
+                + arms + ".");
         }
     }
 }

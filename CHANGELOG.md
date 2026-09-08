@@ -23,6 +23,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read **1**; and the `Open terms` retirement recorded conditionally on a proposal that was adopted
   in the same release. In every case the original wording is quoted and the sequence made visible,
   so a reader who remembers the old claim finds out it changed rather than finding silence.
+- **`AckLatencyEstimator.AckIntervalSeconds` no longer reads the snapshot cadence 25% low.**
+  0.35.0 recorded this as measured and unfixed, with the two readings pinned as tests so the next
+  attempt had to come past them. It reads **63.889 ms against a true 66.667 on the same jitter
+  fixture — 4.2% low, where it read 50.000 ms — and still exactly 66.667 on an ideal cadence with
+  one snapshot in five or one in three lost.** `AnIdealCadenceIsMeasuredExactly_DropsOrNot`, the
+  fixture that disqualified the previous attempt, passes **unchanged**.
+
+  The statistic is **the smallest mean of up to eight consecutive single-interval gaps, less the
+  observed jitter spread over that window, never below the ring minimum** — a ring of gaps
+  replacing a running scalar, which is what the entry said a correct fix would need. Adjacent gaps
+  telescope, so a window of `K` is `K·T` plus the difference of two arrival delays and its mean
+  carries only `1/K` of the jitter; a gap covering a dropped snapshot is **excluded** from the
+  window rather than averaged through it, which is the whole of the difference from the attempt
+  this replaces. When no two snapshots in a row survive, there is no window and the reading falls
+  back to the old minimum — **reported, not silent**, through the new `AckIntervalWindow` (1 means
+  the fallback is in force), which the measurement harness now prints next to the cadence because
+  every requirement above it is scaled by it and nothing showed it.
+
+  **The recommendation left with the entry was wrong, and it took measuring it to see that.** "The
+  same minimum-to-percentile move this class has already made twice" does not transfer: a raw low
+  percentile of the GAPS reads **72.222 ms on the very fixture it was recommended for — 8.3% HIGH**,
+  the one forbidden direction. A percentile is right for the observations because a wait is the
+  constant plus something non-negative, so the distribution sits *above* the quantity and a low
+  percentile approaches it from the safe side; **a gap straddles the cadence instead**, and this
+  arrival pattern puts three gaps above it for every one below, so the tenth percentile is still
+  the minimum and every percentile above the twenty-fifth is strict.
+  `TheRejectedPercentileOfGapsWouldReadStrict` computes both from the same arrivals, so the reason
+  the shipped statistic is not a percentile is a measurement in the suite rather than a sentence
+  here. **A remedy recorded with a defect is a hypothesis, and inherits none of the defect's
+  evidence.**
+
+  **The leniency subtraction is load-bearing and was nearly left out.** A window mean is an
+  *unbiased* estimate of the cadence, so it lands above it about half the time — and the guard
+  requires this reading to stay at or below it. Subtracting the observed jitter spread over the
+  same window bounds that term for any jitter stationary across the window. Driven over **43 200
+  arms** (four jitter ranges × six jitter shapes × six loss rates × 300 seeds): with the
+  subtraction the reading crossed the cadence **zero** times where the old minimum had not, and
+  was **never further from the cadence than the old minimum in any arm** — closer in 51.5%,
+  further in none. Without it, the same sweep reads up to **7.1% HIGH**. The subtraction is
+  identically zero when there is no jitter, which is why the ideal fixture still reads exactly.
+
+- The measurement harness prints `snapshot cadence (est)` with the window length beside it, and
+  says so in the loud form when the window is 1.
+
+### Limitations
+
+- **The leniency property is conditional on the link, and always was — it needs one observed gap
+  that spans exactly ONE cadence interval.** Under periodic loss phase-locked to the arrival
+  jitter, so that the dropped arrival is always the on-time one, every surviving gap spans two
+  intervals and there is nothing in the arrivals to recover the cadence from. At one snapshot in
+  two this reads **130.556 ms against 66.667** and the minimum it replaced reads **122.222** —
+  both about twice the cadence, both strict, and the difference between them is not the point.
+  The milder face of the same lock is likelier to be met: at one snapshot in four, with the
+  dropped arrival always the maximally late one, every surviving gap is `cadence + jitter/3` and
+  both statistics read **72.222 ms — 8.3% strict — identically**, because with no gap below the
+  cadence a window mean and a minimum are the same number.
+  This is **not new and not caused by the change**; it is a property the old statistic depended on
+  silently, found while driving the new one against loss and now pinned by
+  `PhaseLockedLossDefeatsThisStatisticAndTheOneItReplaced`. It is indistinguishable from a
+  genuinely halved snapshot rate by anything present in this class — the arrivals are identical —
+  so it is stated here rather than left to a reader's memory, in the same style as the left-tail
+  gap: **undetectable by anything present.** `AckIntervalWindow` is the only instrument that
+  narrows it, and it narrows it in the other direction: a 1 says the reading is the fallback, not
+  that a doubled gap was mistaken for a single one.
+
+- **Jitter and loss together still cost accuracy, in the lenient direction, in proportion to the
+  run length the link delivers.** The window is as long as the longest run of consecutive
+  delivered snapshots, capped at eight. On the jitter fixture the reading is 4.2% low with no
+  loss, **13.9% low at one snapshot in five** (runs of three), and **25% low at one in three**
+  (no run at all, so the fallback). The cap is where the measured gain stops rather than a tuned
+  parameter — mean absolute error over the 43 200 arms falls 43.4% → 38.7% → 37.2% → 36.5% →
+  35.8% → 35.6% at caps 4, 6, 8, 12, 16, and eight also keeps the error inside one `SweepBuckets`
+  division of the interval, which is the resolution anything scaled by this reading actually has.
+
+### Changed
+
+- **`SweptEnough` and `OccupiedBuckets` are now scaled by a cadence that is up to a third larger,
+  so both are STRICTER than they were.** That is the point of the fix — a cadence reading low
+  made the span requirement and the bucket width smaller, and the guard admitted data it should
+  have refused — but it means a marginal link that offered a floor before may now be refused.
+  **Expect `swept` to flip to false on links that were only just passing, and `ACK FLOOR
+  (estimator)` to read `NOT OFFERED` there.** Nothing in the ladder or the floor statistic itself
+  changed; a refusal that appears after this change is the guard doing what it was written to do
+  on evidence it should never have accepted.
+
 
 ## [0.35.0] - 2026-09-08
 
