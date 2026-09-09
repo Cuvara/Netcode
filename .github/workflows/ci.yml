@@ -130,7 +130,7 @@ jobs:
               {
                 "name": "OpenUPM",
                 "url": "https://package.openupm.com",
-                "scopes": ["com.cysharp", "jp.hadashikick"]
+                "scopes": ["com.cysharp", "jp.hadashikick", "org.nuget"]
               }
             ]
           }
@@ -194,6 +194,13 @@ jobs:
           path: package
 
       # Build a Unity project at repo root that references the package
+          # org.nuget is in this scope list because the package DECLARES
+          # org.nuget.system.runtime.compilerservices.unsafe -- Google.Protobuf's own
+          # dependency, which this package vendors Google.Protobuf.dll without. These two
+          # jobs hand-write their manifests, so they can drift from what a real consumer
+          # resolves; the install probes already carried this scope and passed while these
+          # failed with "Package [...] cannot be found". Keep the three lists in step, or
+          # a genuine dependency becomes unresolvable here while looking fine to consumers.
       - name: Bootstrap test project
         run: |
           mkdir -p Assets ProjectSettings Packages
@@ -210,7 +217,7 @@ jobs:
               {
                 "name": "OpenUPM",
                 "url": "https://package.openupm.com",
-                "scopes": ["com.cysharp", "jp.hadashikick"]
+                "scopes": ["com.cysharp", "jp.hadashikick", "org.nuget"]
               }
             ],
             "testables": ["com.cuvara.netcode"]
