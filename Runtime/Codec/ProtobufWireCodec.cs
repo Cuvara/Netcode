@@ -258,6 +258,13 @@ namespace Cuvara.Netcode.Codec
                     MaxHp = e.MaxHp,
                     Handle = e.Handle,
                     Speed = e.Speed,
+                    // Both carried raw: their "zero means not sent" contract lives in the
+                    // encoding itself (facing is biased so no real angle is zero, action
+                    // reserves zero), not in a translation here. Applying a fallback at
+                    // this layer would hide from the view layer whether a value was ever
+                    // sent at all.
+                    FacingBrad = e.FacingBrad,
+                    Action = (Shared.GameLogic.Components.EntityAction)e.Action,
                 });
             }
 

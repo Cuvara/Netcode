@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <engine:Style src="FacingAndVersionView.uss" />
+
+    <engine:VisualElement name="facing-version" class="cuvara-probe" picking-mode="Ignore">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Facing and protocol version" class="cuvara-probe__title" />
+            <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                          text="No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder." />
+
+            <engine:Label text="Handshake" class="cuvara-probe__section" />
+            <engine:Label name="version-line" class="cuvara-probe__readout" />
+            <engine:Label name="refusal-line" class="cuvara-probe__readout cuvara-probe__mono" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="join-match" text="Join (matching version)" class="cuvara-probe__button" />
+                <engine:Button name="join-mismatch" text="Join (version + 1)" class="cuvara-probe__button" />
+            </engine:VisualElement>
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="join-unversioned" text="Join (advertise nothing)"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Facing" class="cuvara-probe__section" />
+            <engine:Label name="facing-line" class="cuvara-probe__readout" />
+            <engine:Label name="action-line" class="cuvara-probe__readout" />
+            <engine:Label name="encoding-line" class="cuvara-probe__readout cuvara-probe__mono" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="toggle-facing" text="Stop sending facing" class="cuvara-probe__button" />
+                <engine:Button name="reverse" text="Reverse orbit"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

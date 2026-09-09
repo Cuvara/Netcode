@@ -55,7 +55,8 @@ namespace Cuvara.Netcode.Tests.Editor
 
             public int SetStateCalls { get; private set; }
 
-            public void SetState(string id, float x, float y, int hp, int maxHp)
+            public void SetState(string id, float x, float y, int hp, int maxHp,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
             {
                 SetStateCalls++;
                 Positions[id] = new[] { x, y };

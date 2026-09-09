@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-entity facing and action state (`facing_brad`, `action`), client side.** The
+  snapshot carried no orientation and no animation state at all, so a character could not
+  be turned to face the way it was walking without a schema change across both repos.
+  `EntitySnapshot`, `ResolvedEntity` and the merger adapter now carry both;
+  `Runtime/Protocol/FacingCodec.cs` decodes them.
+
+- **`IEntityView.SetState` widened to carry facing and action**, and
+  `GameObjectEntityView` applies the facing as a Y rotation. It is on `SetState` rather
+  than `Spawn` because, unlike the entity kind, these change constantly — that is the
+  point of them. `FacingCodec.TryToUnityYaw` does the frame conversion (server angle is
+  CCW from +X; Unity's Y rotation is CW from +Z), because getting that wrong yields a
+  mirrored or quarter-turned world that still animates smoothly and survives a casual
+  look.
+
+- **`Samples~/FacingAndVersion`** — one scene covering both wire changes, with **no
+  server and no network** (the `InterpolationProbe` / `ClockSyncProbe` shape). Capsules
+  orbit a ring pointing along their direction of travel, driven only by `facing_brad`
+  through the real codec, resolver, merger and binder. "Stop sending facing" withholds
+  the field and they keep moving while holding their last heading instead of snapping to
+  east — the "zero means not sent" rule made visible. Three buttons run a real
+  `JoinTokenResponse` through the client's version rule, including the named
+  `protocol_version_mismatch` refusal.
+
+### Changed
+
+- **The decode path never fabricates a value for either field.** A zero rides through the
+  codec and the resolver untouched, because whether to hold the last known facing or
+  derive one is a presentation decision and belongs where the context is. In the view
+  binder both are SNAPPED, never interpolated — action more strongly than facing, since a
+  blend between two enum values is not a state the server ever occupied.
+
+
 - **Wire protocol version negotiation (`protocol_version`), client side.** The
   package sniffed the *encoding* from byte 0 and called that settled — `EncodingSniffer`
   said so in as many words: "there is no negotiation, no version field, and no extra

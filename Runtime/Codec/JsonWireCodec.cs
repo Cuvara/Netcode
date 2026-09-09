@@ -250,7 +250,14 @@ namespace Cuvara.Netcode.Codec
                     // present with 0 from a server that has the field and simply has
                     // nothing to say. Same rule either way: non-positive means "no
                     // value", not "cannot move".
-                    Speed = item.GetFloat("speed")
+                    Speed = item.GetFloat("speed"),
+
+                    // Absent leaves 0, which both fields define as "not sent" — so the
+                    // two encodings agree here without a second rule. Note this is the
+                    // one place JSON does NOT write a zero the way it does for speed:
+                    // zero is a reserved value for these, not a legitimate reading.
+                    FacingBrad = item.GetUInt("facing_brad"),
+                    Action = (Shared.GameLogic.Components.EntityAction)item.GetInt("action")
                 });
             }
 

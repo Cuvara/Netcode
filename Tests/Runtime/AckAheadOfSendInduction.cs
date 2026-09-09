@@ -370,7 +370,8 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
             public void Despawn(string id) => _live.Remove(id);
 
-            public void SetState(string id, float x, float y, int hp, int maxHp)
+            public void SetState(string id, float x, float y, int hp, int maxHp,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
             {
             }
         }

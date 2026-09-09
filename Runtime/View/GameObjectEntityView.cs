@@ -114,7 +114,8 @@ namespace Cuvara.Netcode.View
             }
         }
 
-        public void SetState(string id, float x, float y, int hp, int maxHp)
+        public void SetState(string id, float x, float y, int hp, int maxHp,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
         {
             if (id == null || !_objects.TryGetValue(id, out var go) || go == null)
             {
@@ -124,6 +125,16 @@ namespace Cuvara.Netcode.View
             // Server 2D (x, y) -> Unity (x, _, z). Y is left at the capsule's half height
             // so it sits on the ground plane rather than through it.
             go.transform.position = new Vector3(x, 1f, y);
+
+        // Facing. Zero means the server sent none, and in that case the transform is
+        // left exactly as it was: snapping to a default would make every entity from a
+        // pre-facing server point the same way, which looks like a content bug rather
+        // than a missing field. Holding the last value is also what makes a character
+        // that stops walking keep looking where it was going.
+        if (Protocol.FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
+        {
+            go.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+        }
 
             // HP as vertical squash: full health is upright, near-death is flattened.
             // One line, no UI, readable in a screenshot. Written only on change — see

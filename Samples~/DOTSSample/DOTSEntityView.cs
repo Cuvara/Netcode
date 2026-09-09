@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Cuvara.Netcode.Protocol;
 using Cuvara.Netcode.View;
 using Unity.Collections;
 using Unity.Entities;
@@ -96,6 +97,13 @@ namespace DOTSSample
             public float LastX;
             public float LastY;
             public bool HasPos;
+
+            /// <summary>
+            /// Last facing written, in the wire's biased form. Zero means none has been
+            /// written yet, which is also the wire's "not sent" value — so an entity
+            /// whose server never sends a facing simply never gets a rotation write.
+            /// </summary>
+            public uint LastFacingBrad;
         }
 
         private readonly Dictionary<string, EntityRec> _entities = new Dictionary<string, EntityRec>();
@@ -262,7 +270,8 @@ namespace DOTSSample
                 _em.DestroyEntity(rec.Entity);
         }
 
-        public void SetState(string id, float x, float y, int hp, int maxHp)
+        public void SetState(string id, float x, float y, int hp, int maxHp,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
         {
             if (!IsValid || !_entities.TryGetValue(id, out var rec))
                 return;
@@ -275,20 +284,43 @@ namespace DOTSSample
             // any rotation another system applied (#60).
             bool hpChanged = hp != rec.Hp || maxHp != rec.MaxHp;
             bool posChanged = !rec.HasPos || x != rec.LastX || y != rec.LastY;
-            if (!hpChanged && !posChanged)
+
+            // Zero means the server sent no facing, and in that case nothing is written
+            // at all: the entity keeps whatever rotation it has. Snapping to identity
+            // would point every entity from a pre-facing server the same way, which
+            // looks like a content bug rather than a missing field.
+            bool facingChanged = facingBrad != FacingCodec.NotSent && facingBrad != rec.LastFacingBrad;
+
+            if (!hpChanged && !posChanged && !facingChanged)
                 return;
 
             if (!_em.Exists(rec.Entity))
                 return;
 
-            if (posChanged)
+            if (posChanged || facingChanged)
             {
+                // One read-modify-write for both, rather than two: each EntityManager
+                // access is a main-thread random chunk access that can sync outstanding
+                // jobs on that component type (#60), so doing it twice would double the
+                // cost this method is already change-gated to avoid.
                 var lt = _em.GetComponentData<LocalTransform>(rec.Entity);
-                lt.Position = new float3(x, 0.5f, y);
+
+                if (posChanged)
+                {
+                    lt.Position = new float3(x, 0.5f, y);
+                    rec.LastX = x;
+                    rec.LastY = y;
+                    rec.HasPos = true;
+                }
+
+                if (facingChanged &&
+                    FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
+                {
+                    lt.Rotation = quaternion.RotateY(math.radians(yaw));
+                    rec.LastFacingBrad = facingBrad;
+                }
+
                 _em.SetComponentData(rec.Entity, lt);
-                rec.LastX = x;
-                rec.LastY = y;
-                rec.HasPos = true;
             }
 
             if (hpChanged)

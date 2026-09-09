@@ -15,7 +15,19 @@ namespace Cuvara.Netcode.Snapshot
         {
         }
 
+        /// <summary>
+        /// Constructs a resolved entity with no facing or action, leaving both at their
+        /// "not sent" values. Kept for source compatibility, like the overload above.
+        /// </summary>
         public ResolvedEntity(string id, string type, float x, float y, int hp, int maxHp, float speed)
+            : this(id, type, x, y, hp, maxHp, speed, 0u,
+                   Shared.GameLogic.Components.EntityAction.Unspecified)
+        {
+        }
+
+        public ResolvedEntity(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
         {
             Id = id;
             Type = type;
@@ -24,6 +36,8 @@ namespace Cuvara.Netcode.Snapshot
             Hp = hp;
             MaxHp = maxHp;
             Speed = speed;
+            FacingBrad = facingBrad;
+            Action = action;
         }
 
         public string Id { get; }
@@ -48,5 +62,24 @@ namespace Cuvara.Netcode.Snapshot
         /// cannot move.
         /// </remarks>
         public float Speed { get; }
+
+        /// <summary>
+        /// Facing as biased 16-bit binary radians, in the wire's own form. Decode with
+        /// <see cref="Cuvara.Netcode.Protocol.FacingCodec"/>.
+        /// </summary>
+        /// <remarks>
+        /// <b>Zero means "not sent", not "facing east"</b> — the +1 bias exists so those
+        /// stay distinguishable. Kept in raw wire form rather than as an angle so this
+        /// layer makes no decision the view layer should be making: whether to hold the
+        /// last facing or derive one from movement is a presentation choice.
+        /// </remarks>
+        public uint FacingBrad { get; }
+
+        /// <summary>
+        /// What the entity is doing.
+        /// <see cref="Shared.GameLogic.Components.EntityAction.Unspecified"/> means
+        /// "not sent", never "idle".
+        /// </summary>
+        public Shared.GameLogic.Components.EntityAction Action { get; }
     }
 }
