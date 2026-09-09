@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JoinTokenResponse` through the client's version rule, including the named
   `protocol_version_mismatch` refusal.
 
+### Added
+
+- **CI: `com.cuvara.dots` now compiles against this package in the `Compile samples` job.**
+  A third package implements `IEntityView`, in its own repository, and nothing here could
+  see it break — netcode's tests do not compile it and `Samples~` is not compiled until
+  imported. Widening `IEntityView.SetState` once compiled clean in this repo and broke
+  that package outright; it was caught only by a human importing a sample. Its
+  `Cuvara.DOTS.Netcode` asmdef gates on `com.cuvara.netcode >= 0.31.0`, which the
+  `file:../package` reference satisfies, so it now compiles against the local package on
+  every run.
+
+  Cost: three manifest lines. Every dependency `com.cuvara.dots@0.29.0` declares was
+  already present at the right version. The two MessagePipe lines exist because
+  `Cuvara.DOTS.DI` activates on VContainer (already present for ReconnectPolicyDemo) and
+  references `MessagePipe`; at 1.8.1 neither MessagePipe package declares a transitive
+  dependency, and the existing `com.cysharp` OpenUPM scope resolves both. Its
+  GameFoundation and Physics assemblies stay dormant — their defines' packages are absent.
+
 ### Fixed
 
 - **Declared `org.nuget.system.runtime.compilerservices.unsafe`, a real dependency the
