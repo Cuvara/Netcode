@@ -51,6 +51,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Declared `org.nuget.system.runtime.compilerservices.unsafe`, a real dependency the
+  package was missing.** This package vendors `Google.Protobuf.dll` in `Runtime/Plugins/`
+  but not Protobuf's own dependency. Protobuf reaches it the first time it writes a string
+  field — and on a Protobuf connection that is the **first frame the client ever sends**,
+  `auth.token`, encoded by `ProtobufWireCodec.EncodePayload`. A project without it throws
+  `FileNotFoundException: System.Runtime.CompilerServices.Unsafe, Version=4.0.4.1` at the
+  handshake, not at import, because the plugin has `validateReferences: 0`.
+
+  **This is a runtime defect, not a test defect.** It surfaced as a failing test
+  (`ProtobufEmitsTheVersionAndElidesZero`) only because that test is the one which drives a
+  real `JoinTokenRequest` through Protobuf's encoder; the runtime reaches the same writer on
+  every Protobuf handshake. It stayed hidden because the consuming client happens to resolve
+  that assembly at depth 2 through an unrelated NuGet chain (`org.nuget.r3`,
+  `system.text.json`, …) belonging to GameFoundation — so the package only ever worked
+  where something else supplied its dependency. The install probes are built to catch
+  exactly this and did, the moment the Unity gate could run again.
+
+  Declared rather than vendored: adding a second copy of the assembly to `Runtime/Plugins/`
+  would collide with the copy consumers like the client already resolve. The `org.nuget`
+  OpenUPM scope the probes already use is now documented in the README too, which had
+  listed only `com.cysharp` and `jp.hadashikick`.
+
+
+- **CI: pinned `game-ci/unity-test-runner` by SHA, restoring every Unity-invoking job.**
+  On 2026-09-09 `Unity Tests`, `Compile samples` and two `Install probe` rows went red on
+  UNCHANGED code — develop and a whitespace-only control branch alike — with
+  `fatal: not a git repository (or any of the parent directories): .git`. Nothing here
+  moved; the **mutable `v4` tag** did, from `0ff419b9` (2024-06-15) to `32e57712`,
+  *"Thin wrapper: invoke game-ci/cli as a subprocess (#310)"*. The old action ran
+  `docker run unityci/editor` itself; the new one shells out to the game-ci CLI, which
+  runs `git` in its working directory — the workspace **root**, which is deliberately not
+  a git repository here, because `actions/checkout` places the repo in `package/` and the
+  throwaway Unity project is built around it so the manifest can say `file:../package`.
+  The two logs show it plainly: the last green run resolved `v4` to `0ff419b9` and ran
+  4m24s; the first red one resolved it to `32e57712` and died in 9s.
+
+  Pinning weakens nothing — Unity still runs and every test still executes; only the
+  third-party action is frozen, as protoc, the Unity version and every package version
+  already are. Adopting the new wrapper needs the CLI to find a git repository at its
+  working directory, i.e. a deliberate change to the checkout layout, not a tag bump.
+
+
 - **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
   vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
   `simkill_target_survives_high_defense`) were added server-side in `4eb0ba5` and sat in

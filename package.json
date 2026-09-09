@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "com.cysharp.unitask": "2.5.10",
+    "org.nuget.system.runtime.compilerservices.unsafe": "6.0.0",
     "com.unity.modules.unitywebrequest": "1.0.0",
     "com.unity.modules.physics": "1.0.0"
   },
