@@ -70,6 +70,11 @@
       "path": "Samples~/ReconnectPolicyDemo"
     },
     {
+      "displayName": "AOI Visibility Probe",
+      "description": "Synthetic world, no server, no network: one observer with an AOI radius over hundreds to thousands of entities, with the visible set computed twice per frame - once by the plain scan, once by narrowing with a uniform grid - and the two answers compared live. Shows entities-in-view versus total, the observer's radius, how many entities each strategy examined, and whether the server's occupancy gate would use its index at this density. The mismatch counter is the point: narrowing the search must not change who is visible.",
+      "path": "Samples~/AoiVisibilityProbe"
+    },
+    {
       "displayName": "KCP Probe",
       "description": "Two KCP state machines back-to-back, no server, no network. Sends messages through the ARQ with configurable packet loss and renders the results on screen: reliable delivery, fragmentation/reassembly, and retransmission under loss — all visible rather than read about.",
       "path": "Samples~/KcpProbe"
