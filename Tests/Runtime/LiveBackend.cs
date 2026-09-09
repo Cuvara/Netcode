@@ -349,8 +349,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
 
         public void Despawn(string id) => _positions.Remove(id);
 
-        public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        public void SetState(string id, float x, float y, int hp, int maxHp)
         {
             SetStateCalls++;
             var position = new Vector2(x, y);

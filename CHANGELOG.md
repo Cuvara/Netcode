@@ -15,13 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EntitySnapshot`, `ResolvedEntity` and the merger adapter now carry both;
   `Runtime/Protocol/FacingCodec.cs` decodes them.
 
-- **`IEntityView.SetState` widened to carry facing and action**, and
-  `GameObjectEntityView` applies the facing as a Y rotation. It is on `SetState` rather
-  than `Spawn` because, unlike the entity kind, these change constantly — that is the
-  point of them. `FacingCodec.TryToUnityYaw` does the frame conversion (server angle is
-  CCW from +X; Unity's Y rotation is CW from +Z), because getting that wrong yields a
-  mirrored or quarter-turned world that still animates smoothly and survives a casual
-  look.
+- **`IEntityPoseView` — a new OPTIONAL companion to `IEntityView`.** A view that wants to
+  render facing implements it alongside `IEntityView`; `WorldViewBinder` resolves it once
+  at construction (not per entity per frame) and calls `SetPose` beside every `SetState`.
+  `GameObjectEntityView` implements it and applies the facing as a Y rotation via
+  `FacingCodec.TryToUnityYaw`, which does the frame conversion (server angle is CCW from
+  +X; Unity's Y rotation is CW from +Z) — getting that wrong yields a mirrored or
+  quarter-turned world that still animates smoothly and survives a casual look, so it is
+  a named function with a test rather than an inline constant.
+
+  **`IEntityView` itself is unchanged — byte-identical to the previous release.** An
+  earlier revision of this branch instead widened `IEntityView.SetState` from five
+  arguments to seven. That compiled here and broke `com.cuvara.dots`, a separate package
+  in a separate repository, whose assembly could not even *name* `EntityAction` — so the
+  widening silently billed a sibling package a new assembly reference for a feature it
+  had not asked for. That package had already written the rule down, about its own
+  `SetStateAtTick`: *"Not part of IEntityView, and it cannot be. That interface is
+  netcode's ... widening it would make every GameObject view in every consumer implement
+  a method it has no use for."* `IEntityView`'s own remarks and a past `WorldViewBinder`
+  decision say the same thing. The interface is a cross-package contract, and the cost of
+  adding to it is paid by packages that never see the commit.
+
+  With the split, a view that does not care about facing needs no change at all — not a
+  stub, not a reference, not a recompile. `AViewWithoutThePoseInterfaceStillWorks` pins
+  that guarantee, because nothing in this repository could otherwise see it break.
 
 - **`Samples~/FacingAndVersion`** — one scene covering both wire changes, with **no
   server and no network** (the `InterpolationProbe` / `ClockSyncProbe` shape). Capsules

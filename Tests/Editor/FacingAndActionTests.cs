@@ -3,6 +3,8 @@ using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Protocol;
 using Cuvara.Netcode.Protocol.Messages;
 using Cuvara.Netcode.Snapshot;
+using Cuvara.Netcode.View;
+using Cuvara.Netcode.World;
 using SimAction = Shared.GameLogic.Components.EntityAction;
 
 namespace Cuvara.Netcode.Tests.Editor
@@ -195,6 +197,106 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(resolved.Entities[0].Action, Is.EqualTo(SimAction.Unspecified),
                 "must be Unspecified, NOT Idle — an old server would otherwise freeze every entity into an idle pose");
             Assert.That(FacingCodec.TryToRadians(resolved.Entities[0].FacingBrad, out _), Is.False);
+        }
+
+        // ---- The view seam --------------------------------------------------
+
+        /// <summary>A view that implements only <see cref="IEntityView"/>.</summary>
+        private sealed class PoselessView : IEntityView
+        {
+            public int SetStateCalls;
+            public void Spawn(string id, bool isLocal, string type) { }
+            public void Despawn(string id) { }
+            public void SetState(string id, float x, float y, int hp, int maxHp) => SetStateCalls++;
+        }
+
+        /// <summary>A view that opts in to facing and action.</summary>
+        private sealed class PoseView : IEntityView, IEntityPoseView
+        {
+            public int SetStateCalls;
+            public uint LastFacingBrad;
+            public SimAction LastAction;
+
+            public void Spawn(string id, bool isLocal, string type) { }
+            public void Despawn(string id) { }
+            public void SetState(string id, float x, float y, int hp, int maxHp) => SetStateCalls++;
+
+            public void SetPose(string id, uint facingBrad, SimAction action)
+            {
+                LastFacingBrad = facingBrad;
+                LastAction = action;
+            }
+        }
+
+        private static WorldState WorldWith(uint facingBrad, SimAction action)
+        {
+            var world = new WorldState();
+            var resolver = new SnapshotResolver();
+            Assert.That(resolver.TryResolve(
+                Snapshot(true, new EntitySnapshot
+                {
+                    Id = "e1", Type = "player", X = 1f, Y = 2f, Hp = 10, MaxHp = 10,
+                    Speed = 4f, FacingBrad = facingBrad, Action = action,
+                }),
+                out var resolved), Is.True);
+            world.Apply(resolved);
+            return world;
+        }
+
+        /// <summary>
+        /// The compatibility guarantee, and the reason <see cref="IEntityPoseView"/> is a
+        /// separate interface at all: a view that does not implement it keeps working
+        /// untouched — no stub, no assembly reference, no recompile.
+        /// </summary>
+        /// <remarks>
+        /// This is the case that was NOT covered when facing and action were first added
+        /// by widening <c>IEntityView.SetState</c>. That compiled here and broke
+        /// <c>com.cuvara.dots</c>, a separate package in a separate repository, which
+        /// could not even name <see cref="SimAction"/> from its assembly. Nothing in this
+        /// repository could see it. This test is the thing that would have.
+        /// </remarks>
+        [Test]
+        public void AViewWithoutThePoseInterfaceStillWorks()
+        {
+            var view = new PoselessView();
+            var binder = new WorldViewBinder(view);
+
+            Assert.DoesNotThrow(() => binder.Tick(WorldWith(1u, SimAction.Moving), localId: null));
+            Assert.That(view.SetStateCalls, Is.GreaterThan(0),
+                "an opted-out view must still receive position and hp");
+        }
+
+        /// <summary>A view that opts in receives the facing and action alongside SetState.</summary>
+        [Test]
+        public void APoseViewReceivesFacingAndAction()
+        {
+            var view = new PoseView();
+            var binder = new WorldViewBinder(view);
+            uint north = (uint)(FacingCodec.BradSteps / 4) + 1;
+
+            binder.Tick(WorldWith(north, SimAction.Attacking), localId: null);
+
+            Assert.That(view.SetStateCalls, Is.GreaterThan(0));
+            Assert.That(view.LastFacingBrad, Is.EqualTo(north));
+            Assert.That(view.LastAction, Is.EqualTo(SimAction.Attacking));
+        }
+
+        /// <summary>
+        /// A not-sent facing still reaches the view as zero rather than being filtered
+        /// out by the binder. Holding the last value is the VIEW's decision — the binder
+        /// suppressing the call would take that choice away and make "not sent"
+        /// indistinguishable from "no update at all".
+        /// </summary>
+        [Test]
+        public void ANotSentFacingIsStillDelivered()
+        {
+            var view = new PoseView { LastFacingBrad = 12345u };
+            var binder = new WorldViewBinder(view);
+
+            binder.Tick(WorldWith(FacingCodec.NotSent, SimAction.Unspecified), localId: null);
+
+            Assert.That(view.LastFacingBrad, Is.EqualTo(FacingCodec.NotSent));
+            Assert.That(view.LastAction, Is.EqualTo(SimAction.Unspecified));
         }
 
         // ---- The codecs -----------------------------------------------------

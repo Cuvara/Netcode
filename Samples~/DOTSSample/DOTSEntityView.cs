@@ -32,7 +32,7 @@ namespace DOTSSample
     /// its own render batch — one draw call per capsule (#60).
     /// </para>
     /// </remarks>
-    public sealed class DOTSEntityView : IEntityView
+    public sealed class DOTSEntityView : IEntityView, IEntityPoseView
     {
         /// <summary>Per-entity display info exposed for the overlay.</summary>
         public readonly struct EntityLabel
@@ -270,8 +270,7 @@ namespace DOTSSample
                 _em.DestroyEntity(rec.Entity);
         }
 
-        public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        public void SetState(string id, float x, float y, int hp, int maxHp)
         {
             if (!IsValid || !_entities.TryGetValue(id, out var rec))
                 return;
@@ -284,43 +283,20 @@ namespace DOTSSample
             // any rotation another system applied (#60).
             bool hpChanged = hp != rec.Hp || maxHp != rec.MaxHp;
             bool posChanged = !rec.HasPos || x != rec.LastX || y != rec.LastY;
-
-            // Zero means the server sent no facing, and in that case nothing is written
-            // at all: the entity keeps whatever rotation it has. Snapping to identity
-            // would point every entity from a pre-facing server the same way, which
-            // looks like a content bug rather than a missing field.
-            bool facingChanged = facingBrad != FacingCodec.NotSent && facingBrad != rec.LastFacingBrad;
-
-            if (!hpChanged && !posChanged && !facingChanged)
+            if (!hpChanged && !posChanged)
                 return;
 
             if (!_em.Exists(rec.Entity))
                 return;
 
-            if (posChanged || facingChanged)
+            if (posChanged)
             {
-                // One read-modify-write for both, rather than two: each EntityManager
-                // access is a main-thread random chunk access that can sync outstanding
-                // jobs on that component type (#60), so doing it twice would double the
-                // cost this method is already change-gated to avoid.
                 var lt = _em.GetComponentData<LocalTransform>(rec.Entity);
-
-                if (posChanged)
-                {
-                    lt.Position = new float3(x, 0.5f, y);
-                    rec.LastX = x;
-                    rec.LastY = y;
-                    rec.HasPos = true;
-                }
-
-                if (facingChanged &&
-                    FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
-                {
-                    lt.Rotation = quaternion.RotateY(math.radians(yaw));
-                    rec.LastFacingBrad = facingBrad;
-                }
-
+                lt.Position = new float3(x, 0.5f, y);
                 _em.SetComponentData(rec.Entity, lt);
+                rec.LastX = x;
+                rec.LastY = y;
+                rec.HasPos = true;
             }
 
             if (hpChanged)
@@ -334,6 +310,60 @@ namespace DOTSSample
                     _em.SetComponentData(rec.Entity, new Health { Current = hp, Max = maxHp });
                 }
             }
+        }
+
+        /// <summary>
+        /// Applies the entity's facing to <c>LocalTransform.Rotation</c>. Action is
+        /// accepted and not yet rendered — see the remarks.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Change-gated like <see cref="SetState"/>, and for the same reason: the binder
+        /// calls this for every entity every frame, not only when a snapshot landed, and
+        /// each <c>EntityManager</c> access is a main-thread random chunk access that can
+        /// sync outstanding jobs on that component type (#60). Writing the rotation
+        /// unconditionally would reintroduce exactly the per-frame cost that issue
+        /// removed.
+        /// </para>
+        /// <para>
+        /// <b>A zero facing writes nothing at all.</b> Zero is the wire's reserved
+        /// "not sent", so the entity keeps whatever rotation it has — which is also what
+        /// makes a character that stops walking keep looking where it was going. Snapping
+        /// to identity would point every entity from a server predating the field the
+        /// same way, and that reads as a content bug rather than a missing field.
+        /// </para>
+        /// <para>
+        /// This writes <c>Rotation</c>, the field <see cref="SetState"/> deliberately
+        /// preserves rather than clobbering (#60). The two never write it in the same
+        /// frame for the same entity unless both actually changed, and each does its own
+        /// read-modify-write, so neither can erase the other's field.
+        /// </para>
+        /// <para>
+        /// <b>Action is not rendered yet.</b> This sample has no animator to drive with
+        /// it, and inventing a visual here would be guessing at a game's art direction.
+        /// The parameter is named rather than discarded so that is visible as a choice.
+        /// </para>
+        /// </remarks>
+        public void SetPose(string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        {
+            if (!IsValid || id == null || !_entities.TryGetValue(id, out var rec))
+                return;
+
+            // Reserved zero: nothing to say, so nothing is written.
+            if (facingBrad == FacingCodec.NotSent || facingBrad == rec.LastFacingBrad)
+                return;
+
+            if (!_em.Exists(rec.Entity))
+                return;
+
+            if (!FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
+                return;
+
+            var lt = _em.GetComponentData<LocalTransform>(rec.Entity);
+            lt.Rotation = quaternion.RotateY(math.radians(yaw));
+            _em.SetComponentData(rec.Entity, lt);
+
+            rec.LastFacingBrad = facingBrad;
         }
 
         /// <summary>

@@ -139,6 +139,12 @@ namespace Cuvara.Netcode.View
         }
 
         private readonly IEntityView _view;
+
+        /// <summary>
+        /// The same object as <see cref="_view"/> when it also implements
+        /// <see cref="IEntityPoseView"/>; null when it does not. See the constructor.
+        /// </summary>
+        private readonly IEntityPoseView _poseView;
         private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
@@ -281,6 +287,13 @@ namespace Cuvara.Netcode.View
                                InterpolationConfig interpolation)
         {
             _view = view;
+            // Resolved ONCE, here, rather than per entity per frame. This binder drives
+            // every visible entity every frame at render rate, so an `as` cast in that
+            // loop would be a type check per entity per frame forever, to answer a
+            // question whose answer cannot change for the life of the binder.
+            // Null simply means the view opted out of facing and action, which is a
+            // supported configuration and the whole reason IEntityPoseView is separate.
+            _poseView = view as IEntityPoseView;
             _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
             _clock = clock ?? new StopwatchViewClock();
             _interpConfig = interpolation.Normalized();
@@ -936,8 +949,8 @@ namespace Cuvara.Netcode.View
                     if (!_frameDriven)
                     {
                         var predicted = _predictor.Position;
-                        _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp,
-                            e.FacingBrad, e.Action);
+                        _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+                        _poseView?.SetPose(id, e.FacingBrad, e.Action);
                     }
 
                     // HP is deliberately still the server's. Only movement is predicted;
@@ -999,12 +1012,13 @@ namespace Cuvara.Netcode.View
                         iy = newest.Y;
                     }
 
-                    _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp,
-                        entry.FacingBrad, entry.Action);
+                    _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
+                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action);
                 }
                 else
                 {
-                    _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp, e.FacingBrad, e.Action);
+                    _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
+                    _poseView?.SetPose(id, e.FacingBrad, e.Action);
                 }
             }
 
@@ -1097,8 +1111,8 @@ namespace Cuvara.Netcode.View
             // extrapolates POSITION between snapshots and has nothing to extrapolate
             // these from - inventing a facing from the predicted velocity here would
             // fight the authoritative value on the very next snapshot.
-            _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp,
-                _localFacingBrad, _localAction);
+            _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
+            _poseView?.SetPose(_localId, _localFacingBrad, _localAction);
         }
 
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>

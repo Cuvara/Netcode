@@ -53,28 +53,6 @@ namespace Cuvara.Netcode.View
         /// reconcile, so implementations should be cheap and must not assume a fixed
         /// cadence — snapshots arrive at the server's tick rate, not the frame rate.
         /// </summary>
-        /// <param name="facingBrad">
-        /// Facing as biased 16-bit binary radians — the wire's own form. Decode with
-        /// <see cref="Cuvara.Netcode.Protocol.FacingCodec"/>.
-        /// <para>
-        /// <b>Zero means "not sent", not "facing east".</b> An implementation MUST keep
-        /// whatever facing it was showing rather than snapping to east, or every entity
-        /// from a server predating the field points the same way — which reads as a
-        /// content bug and gets debugged as one.
-        /// </para>
-        /// </param>
-        /// <param name="action">
-        /// What the entity is doing.
-        /// <see cref="Shared.GameLogic.Components.EntityAction.Unspecified"/> means
-        /// "not sent", never "idle" — keep whatever was being shown rather than falling
-        /// back to an idle pose.
-        /// </param>
-        /// <remarks>
-        /// Facing and action are on this method rather than on
-        /// <see cref="Spawn"/> because, unlike the entity kind, they change constantly
-        /// over an entity's lifetime — that is the whole point of them.
-        /// </remarks>
-        void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action);
+        void SetState(string id, float x, float y, int hp, int maxHp);
     }
 }

@@ -62,8 +62,7 @@ namespace Cuvara.Netcode.Tests.Editor
         private sealed class NullView : IEntityView
         {
             public void Spawn(string id, bool isLocal, string type) { }
-            public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action) { }
+            public void SetState(string id, float x, float y, int hp, int maxHp) { }
             public void Despawn(string id) { }
         }
 

@@ -49,8 +49,7 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             public void Spawn(string id, bool isLocal, string type) { }
             public void Despawn(string id) { }
-            public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action) { }
+            public void SetState(string id, float x, float y, int hp, int maxHp) { }
         }
 
         private const string LocalId = "local-user";

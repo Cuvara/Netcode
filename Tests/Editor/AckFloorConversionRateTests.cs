@@ -248,8 +248,7 @@ namespace Cuvara.Netcode.Tests.Editor
             {
             }
 
-            public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+            public void SetState(string id, float x, float y, int hp, int maxHp)
             {
             }
         }

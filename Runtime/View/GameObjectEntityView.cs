@@ -26,7 +26,7 @@ namespace Cuvara.Netcode.View
     /// looking down sees the world as the server lays it out.
     /// </para>
     /// </remarks>
-    public sealed class GameObjectEntityView : IEntityView
+    public sealed class GameObjectEntityView : IEntityView, IEntityPoseView
     {
         private readonly Dictionary<string, GameObject> _objects = new Dictionary<string, GameObject>();
 
@@ -114,8 +114,7 @@ namespace Cuvara.Netcode.View
             }
         }
 
-        public void SetState(string id, float x, float y, int hp, int maxHp,
-            uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        public void SetState(string id, float x, float y, int hp, int maxHp)
         {
             if (id == null || !_objects.TryGetValue(id, out var go) || go == null)
             {
@@ -125,16 +124,6 @@ namespace Cuvara.Netcode.View
             // Server 2D (x, y) -> Unity (x, _, z). Y is left at the capsule's half height
             // so it sits on the ground plane rather than through it.
             go.transform.position = new Vector3(x, 1f, y);
-
-        // Facing. Zero means the server sent none, and in that case the transform is
-        // left exactly as it was: snapping to a default would make every entity from a
-        // pre-facing server point the same way, which looks like a content bug rather
-        // than a missing field. Holding the last value is also what makes a character
-        // that stops walking keep looking where it was going.
-        if (Protocol.FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
-        {
-            go.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-        }
 
             // HP as vertical squash: full health is upright, near-death is flattened.
             // One line, no UI, readable in a screenshot. Written only on change — see
@@ -147,6 +136,37 @@ namespace Cuvara.Netcode.View
                 var health = Mathf.Clamp01((float)hp / maxHp);
                 var s = go.transform.localScale;
                 go.transform.localScale = new Vector3(s.x, Mathf.Lerp(0.3f, s.x, health), s.z);
+            }
+        }
+
+        /// <summary>
+        /// Applies the entity's facing as a Y rotation. Action is accepted and not yet
+        /// rendered — see the remarks.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A zero facing writes nothing at all.</b> Zero is the wire's reserved
+        /// "not sent", so the transform keeps whatever rotation it already had. Snapping
+        /// to identity instead would point every entity from a server predating the field
+        /// the same way, which looks like a content bug rather than a missing field — and
+        /// holding the last value is also what makes a character that stops walking keep
+        /// looking where it was going.
+        /// </para>
+        /// <para>
+        /// <b>Action is deliberately not rendered here.</b> This view draws primitives
+        /// with no animator, so there is nothing to drive with it; inventing a visual for
+        /// it — a colour swap, a scale pop — would be this layer guessing at a game's art
+        /// direction. The value reaches the view so a real one can use it, and the
+        /// parameter is named rather than dropped so that intent is visible.
+        /// </para>
+        /// </remarks>
+        public void SetPose(string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        {
+            if (id == null || !_objects.TryGetValue(id, out var go) || go == null) return;
+
+            if (Protocol.FacingCodec.TryToUnityYaw(facingBrad, out float yaw))
+            {
+                go.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
         }
 
