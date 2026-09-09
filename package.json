@@ -75,6 +75,11 @@
       "path": "Samples~/AoiVisibilityProbe"
     },
     {
+      "displayName": "Send Budget Probe",
+      "description": "A synthetic crowd through the game server's per-connection downlink budget, no server and no network: dial the population and how much of it moves, watch snapshot bytes flatten against the cap, entities get deferred oldest-first, and the client go a beat stale — while the 'handle errors' readout stays at zero, which is the invariant that makes shedding safe. Byte figures are measured from real Protobuf snapshots.",
+      "path": "Samples~/SendBudgetProbe"
+    },
+    {
       "displayName": "KCP Probe",
       "description": "Two KCP state machines back-to-back, no server, no network. Sends messages through the ARQ with configurable packet loss and renders the results on screen: reliable delivery, fragmentation/reassembly, and retransmission under loss — all visible rather than read about.",
       "path": "Samples~/KcpProbe"

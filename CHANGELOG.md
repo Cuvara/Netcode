@@ -141,6 +141,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timings live in the server's committed `AoiIndexBench`. UI Toolkit throughout, with the
   world painted via `Painter2D` rather than built from elements, so entity count does not
   turn into layout cost.
+- **`Send Budget Probe` sample** — the game server gained a per-connection downlink budget
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`): when more has changed inside one observer's AOI than
+  fits in a snapshot, the lowest-priority entities are **deferred** to a later one. This
+  scene makes that observable, with no server and no network. Dial the crowd's population
+  and how much of it moves per tick, and watch payload bytes flatten against the cap,
+  entities get deferred oldest-first, and the client fall a beat behind — the trade the
+  budget makes, in front of you rather than in a changelog entry.
+  - The byte figures are **measured, not estimated**: snapshots are built as
+    `RpgMmo.Wire.V1.SnapshotMessage`, the same generated schema this package already
+    decodes with, so a number on screen is a number of bytes that would be on the wire.
+    Entity-id interning is modelled faithfully — the id travels only on the message that
+    introduces its handle, and handles reset at every keyframe.
+  - The readout that matters is **`handle errors`, and it stays at zero**. `wire.proto`
+    forbids a receiver from guessing at a handle it has no binding for, so if shedding and
+    the delta encoder's "what does this client already have" bookkeeping ever drifted
+    apart, an unbound handle is the first symptom. The sample's `FakeClient` applies that
+    rule strictly and counts violations on screen, because a check nobody reads is not a
+    check.
+  - **Sample-only.** The budget is a *server* decision and deferral is invisible in the
+    protocol — a client needs no change to work against a budgeted server.
+    `SendBudgetModel` mirrors the server's `SnapshotDeltaState` for the purpose of the
+    scene, and nothing in `Runtime/` depends on it.
+  - UI is UXML/UI Toolkit, like every sample scene in this package.
 
 ### Fixed
 
