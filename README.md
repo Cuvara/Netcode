@@ -41,6 +41,16 @@ package compiles without them.
 scoped registry (it lives there, not on Unity's registry):
 
 - **UniTask** (`com.cysharp.unitask`) — required; used throughout the transport
+- **System.Runtime.CompilerServices.Unsafe**
+  (`org.nuget.system.runtime.compilerservices.unsafe`) — required. It is
+  `Google.Protobuf`'s own dependency, and this package vendors `Google.Protobuf.dll` in
+  `Runtime/Plugins/` without it. Protobuf reaches it the first time it writes a string
+  field, which on a Protobuf connection is the very first frame the client sends
+  (`auth.token`), so a project missing it throws
+  `FileNotFoundException: System.Runtime.CompilerServices.Unsafe` at the handshake rather
+  than at import. Until it was declared, the package only worked in projects that happened
+  to pull it in transitively through something else — which is why it went unnoticed: the
+  consuming client gets it at depth 2 through an unrelated NuGet chain.
 
 **Optional**, and not declared, as of 0.6.0:
 
@@ -53,7 +63,7 @@ scoped registry (it lives there, not on Unity's registry):
 ```json
 "scopedRegistries": [
   { "name": "OpenUPM", "url": "https://package.openupm.com",
-    "scopes": ["com.cysharp", "jp.hadashikick"] }
+    "scopes": ["com.cysharp", "jp.hadashikick", "org.nuget"] }
 ]
 ```
 
