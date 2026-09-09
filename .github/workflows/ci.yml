@@ -157,7 +157,7 @@ jobs:
       - name: Compile
         id: compile
         continue-on-error: true
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -226,8 +226,34 @@ jobs:
             productName: NetcodeTest
           YAML
 
+      # PINNED BY SHA, NOT @v4, and it must stay that way until the checkout layout
+      # changes. On 2026-09-09 every Unity-invoking job in this workflow went red on
+      # UNCHANGED code, including develop and a whitespace-only control branch:
+      #
+      #   [ERROR] Error: fatal: not a git repository (or any of the parent directories)
+      #
+      # Nothing in this repository moved. The MUTABLE v4 tag did: it was re-pointed from
+      # 0ff419b9 (2024-06-15) to 32e57712, "Thin wrapper: invoke game-ci/cli as a
+      # subprocess (#310)". The old action ran `docker run unityci/editor` itself; the new
+      # one shells out to the game-ci CLI, and that CLI runs `git` in its working
+      # directory. That directory is the workspace ROOT, which by design is NOT a git
+      # repository here -- `actions/checkout` puts the repo in `package/` and the throwaway
+      # Unity project is built at the root around it, so the manifest can say
+      # `file:../package`. The evidence is the two run logs: the green one at 2026-09-08
+      # 17:03 resolved v4 to 0ff419b9 and ran docker directly; the first red one resolved
+      # it to 32e57712 and died in 9s where the green run took 4m24s.
+      #
+      # Pinning restores the implementation that was green. It weakens nothing -- Unity
+      # still runs and every test still executes; only the third-party action is frozen,
+      # exactly as protoc, the Unity version and every package version are frozen
+      # elsewhere in this repo.
+      #
+      # To move to the new wrapper, the CLI has to find a git repository at its working
+      # directory. That means changing this checkout layout (checking out at the root and
+      # relocating the throwaway project, or teaching the CLI where the repo is) -- a
+      # deliberate change with its own verification, not a tag bump.
       - name: Run EditMode tests
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -388,7 +414,7 @@ jobs:
       - name: Compile
         id: compile
         continue-on-error: true
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}

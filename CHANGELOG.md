@@ -51,6 +51,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI: pinned `game-ci/unity-test-runner` by SHA, restoring every Unity-invoking job.**
+  On 2026-09-09 `Unity Tests`, `Compile samples` and two `Install probe` rows went red on
+  UNCHANGED code — develop and a whitespace-only control branch alike — with
+  `fatal: not a git repository (or any of the parent directories): .git`. Nothing here
+  moved; the **mutable `v4` tag** did, from `0ff419b9` (2024-06-15) to `32e57712`,
+  *"Thin wrapper: invoke game-ci/cli as a subprocess (#310)"*. The old action ran
+  `docker run unityci/editor` itself; the new one shells out to the game-ci CLI, which
+  runs `git` in its working directory — the workspace **root**, which is deliberately not
+  a git repository here, because `actions/checkout` places the repo in `package/` and the
+  throwaway Unity project is built around it so the manifest can say `file:../package`.
+  The two logs show it plainly: the last green run resolved `v4` to `0ff419b9` and ran
+  4m24s; the first red one resolved it to `32e57712` and died in 9s.
+
+  Pinning weakens nothing — Unity still runs and every test still executes; only the
+  third-party action is frozen, as protoc, the Unity version and every package version
+  already are. Adopting the new wrapper needs the CLI to find a git repository at its
+  working directory, i.e. a deliberate change to the checkout layout, not a tag bump.
+
+
 - **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
   vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
   `simkill_target_survives_high_defense`) were added server-side in `4eb0ba5` and sat in
