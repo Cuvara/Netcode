@@ -102,6 +102,27 @@ jobs:
           done
           echo "samples imported: $(ls Assets/Samples | tr '\n' ' ')"
 
+          # com.cuvara.dots is here as a COMPILE GATE, not because a sample needs it.
+          # It is a third package implementing Cuvara.Netcode.View.IEntityView, in its own
+          # repository, and nothing in this repo could see it break: netcode's tests do not
+          # compile it and Samples~ is not compiled until imported. Widening
+          # IEntityView.SetState once compiled clean here and broke that package outright,
+          # and was only caught by a human importing a sample. With this line, its
+          # Cuvara.DOTS.Netcode assembly compiles against `file:../package` on every run --
+          # its asmdef gates on com.cuvara.netcode >= 0.31.0, which the file: reference
+          # satisfies -- so the next such break fails here instead.
+          #
+          # The two MessagePipe lines are the price of it, and only that. Cuvara.DOTS.DI is
+          # constrained on CUVARA_DOTS_VCONTAINER, whose versionDefine fires on
+          # jp.hadashikick.vcontainer -- already present for ReconnectPolicyDemo -- so that
+          # assembly activates and references MessagePipe and MessagePipe.VContainer. Both
+          # are resolved by the existing com.cysharp OpenUPM scope, and at 1.8.1 (the
+          # version the consuming client resolves) neither declares a single transitive
+          # dependency, so this pulls in nothing further. The org.nuget.* chain in the
+          # client's lockfile belongs to GameFoundation, not to MessagePipe.
+          #
+          # Everything else in that package stays dormant: GameFoundation and Physics are
+          # constrained on defines whose packages are absent here, so Unity skips them.
           # com.unity.modules.imageconversion is here for WorldView: its screenshot
           # helper calls Texture2D.EncodeToPNG, an extension method that lives in that
           # module. A real Unity project has it by default; this hand-written manifest
@@ -117,6 +138,9 @@ jobs:
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
               "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1",
+              "com.cuvara.dots": "https://github.com/Cuvara/UnityDots.git#v0.29.0",
+              "com.cysharp.messagepipe": "1.8.1",
+              "com.cysharp.messagepipe.vcontainer": "1.8.1",
               "com.unity.entities": "1.4.8",
               "com.unity.entities.graphics": "1.4.21",
               "com.unity.burst": "1.8.30",
