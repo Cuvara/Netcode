@@ -102,7 +102,12 @@ namespace Cuvara.Netcode.Codec
                     return "{}";
 
                 case AuthRequest m:
-                    b.BeginObject().String("token", m.Token).EndObject();
+                    b.BeginObject().String("token", m.Token);
+                    // Omitted when 0, matching proto3's default-is-absent behaviour so the
+                    // two encodings carry the same information: absent means "did not
+                    // advertise", never "version zero".
+                    if (m.ProtocolVersion > 0) b.Number("protocol_version", (long)m.ProtocolVersion);
+                    b.EndObject();
                     return b.ToString();
 
                 case EnterWorldRequest m:
@@ -110,7 +115,9 @@ namespace Cuvara.Netcode.Codec
                     return b.ToString();
 
                 case JoinTokenRequest m:
-                    b.BeginObject().String("token", m.Token).EndObject();
+                    b.BeginObject().String("token", m.Token);
+                    if (m.ProtocolVersion > 0) b.Number("protocol_version", (long)m.ProtocolVersion);
+                    b.EndObject();
                     return b.ToString();
 
                 case InputMessage m:
@@ -162,7 +169,11 @@ namespace Cuvara.Netcode.Codec
                     {
                         Ok = payload.GetBool("ok"),
                         UserId = payload.GetString("user_id"),
-                        Error = payload.GetString("error")
+                        Error = payload.GetString("error"),
+                        // Absent leaves 0, which WireProtocolVersion reads as "this
+                        // gateway does not advertise" — the same meaning as an elided
+                        // proto3 field, so both encodings agree without a second rule.
+                        ProtocolVersion = payload.GetUInt("protocol_version")
                     };
 
                 case MsgType.EnterWorldResp:
@@ -180,7 +191,8 @@ namespace Cuvara.Netcode.Codec
                         Ok = payload.GetBool("ok"),
                         UserId = payload.GetString("user_id"),
                         Error = payload.GetString("error"),
-                        TickRate = payload.GetUInt("tick_rate")
+                        TickRate = payload.GetUInt("tick_rate"),
+                        ProtocolVersion = payload.GetUInt("protocol_version")
                     };
 
                 case MsgType.Snapshot:

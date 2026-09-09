@@ -100,13 +100,21 @@ namespace Cuvara.Netcode.Codec
                     return new Pb.ResyncRequest().ToByteArray();
 
                 case Msg.AuthRequest m:
-                    return new Pb.AuthRequest { Token = m.Token ?? string.Empty }.ToByteArray();
+                    return new Pb.AuthRequest
+                    {
+                        Token = m.Token ?? string.Empty,
+                        ProtocolVersion = m.ProtocolVersion,
+                    }.ToByteArray();
 
                 case Msg.EnterWorldRequest m:
                     return new Pb.EnterWorldRequest { MapId = m.MapId ?? string.Empty }.ToByteArray();
 
                 case Msg.JoinTokenRequest m:
-                    return new Pb.JoinTokenRequest { Token = m.Token ?? string.Empty }.ToByteArray();
+                    return new Pb.JoinTokenRequest
+                    {
+                        Token = m.Token ?? string.Empty,
+                        ProtocolVersion = m.ProtocolVersion,
+                    }.ToByteArray();
 
                 case Msg.InputMessage m:
                     return new Pb.InputMessage
@@ -148,7 +156,13 @@ namespace Cuvara.Netcode.Codec
                     case MsgType.AuthResp:
                     {
                         var m = Pb.AuthResponse.Parser.ParseFrom(bytes);
-                        return new Msg.AuthResponse { Ok = m.Ok, UserId = m.UserId, Error = m.Error };
+                        return new Msg.AuthResponse
+                        {
+                            Ok = m.Ok,
+                            UserId = m.UserId,
+                            Error = m.Error,
+                            ProtocolVersion = m.ProtocolVersion,
+                        };
                     }
 
                     case MsgType.EnterWorldResp:
@@ -166,7 +180,14 @@ namespace Cuvara.Netcode.Codec
                     case MsgType.JoinTokenResp:
                     {
                         var m = Pb.JoinTokenResponse.Parser.ParseFrom(bytes);
-                        return new Msg.JoinTokenResponse { Ok = m.Ok, UserId = m.UserId, Error = m.Error, TickRate = m.TickRate };
+                        return new Msg.JoinTokenResponse
+                        {
+                            Ok = m.Ok,
+                            UserId = m.UserId,
+                            Error = m.Error,
+                            TickRate = m.TickRate,
+                            ProtocolVersion = m.ProtocolVersion,
+                        };
                     }
 
                     case MsgType.Snapshot:

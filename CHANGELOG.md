@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Wire protocol version negotiation (`protocol_version`), client side.** The
+  package sniffed the *encoding* from byte 0 and called that settled — `EncodingSniffer`
+  said so in as many words: "there is no negotiation, no version field, and no extra
+  round trip." That is true of the encoding and says nothing about whether the two sides
+  agree on what the fields **mean**. A version-skewed build was not refused anywhere; it
+  connected, parsed every byte, and was confidently wrong about the world.
+
+  `Runtime/Protocol/WireProtocolVersion.cs` pins `Current = 1`, reserves `Unversioned = 0`,
+  and carries the rules. `AuthRequest` and `JoinTokenRequest` now advertise it **by
+  default**, so a caller cannot forget and silently be admitted on trust everywhere;
+  `AuthResponse` and `JoinTokenResponse` read the server's back. Both codecs carry the
+  field, and the JSON path omits a zero so the two encodings spell "did not advertise"
+  the same way.
+
+- **The client detects an OLD server, which is the one case the servers cannot report.**
+  A server predating the field ignores the version we send and answers without one, so a
+  `0` coming back is the client's only signal that nobody checked. `GatewayClient` and
+  `GameSessionClient` now expose `GatewayProtocolVersion` / `ServerProtocolVersion` and
+  **warn** on an unversioned peer. They do not refuse it: the servers' own shipping
+  default admits unversioned peers, and a client stricter than the servers would lock a
+  working fleet out of itself. But "nobody checked" must never look like "checked and
+  agreed" — that silence is the whole defect — so it is logged.
+
+### Changed
+
+- **`protocol_version_mismatch` is a PERMANENT failure, never retried.**
+  `KickReasons.ProtocolVersionMismatch` joins the closed reason set, and both
+  `ReconnectPolicy.IsPermanentServerError` and `NetworkClient.IsRetryable` now name it.
+  Previously an unrecognised server error was treated as transient — the right default
+  in general, and exactly wrong here: no number of retries turns this client into a
+  different build, so the reconnect budget would drain against a wall and the session
+  would end reporting "could not join", burying the one message that said what was
+  actually wrong.
+
+- **`Runtime/Protocol/Generated/Wire.cs` regenerated** from `wire.proto` for the four new
+  fields, byte-identical to the backend's committed copy (the CI drift gate compares
+  them). Note the ordering this implies: that job diffs against the backend's `develop`,
+  so it stays red until the matching backend change merges there. That is the gate
+  working, not a fault in this branch.
+
 ### Fixed
 
 - **The `## [0.35.0]` entry contradicted its own code in four places, and is corrected in place

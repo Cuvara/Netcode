@@ -131,6 +131,12 @@ namespace Cuvara.Netcode.Client
                 // Gateway enter_world_resp: no fleet in this deployment hosts the
                 // map. Not "full" and not "starting" — it does not exist here.
                 case "map is not available":
+                // Either hop, refusing a client whose wire protocol version it cannot
+                // serve. This is the one failure in the set that no amount of time
+                // fixes: the client needs a different BUILD, not another attempt.
+                // Retrying spends the budget and then reports "could not join",
+                // burying the only message that said what was actually wrong.
+                case KickReasons.ProtocolVersionMismatch:
                     return true;
 
                 default:
