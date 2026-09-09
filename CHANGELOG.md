@@ -49,6 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JoinTokenResponse` through the client's version rule, including the named
   `protocol_version_mismatch` refusal.
 
+### Fixed
+
+- **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
+  vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
+  `simkill_target_survives_high_defense`) were added server-side in `4eb0ba5` and sat in
+  `Shared.GameLogic`'s `[Unreleased]` where no client ever saw them; **`sgl-v0.4.0` is the
+  first tag to release them**, and the client runner refused the unknown kind — correctly,
+  and loudly, which is how the gap was found at all.
+
+  The kind is implemented against the same `CombatLogic` calls the other kinds use, and
+  mirrors the server's runner line for line, including the ordering: the attacker strikes
+  and the target's death is resolved, *then* the target strikes back from its
+  post-damage state. That ordering is the substance of the case — reversing it, or
+  resolving both deaths at the end, gives different answers whenever the first blow is
+  lethal, and "does a dead entity still swing" is exactly what a simultaneous-kill vector
+  exists to pin down rather than leave to each side's intuition. All four outcomes are
+  asserted for **both** entities; an attacker-only check would pass while the two sides
+  disagreed about whether the target survived.
+
+  The unknown-kind branch is unchanged and still fails loudly. No tolerance for unknown
+  kinds was added — a runner that skips what it does not recognise would have hidden this
+  instead of reporting it.
+
 ### Changed
 
 - **The decode path never fabricates a value for either field.** A zero rides through the
