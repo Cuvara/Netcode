@@ -5468,3 +5468,4 @@ untouched and JSON stays the default — but none of that is a patch.
 - `WorldState` and `NetworkEndpoint` unit tests
 - Wire conformance tool (`Tools/WireConformance/`)
 - Package extracted from `Assets/Scripts/Net/` into standalone UPM package
+
