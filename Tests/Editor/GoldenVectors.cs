@@ -206,6 +206,22 @@ namespace Cuvara.Netcode.Tests.Editor
         public bool expectedValid;
 
         public string expectedErrorPrefix;
+
+        // --- simultaneous_kill ---
+        //
+        // Both parties take damage in one exchange and both may die. Separate fields
+        // rather than reusing the damage/death ones above, because this kind needs BOTH
+        // entities' inputs and outputs at once and the existing fields describe only one
+        // side. Unity's JsonUtility leaves a field absent from a case at its default, so
+        // the other kinds are unaffected by their presence.
+        public int attackerHp;
+        public int targetHp;
+        public int targetAttack;
+        public int attackerDefense;
+        public int expectedAttackerHp;
+        public int expectedTargetHp;
+        public bool expectedAttackerDead;
+        public bool expectedTargetDead;
     }
 
     [Serializable]

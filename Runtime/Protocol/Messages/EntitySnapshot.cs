@@ -49,5 +49,32 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// old server pins a predicted speed to zero and the local player stops moving.
         /// </remarks>
         public float Speed { get; set; }
+
+        /// <summary>
+        /// Facing as 16-bit binary radians BIASED BY ONE: 0 means "not sent", and a real
+        /// facing is <c>(FacingBrad - 1) * 2*PI / 65536</c> radians counter-clockwise
+        /// from +X. Decode with <see cref="Cuvara.Netcode.Protocol.FacingCodec"/>.
+        /// </summary>
+        /// <remarks>
+        /// <b>Zero means "not sent", not "facing east".</b> The +1 bias exists precisely
+        /// so those two are distinguishable: 0.0 radians is a perfectly ordinary facing,
+        /// so a plain float would make them identical bytes under proto3's zero elision —
+        /// the trap <see cref="Speed"/> has to document its way around. Keep the entity's
+        /// last known facing, or derive one from its movement; snapping to east means
+        /// every entity from an old server points the same way.
+        /// </remarks>
+        public uint FacingBrad { get; set; }
+
+        /// <summary>
+        /// What the entity is doing, for animation selection.
+        /// </summary>
+        /// <remarks>
+        /// <b><see cref="Shared.GameLogic.Components.EntityAction.Unspecified"/> (0)
+        /// means "not sent", never "idle"</b> — idle is 1. Keep whatever was being shown
+        /// rather than falling back to idle, or a server predating the field freezes
+        /// every entity in the world into an idle pose, which looks like a broken
+        /// animator rather than a missing field.
+        /// </remarks>
+        public Shared.GameLogic.Components.EntityAction Action { get; set; }
     }
 }

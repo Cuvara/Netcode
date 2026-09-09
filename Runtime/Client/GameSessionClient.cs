@@ -64,6 +64,13 @@ namespace Cuvara.Netcode.Client
         /// </remarks>
         public uint TickRate { get; private set; }
 
+        /// <summary>
+        /// The wire protocol version the game server reported on the last successful
+        /// join. Zero means it advertised none, i.e. it predates the field and never
+        /// checked ours.
+        /// </summary>
+        public uint ServerProtocolVersion { get; private set; }
+
         /// <summary>Server tick of the newest snapshot applied. Never moves backwards.</summary>
         public long ServerTick { get; private set; }
 
@@ -116,7 +123,13 @@ namespace Cuvara.Netcode.Client
                 // The join token must be the very first frame; the game server
                 // rejects anything else outright.
                 await connection.SendFrameAsync(
-                    MsgType.JoinToken, new JoinTokenRequest { Token = assignment.JoinToken }, timeout.Token);
+                    MsgType.JoinToken,
+                    new JoinTokenRequest
+                    {
+                        Token = assignment.JoinToken,
+                        ProtocolVersion = WireProtocolVersion.Current,
+                    },
+                    timeout.Token);
 
                 var frame = await connection.ReceiveFrameAsync(timeout.Token);
                 if (frame == null)
@@ -133,6 +146,30 @@ namespace Cuvara.Netcode.Client
                 if (!response.Ok)
                 {
                     throw new NetworkException($"game server refused the join: {response.Error}", response.Error);
+                }
+
+                // Checked independently of the gateway hop (ADR-3: two connections,
+                // two separately deployed processes). It is THIS hop that a version
+                // disagreement corrupts, because the snapshot stream is where a
+                // misparse turns into a wrong world.
+                ServerProtocolVersion = response.ProtocolVersion;
+                if (WireProtocolVersion.IsUnversioned(response.ProtocolVersion))
+                {
+                    _log.Warn(
+                        "game server did not advertise a wire protocol version; this client speaks " +
+                        WireProtocolVersion.Current +
+                        " and the agreement is unverified (the server predates the field)");
+                }
+                else if (!WireProtocolVersion.IsCompatible(response.ProtocolVersion))
+                {
+                    // Defence in depth: the server should already have refused us. If
+                    // it accepted a version it does not speak, we disagree and it did
+                    // not notice — refuse rather than start merging snapshots whose
+                    // fields we may be reading as something else.
+                    throw new NetworkException(
+                        $"game server speaks wire protocol version {response.ProtocolVersion}, " +
+                        $"this client speaks {WireProtocolVersion.Current}",
+                        KickReasons.ProtocolVersionMismatch);
                 }
 
                 UserId = response.UserId;

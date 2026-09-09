@@ -26,7 +26,7 @@
     "jp.hadashikick.vcontainer": "1.16.8 — enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
   },
   "x-manualDependencies": {
-    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0"
+    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1"
   },
   "samples": [
     {
@@ -73,6 +73,11 @@
       "displayName": "KCP Probe",
       "description": "Two KCP state machines back-to-back, no server, no network. Sends messages through the ARQ with configurable packet loss and renders the results on screen: reliable delivery, fragmentation/reassembly, and retransmission under loss — all visible rather than read about.",
       "path": "Samples~/KcpProbe"
+    },
+    {
+      "displayName": "Facing and Protocol Version",
+      "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder: three capsules orbit a ring and point along their direction of travel, and that direction arrives only in facing_brad \u2014 nothing in the scene derives it from movement. Press 'Stop sending facing' and they keep moving and stop turning, holding the last heading instead of snapping to east, which is the 'zero means not sent' rule made visible and the reason facing is a biased integer rather than a float. Three buttons also run a real JoinTokenResponse through the client's version rule: a matching server is admitted, a skewed one is refused with the named reason protocol_version_mismatch and marked permanent, and one that advertises nothing is admitted on trust and says so.",
+      "path": "Samples~/FacingAndVersion"
     }
   ],
   "testables": [

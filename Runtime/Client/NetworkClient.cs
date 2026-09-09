@@ -476,6 +476,10 @@ namespace Cuvara.Netcode.Client
                 // strings): this connection will keep giving the same answer.
                 case "session expired":
                 case "rate limited":
+                // A version refusal from either hop. Not retryable by construction:
+                // the client would have to be a different build for the answer to
+                // change, so every retry is a guaranteed-identical refusal.
+                case KickReasons.ProtocolVersionMismatch:
                     return false;
                 default:
                     return true;

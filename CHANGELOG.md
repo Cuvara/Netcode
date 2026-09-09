@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-entity facing and action state (`facing_brad`, `action`), client side.** The
+  snapshot carried no orientation and no animation state at all, so a character could not
+  be turned to face the way it was walking without a schema change across both repos.
+  `EntitySnapshot`, `ResolvedEntity` and the merger adapter now carry both;
+  `Runtime/Protocol/FacingCodec.cs` decodes them.
+
+- **`IEntityPoseView` — a new OPTIONAL companion to `IEntityView`.** A view that wants to
+  render facing implements it alongside `IEntityView`; `WorldViewBinder` resolves it once
+  at construction (not per entity per frame) and calls `SetPose` beside every `SetState`.
+  `GameObjectEntityView` implements it and applies the facing as a Y rotation via
+  `FacingCodec.TryToUnityYaw`, which does the frame conversion (server angle is CCW from
+  +X; Unity's Y rotation is CW from +Z) — getting that wrong yields a mirrored or
+  quarter-turned world that still animates smoothly and survives a casual look, so it is
+  a named function with a test rather than an inline constant.
+
+  **`IEntityView` itself is unchanged — byte-identical to the previous release.** An
+  earlier revision of this branch instead widened `IEntityView.SetState` from five
+  arguments to seven. That compiled here and broke `com.cuvara.dots`, a separate package
+  in a separate repository, whose assembly could not even *name* `EntityAction` — so the
+  widening silently billed a sibling package a new assembly reference for a feature it
+  had not asked for. That package had already written the rule down, about its own
+  `SetStateAtTick`: *"Not part of IEntityView, and it cannot be. That interface is
+  netcode's ... widening it would make every GameObject view in every consumer implement
+  a method it has no use for."* `IEntityView`'s own remarks and a past `WorldViewBinder`
+  decision say the same thing. The interface is a cross-package contract, and the cost of
+  adding to it is paid by packages that never see the commit.
+
+  With the split, a view that does not care about facing needs no change at all — not a
+  stub, not a reference, not a recompile. `AViewWithoutThePoseInterfaceStillWorks` pins
+  that guarantee, because nothing in this repository could otherwise see it break.
+
+- **`Samples~/FacingAndVersion`** — one scene covering both wire changes, with **no
+  server and no network** (the `InterpolationProbe` / `ClockSyncProbe` shape). Capsules
+  orbit a ring pointing along their direction of travel, driven only by `facing_brad`
+  through the real codec, resolver, merger and binder. "Stop sending facing" withholds
+  the field and they keep moving while holding their last heading instead of snapping to
+  east — the "zero means not sent" rule made visible. Three buttons run a real
+  `JoinTokenResponse` through the client's version rule, including the named
+  `protocol_version_mismatch` refusal.
+
+### Fixed
+
+- **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
+  vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
+  `simkill_target_survives_high_defense`) were added server-side in `4eb0ba5` and sat in
+  `Shared.GameLogic`'s `[Unreleased]` where no client ever saw them; **`sgl-v0.4.0` is the
+  first tag to release them**, and the client runner refused the unknown kind — correctly,
+  and loudly, which is how the gap was found at all.
+
+  The kind is implemented against the same `CombatLogic` calls the other kinds use, and
+  mirrors the server's runner line for line, including the ordering: the attacker strikes
+  and the target's death is resolved, *then* the target strikes back from its
+  post-damage state. That ordering is the substance of the case — reversing it, or
+  resolving both deaths at the end, gives different answers whenever the first blow is
+  lethal, and "does a dead entity still swing" is exactly what a simultaneous-kill vector
+  exists to pin down rather than leave to each side's intuition. All four outcomes are
+  asserted for **both** entities; an attacker-only check would pass while the two sides
+  disagreed about whether the target survived.
+
+  The unknown-kind branch is unchanged and still fails loudly. No tolerance for unknown
+  kinds was added — a runner that skips what it does not recognise would have hidden this
+  instead of reporting it.
+
+### Changed
+
+- **The decode path never fabricates a value for either field.** A zero rides through the
+  codec and the resolver untouched, because whether to hold the last known facing or
+  derive one is a presentation decision and belongs where the context is. In the view
+  binder both are SNAPPED, never interpolated — action more strongly than facing, since a
+  blend between two enum values is not a state the server ever occupied.
+
+
+- **Wire protocol version negotiation (`protocol_version`), client side.** The
+  package sniffed the *encoding* from byte 0 and called that settled — `EncodingSniffer`
+  said so in as many words: "there is no negotiation, no version field, and no extra
+  round trip." That is true of the encoding and says nothing about whether the two sides
+  agree on what the fields **mean**. A version-skewed build was not refused anywhere; it
+  connected, parsed every byte, and was confidently wrong about the world.
+
+  `Runtime/Protocol/WireProtocolVersion.cs` pins `Current = 1`, reserves `Unversioned = 0`,
+  and carries the rules. `AuthRequest` and `JoinTokenRequest` now advertise it **by
+  default**, so a caller cannot forget and silently be admitted on trust everywhere;
+  `AuthResponse` and `JoinTokenResponse` read the server's back. Both codecs carry the
+  field, and the JSON path omits a zero so the two encodings spell "did not advertise"
+  the same way.
+
+- **The client detects an OLD server, which is the one case the servers cannot report.**
+  A server predating the field ignores the version we send and answers without one, so a
+  `0` coming back is the client's only signal that nobody checked. `GatewayClient` and
+  `GameSessionClient` now expose `GatewayProtocolVersion` / `ServerProtocolVersion` and
+  **warn** on an unversioned peer. They do not refuse it: the servers' own shipping
+  default admits unversioned peers, and a client stricter than the servers would lock a
+  working fleet out of itself. But "nobody checked" must never look like "checked and
+  agreed" — that silence is the whole defect — so it is logged.
+
+### Changed
+
+- **`protocol_version_mismatch` is a PERMANENT failure, never retried.**
+  `KickReasons.ProtocolVersionMismatch` joins the closed reason set, and both
+  `ReconnectPolicy.IsPermanentServerError` and `NetworkClient.IsRetryable` now name it.
+  Previously an unrecognised server error was treated as transient — the right default
+  in general, and exactly wrong here: no number of retries turns this client into a
+  different build, so the reconnect budget would drain against a wall and the session
+  would end reporting "could not join", burying the one message that said what was
+  actually wrong.
+
+- **`Runtime/Protocol/Generated/Wire.cs` regenerated** from `wire.proto` for the four new
+  fields, byte-identical to the backend's committed copy (the CI drift gate compares
+  them). Note the ordering this implies: that job diffs against the backend's `develop`,
+  so it stays red until the matching backend change merges there. That is the gate
+  working, not a fault in this branch.
+
 ### Fixed
 
 - **The `## [0.35.0]` entry contradicted its own code in four places, and is corrected in place
