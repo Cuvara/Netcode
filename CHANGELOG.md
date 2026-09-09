@@ -120,6 +120,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them). Note the ordering this implies: that job diffs against the backend's `develop`,
   so it stays red until the matching backend change merges there. That is the gate
   working, not a fault in this branch.
+- **`AOI Visibility Probe` sample** — a synthetic world (no server, no network) that makes
+  the game server's new AOI spatial index observable the only way it can be: through what a
+  player would actually see. One observer with a radius over hundreds to thousands of
+  entities, with the visible set computed twice per frame — once by
+  `AoiLogic.GetNearbyEntities` (the shared rule the client predicts with, used here as the
+  oracle) and once by narrowing with a uniform grid mirroring the server's `SpatialGrid` —
+  and the two answers compared live.
+
+  The headline readout is the **mismatch counter**, current and worst-seen, because that is
+  the failure that matters: an index that drops one entity does not throw or log, it renders
+  a monster that is not there. The scene also shows entities-in-view versus total, the
+  radius, how many entities each strategy had to examine for the identical answer, and
+  whether the server's occupancy gate would use its index at the current density — drag the
+  world size down until the population clumps and the gate visibly switches back to the
+  plain scan.
+
+  Reports entities examined rather than milliseconds: an Editor frame is dominated by
+  rendering, so a timing here would measure the host rather than the algorithm. Real
+  timings live in the server's committed `AoiIndexBench`. UI Toolkit throughout, with the
+  world painted via `Painter2D` rather than built from elements, so entity count does not
+  turn into layout cost.
 
 ### Fixed
 

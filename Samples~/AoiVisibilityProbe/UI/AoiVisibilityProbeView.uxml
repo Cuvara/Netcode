@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="AoiVisibilityProbeView.uss" />
+
+    <engine:VisualElement name="aoi-probe" class="cuvara-probe">
+
+        <!-- The world itself, painted with Painter2D from the component. It is a sibling
+             *behind* the panel rather than a parent of it, so the panel never inherits the
+             canvas's picking or layout. -->
+        <engine:VisualElement name="world-canvas" class="cuvara-probe__canvas" picking-mode="Ignore" />
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Area-of-interest visibility probe" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="Synthetic world, no server, no network. One observer, one radius. The visible set is computed twice every frame — once by the plain scan every entity goes through, once by narrowing with a uniform grid first — and the two answers are compared. Narrowing the search must not change the answer; the mismatch counter is the claim." />
+
+            <engine:VisualElement class="cuvara-probe__legend">
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--visible" />
+                <engine:Label text="in view" class="cuvara-probe__legend-text" />
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--hidden" />
+                <engine:Label text="out of view" class="cuvara-probe__legend-text" />
+                <engine:VisualElement class="cuvara-probe__swatch cuvara-probe__swatch--observer" />
+                <engine:Label text="observer + radius" class="cuvara-probe__legend-text" />
+            </engine:VisualElement>
+
+            <engine:Label text="What the player sees" class="cuvara-probe__section" />
+            <engine:Label name="visibility-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="What it cost to work that out" class="cuvara-probe__section" />
+            <engine:Label name="work-line" class="cuvara-probe__readout" />
+            <engine:Label name="gate-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
+
+            <engine:Label text="World" class="cuvara-probe__section" />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="Entities" class="cuvara-probe__control-label" />
+                <engine:Slider name="entity-count" class="cuvara-probe__slider" />
+                <engine:Label name="entity-count-value" class="cuvara-probe__slider-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="World size" class="cuvara-probe__control-label" />
+                <engine:Slider name="world-size" class="cuvara-probe__slider" />
+                <engine:Label name="world-size-value" class="cuvara-probe__slider-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Label text="AOI radius" class="cuvara-probe__control-label" />
+                <engine:Slider name="aoi-radius" class="cuvara-probe__slider" />
+                <engine:Label name="aoi-radius-value" class="cuvara-probe__slider-value" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="reset" text="Reset world"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Toggle name="pause" text="Pause" class="cuvara-probe__toggle" />
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>
