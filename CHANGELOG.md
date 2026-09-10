@@ -5,6 +5,46 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.1] - 2026-09-11
+
+### Fixed
+- **A read already waiting on the socket ignored cancellation, so no timeout above it could
+  fire.** `NetworkStream.ReadAsync` accepts a `CancellationToken` and ignores it once the
+  read is pending; `SslStream` inherits that. `TcpTransport` passed the token and assumed it
+  worked, so `ReadFrameAsync` was **uncancellable** — and because
+  `NetworkSettings.ConnectTimeout` is a token, everything built on it was too.
+
+  The consequence reached the shipped client: `GatewayClient.AuthenticateAsync` wraps
+  connect, send and the reply read in one `ConnectTimeout`, so a client whose gateway never
+  answers hung **indefinitely** rather than for ten seconds. A plaintext client against a
+  TLS gateway is exactly that case, and it is how this was found — a play-mode test asked
+  for a 3-second budget and sat until the test runner killed it at **180 seconds**.
+
+  `TcpTransport` now closes the socket when the token fires, which is the only thing that
+  ends a pending socket read, and translates the resulting failure back into the
+  `OperationCanceledException` the caller asked for — so a timeout does not read as a peer
+  that hung up. Verified in play mode against a real `SslStream` listener: the same case
+  now returns at its 3-second budget, and the four other cases are unchanged.
+
+- **"The mismatch is loud" was wrong in one direction, and 0.36.0 shipped it as a claim in
+  three places.** A *plaintext* client against a *TLS* gateway is not refused: the TCP
+  connect succeeds — TLS is above it — and then both ends wait, the client to read a frame
+  and the gateway for a ClientHello a plaintext client never sends. Measured in a Unity
+  play-mode run, where it sat until the test runner's own **180-second** limit.
+
+  It is **bounded, not loud**, and only because `GatewayClient` wraps connect, send **and
+  the reply read** in one `NetworkSettings.ConnectTimeout` (10 s by default). A caller
+  driving `TcpTransport` directly gets no bound at all. So a client shipped with TLS off
+  against a TLS gateway reports a connect timeout, not "TLS is off", and the log sends the
+  reader looking for a network problem.
+
+  `Documentation~/NETCODE.md`, the sample README and the sample scene now say that. The
+  scene's fourth case gets its own 2-second budget and counts the stall as the expected
+  outcome — as shipped in 0.36.0 it would have sat on that case and then reported it as a
+  surprise, which is a scene that cries wolf about the one behaviour it exists to describe.
+
+  The other direction is unchanged and is loud: client on / gateway off throws immediately.
+
 ## [0.36.0] - 2026-09-10
 
 ### Added

@@ -25,7 +25,7 @@ certificate connecting would pass on a client where TLS is worthless.
 | TLS + pinned certificate | **connects**, and a frame round-trips |
 | TLS, no pin — platform trust store decides | **refused**: the certificate is self-signed |
 | TLS client → plaintext gateway | **refused**: never a silent downgrade |
-| plaintext client → TLS gateway | **no usable frame**: the mismatch is loud |
+| plaintext client → TLS gateway | **no frame**: it stalls, and a timeout is the shape of it |
 | factory asked for `TcpTls` with no `TlsOptions` | **throws**, rather than returning cleartext |
 
 The last one is not a network case at all — it is the code path where "TLS requested" could
@@ -58,6 +58,16 @@ the log names which case and what happened.
   here is *expected to fail*, because the test certificate is self-signed. Against a real
   gateway with a publicly-trusted certificate the same case is expected to succeed — and if
   it does not, that is a finding about the device's trust store.
+- **That a client/gateway mismatch is caught quickly in one direction.** A *plaintext*
+  client against a *TLS* gateway is not refused at all: the TCP connect succeeds — TLS is
+  above it — and then both ends wait, the client to read a frame and the server for a
+  ClientHello that never comes. Measured in a Unity play-mode run, where it sat until the
+  test runner's own 180-second limit. It is **bounded, not loud** — bounded by
+  `NetworkSettings.ConnectTimeout` (10 s by default), which `GatewayClient` applies to
+  connect, send and the reply read alike. Before 0.36.1 it was not bounded at all: a socket
+  read already waiting is not interrupted by cancelling a token, so the timeout could not
+  fire. `TcpTransport` now closes the socket when the token fires.
+
 - **Anything about Android.** The server repo's probe measured a Windows IL2CPP player at
   both Minimal and High stripping; Android is a separate answer, unmeasured.
 
