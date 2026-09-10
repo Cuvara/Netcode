@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="SealedSessionProbeView.uss" />
+
+    <engine:VisualElement name="sealed-probe" class="cuvara-probe">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Sealed session probe" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="Two peers in one process. No server, no network, no sockets. They run the real ADR-22 exchange — X25519 over the join token's jti, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame with the sequence as the nonce — and every frame's bytes are shown before and after. The buttons are the point: each one is an attack, and each must be refused." />
+
+            <engine:Label text="Handshake" class="cuvara-probe__section" />
+            <engine:Label name="handshake-line" class="cuvara-probe__readout" />
+            <engine:Label name="keys-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
+
+            <engine:Label text="The frame on the wire" class="cuvara-probe__section" />
+            <engine:Label text="plaintext the game wrote" class="cuvara-probe__caption" />
+            <engine:Label name="plain-line" class="cuvara-probe__hex cuvara-probe__hex--plain" />
+            <engine:Label text="bytes a capture would show" class="cuvara-probe__caption" />
+            <engine:Label name="cipher-line" class="cuvara-probe__hex" />
+            <engine:Label name="overhead-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
+
+            <engine:Label text="Traffic" class="cuvara-probe__section" />
+            <engine:Label name="traffic-line" class="cuvara-probe__readout" />
+            <engine:Label name="refused-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="Attacks — every one of these must be refused" class="cuvara-probe__section" />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="tamper" text="Flip one bit in flight"
+                               class="cuvara-probe__button" />
+                <engine:Button name="replay" text="Replay the last frame"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="forged-header" text="Replay the header, garbage body"
+                               class="cuvara-probe__button" />
+                <engine:Button name="cleartext" text="Send a cleartext Envelope"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="wrong-secret" text="Peer with the wrong JOIN_TOKEN_SECRET"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Button name="mitm" text="Man in the middle swaps a key"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="rehandshake" text="New session"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Toggle name="pause" text="Pause traffic" class="cuvara-probe__toggle" />
+            </engine:VisualElement>
+
+            <engine:Label name="last-attack" class="cuvara-probe__readout" />
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

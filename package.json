@@ -87,8 +87,13 @@
     },
     {
       "displayName": "Facing and Protocol Version",
-      "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder: three capsules orbit a ring and point along their direction of travel, and that direction arrives only in facing_brad \u2014 nothing in the scene derives it from movement. Press 'Stop sending facing' and they keep moving and stop turning, holding the last heading instead of snapping to east, which is the 'zero means not sent' rule made visible and the reason facing is a biased integer rather than a float. Three buttons also run a real JoinTokenResponse through the client's version rule: a matching server is admitted, a skewed one is refused with the named reason protocol_version_mismatch and marked permanent, and one that advertises nothing is admitted on trust and says so.",
+      "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder: three capsules orbit a ring and point along their direction of travel, and that direction arrives only in facing_brad — nothing in the scene derives it from movement. Press 'Stop sending facing' and they keep moving and stop turning, holding the last heading instead of snapping to east, which is the 'zero means not sent' rule made visible and the reason facing is a biased integer rather than a float. Three buttons also run a real JoinTokenResponse through the client's version rule: a matching server is admitted, a skewed one is refused with the named reason protocol_version_mismatch and marked permanent, and one that advertises nothing is admitted on trust and says so.",
       "path": "Samples~/FacingAndVersion"
+    },
+    {
+      "displayName": "Sealed Session Probe",
+      "description": "Two peers in one process running ADR-22's transport crypto for real — no server, no network, no sockets. Fresh X25519 ephemerals authenticated by a join-token-derived binding, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame with the sequence as the nonce. Every frame is shown twice: the plaintext the game wrote, and the bytes a capture would get. Six buttons each mount an attack that must be refused — a flipped bit, a byte-perfect replay, a replayed header with a garbage body (the counter must not move), a cleartext Envelope, a peer with the wrong JOIN_TOKEN_SECRET, and a man in the middle who swaps an ephemeral key. It does NOT prove the shipped client uses any of this; the framing is not yet wired into GameSessionClient.",
+      "path": "Samples~/SealedSessionProbe"
     }
   ],
   "testables": [
