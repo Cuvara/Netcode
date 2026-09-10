@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`GameSessionClient` runs the sealed handshake when `NetworkSettings.RequireSealedSession`
+  is on.** After the join reply and before `Start`, so no frame is ever written half-sealed —
+  the same place the server runs its half. This is the last piece: a Unity client can now join
+  a game server running with sealing required.
+
+  Defaults to **off**, matching the server's own `SealedRequirement.Disabled`, so no existing
+  deployment changes behaviour.
+
+- **A configuration mismatch fails with a message naming the cause, instead of hanging.**
+  ADR-22 forbids negotiation — a protocol that can be talked down to cleartext will be — so
+  neither side asks the other what it supports, and client-on/server-off means no hello is
+  ever coming. `SealedHandshakeTimeout` (5 s, separate from `ConnectTimeout` because the
+  server answers immediately or not at all) turns that silence into:
+
+  > *timed out waiting for the server's sealed hello. The likeliest cause is a configuration
+  > mismatch: NetworkSettings.RequireSealedSession is on and the game server is not running
+  > with sealing required.*
+
+- **`JoinTokenClaims.TryReadJti` — reads the join token's `jti` WITHOUT verifying it.** The
+  handshake needs it as an HKDF salt. A client holds no key that could verify a join token, so
+  every value it returns is an unverified claim; safe here only because a wrong `jti` derives
+  keys the server cannot match, so it can only *fail*, never grant. A test pins that an invalid
+  signature is deliberately not detected, so nobody later "fixes" the class by adding a
+  verification it has no key to perform.
+
+- **The client logs, once per join, that the server's binding was not verified.** Not a
+  warning about a defect — it is the shipped state until ADR-22's pinned gateway identity key
+  lands, and it is logged so that *"the session is encrypted"* is never read as *"the server is
+  authenticated"*.
+
+### Fixed
+
+- **A test that passed with the code deleted.** `JoinTokenClaimsTests` was built on a token
+  minted by the real backend signer, which is the right instinct and was not enough: a mutation
+  removing the base64url alphabet substitution entirely left all eleven tests green.
+
+  The reason turned out to be structural rather than luck. Base64 emits `+` or `/` — the two
+  characters base64url replaces — only from a 6-bit group of value 62 or 63, and with
+  pure-ASCII input that can only arise from a byte at index ≡ 2 (mod 3) being `>`, `?` or `~`.
+  Verified exhaustively across every printable ASCII byte at all three positions, and measured
+  against the signer: **0 of 20,000 real join tokens** have either character in the claims
+  segment, while 720 of 1,000 have one in the *signature* segment — which the client never
+  decodes.
+
+  So the substitution is required by RFC 7515, is correct, and was untested. A synthetic token
+  now exercises it, and says in its own remarks why it has to be synthetic.
+
 - **`SealedHandshakeClient` and the sealing seam on `WireConnection`.** A Unity client can
   now complete the sealed handshake and speak a sealed session. `RunAsync` writes the hello,
   reads the reply, and installs both one-direction sessions; everything written afterwards is
