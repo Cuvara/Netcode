@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Crypto;
 using Cuvara.Netcode.Protocol;

@@ -9,7 +9,9 @@ using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Crypto;
+using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Protocol;
+using Cuvara.Netcode.Transport;
 using Msg = Cuvara.Netcode.Protocol.Messages;
 
 namespace Cuvara.Netcode.Tests.Editor
