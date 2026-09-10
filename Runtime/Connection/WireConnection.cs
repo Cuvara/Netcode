@@ -48,6 +48,11 @@ namespace Cuvara.Netcode.Connection
         private readonly INetLog _log;
         private readonly string _name;
 
+        // Null until the sealed handshake installs them. Once installed they are never
+        // removed: a session that has been sealed must not be talked back down to cleartext.
+        private Crypto.SealedSession _sealedOutbound;
+        private Crypto.SealedSession _sealedInbound;
+
         private readonly ConcurrentQueue<byte[]> _sendQueue = new ConcurrentQueue<byte[]>();
         private readonly SemaphoreSlim _sendSignal = new SemaphoreSlim(0);
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
@@ -119,13 +124,56 @@ namespace Cuvara.Netcode.Connection
         /// <summary>How the connection ended, once it has.</summary>
         public DisconnectInfo? CloseInfo { get; private set; }
 
+        /// <summary>Whether every frame on this connection is sealed.</summary>
+        public bool IsSealed { get { return _sealedOutbound != null; } }
+
+        /// <summary>Refusals on the inbound sealed session, by cause. Zero when not sealed.</summary>
+        public ulong SealedRejectedTotal { get { return _sealedInbound == null ? 0UL : _sealedInbound.RejectedTotal; } }
+
+        /// <summary>
+        /// Install the two one-direction sealed sessions. Everything written afterwards is
+        /// sealed and everything read afterwards must be.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Call once, from the sealed handshake, before <see cref="Start"/>. Installing
+        /// after the loops are running would seal mid-stream and leave the peer's counter
+        /// out of step with ours.
+        /// </para>
+        /// <para>
+        /// <b>There is no uninstall, deliberately.</b> A connection that can revert to
+        /// cleartext is a connection an attacker can talk down to cleartext, which is the
+        /// whole reason the sealed handshake has no negotiation and no fallback.
+        /// </para>
+        /// </remarks>
+        public void InstallSealedSession(Crypto.SealedSession inbound, Crypto.SealedSession outbound)
+        {
+            if (inbound == null) throw new ArgumentNullException(nameof(inbound));
+            if (outbound == null) throw new ArgumentNullException(nameof(outbound));
+
+            RequireHandshakePhase();
+
+            if (_sealedOutbound != null)
+                throw new InvalidOperationException($"{_name}: sealed session already installed");
+
+            _sealedInbound = inbound;
+            _sealedOutbound = outbound;
+        }
+
+        /// <summary>Seal an encoded body if this connection is sealed; otherwise pass it through.</summary>
+        private byte[] SealIfNeeded(byte[] body)
+        {
+            var session = _sealedOutbound;
+            return session == null ? body : session.Seal(body);
+        }
+
         // ─────────────────────────── handshake phase ───────────────────────────
 
         /// <summary>Writes one frame directly. Legal only before <see cref="Start"/>.</summary>
         public async UniTask SendFrameAsync(MsgType type, IWireMessage payload, CancellationToken cancellationToken)
         {
             RequireHandshakePhase();
-            var body = _outbound.EncodeBody(type, payload);
+            var body = SealIfNeeded(_outbound.EncodeBody(type, payload));
             await _transport.WriteFrameAsync(body, cancellationToken);
         }
 
@@ -179,7 +227,7 @@ namespace Cuvara.Netcode.Connection
             byte[] body;
             try
             {
-                body = _outbound.EncodeBody(type, payload);
+                body = SealIfNeeded(_outbound.EncodeBody(type, payload));
             }
             catch (WireCodecException ex)
             {
@@ -378,6 +426,8 @@ namespace Cuvara.Netcode.Connection
 
         private WireFrame DecodeInbound(byte[] body)
         {
+            body = UnsealIfNeeded(body);
+
             var encoding = EncodingSniffer.Sniff(body);
             switch (encoding)
             {
@@ -391,6 +441,42 @@ namespace Cuvara.Netcode.Connection
                     throw new WireCodecException(
                         $"frame body starts with 0x{body[0]:X2}, which is neither JSON nor Protobuf");
             }
+        }
+
+        /// <summary>
+        /// Open a sealed body, or throw. Once sealed, a cleartext frame is an attack, not a
+        /// message.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Both failures throw the same exception and the caller kills the session.</b>
+        /// The peer must not learn which one it was: distinguishing "the tag did not verify"
+        /// from "that was a replay" tells an attacker whether a forged frame reached the
+        /// replay window.
+        /// </para>
+        /// <para>
+        /// <b><c>NotSealed</c> throws too, and that is the downgrade defence.</b> Accepting a
+        /// cleartext Envelope after the handshake would let anyone who can inject one frame
+        /// speak to this client unauthenticated — the sealing would still be running, and
+        /// the session would look perfectly healthy the whole time. There is no reading of
+        /// a cleartext frame here that is not either an attack or a broken peer, and the
+        /// answer to both is the same.
+        /// </para>
+        /// </remarks>
+        private byte[] UnsealIfNeeded(byte[] body)
+        {
+            var session = _sealedInbound;
+            if (session == null) return body;
+
+            byte[] plaintext;
+            Crypto.SealedOpenResult result = session.Open(body, out plaintext);
+            if (result == Crypto.SealedOpenResult.Ok) return plaintext;
+
+            throw new WireCodecException(
+                result == Crypto.SealedOpenResult.NotSealed
+                    ? "a cleartext frame arrived on a sealed session; refusing it rather than " +
+                      "accepting a downgrade"
+                    : "a sealed frame was refused");
         }
 
         /// <summary>
