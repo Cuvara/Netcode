@@ -18,7 +18,8 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "nunit.framework.dll",
-        "BouncyCastle.Cryptography.dll"
+        "BouncyCastle.Cryptography.dll",
+        "Google.Protobuf.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [
