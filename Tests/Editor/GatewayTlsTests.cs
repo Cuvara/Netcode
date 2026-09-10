@@ -63,6 +63,31 @@ namespace Cuvara.Netcode.Tests.Editor
             }
         }
 
+        /// <summary>
+        /// Starts the dial and swallows the failure, because the failure is not the subject:
+        /// <see cref="NeverTransport"/> never connects, and the transport KIND has already
+        /// been requested from the factory by the time it says so.
+        /// </summary>
+        /// <remarks>
+        /// Synchronous on purpose. <c>Assert.That(async () =&gt; await …, Throws.Exception)</c>
+        /// looks right and does not work here: <c>AuthenticateAsync</c> returns a
+        /// <c>UniTask</c>, not a <c>Task</c>, so the lambda binds to NUnit's void
+        /// <c>TestDelegate</c> and becomes <c>async void</c> — the exception is never
+        /// observed by the constraint and escapes to fail the test instead. Caught by CI
+        /// running in Unity; no csproj harness would have seen it.
+        /// </remarks>
+        private static void Dial(GatewayClient client)
+        {
+            try
+            {
+                client.AuthenticateAsync("jwt", CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // Expected. See the summary.
+            }
+        }
+
         // ---- the wiring, from the setting to the kind that is actually requested -------
 
         [Test]
@@ -72,10 +97,7 @@ namespace Cuvara.Netcode.Tests.Editor
             var settings = new NetworkSettings { GatewayUseTls = true };
             var client = new GatewayClient(settings, factory, new JsonWireCodec(), new SilentLog());
 
-            // The dial fails on NeverTransport; the kind has already been requested by
-            // then, which is the thing under test.
-            Assert.That(async () => await client.AuthenticateAsync("jwt", CancellationToken.None),
-                Throws.Exception);
+            Dial(client);
 
             Assert.That(factory.Requested, Is.EqualTo(TransportKind.TcpTls),
                 "GatewayUseTls was on and the gateway still dialled a plaintext transport");
@@ -88,8 +110,7 @@ namespace Cuvara.Netcode.Tests.Editor
             var settings = new NetworkSettings();
             var client = new GatewayClient(settings, factory, new JsonWireCodec(), new SilentLog());
 
-            Assert.That(async () => await client.AuthenticateAsync("jwt", CancellationToken.None),
-                Throws.Exception);
+            Dial(client);
 
             Assert.That(factory.Requested, Is.EqualTo(TransportKind.Tcp));
             Assert.That(new NetworkSettings().GatewayUseTls, Is.False,

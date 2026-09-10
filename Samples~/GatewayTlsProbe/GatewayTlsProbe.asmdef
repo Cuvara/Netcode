@@ -2,7 +2,8 @@
     "name": "GatewayTlsProbe",
     "rootNamespace": "Cuvara.Netcode.Samples.GatewayTlsProbe",
     "references": [
-        "Cuvara.Netcode.Runtime"
+        "Cuvara.Netcode.Runtime",
+        "UniTask"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
