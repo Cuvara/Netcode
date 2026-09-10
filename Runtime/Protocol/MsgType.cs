@@ -54,6 +54,24 @@ namespace Cuvara.Netcode.Protocol
         TransferMapResp = 14,
 
         /// <summary>server -> client: forced disconnect carrying a machine-readable reason.</summary>
-        Kick = 15
+        Kick = 15,
+
+        /// <summary>
+        /// client -> game server: opens the sealed-session handshake with an ephemeral
+        /// X25519 public key. Gameplay hop only, and <b>Protobuf only</b>.
+        /// </summary>
+        /// <remarks>
+        /// Absent from the JSON message set on purpose, so key material can never be
+        /// rendered into a human-readable payload — which is also why a JSON client is
+        /// refused by a server that requires sealing rather than served in the clear.
+        /// </remarks>
+        SealedClientHello = 16,
+
+        /// <summary>
+        /// game server -> client: the server's ephemeral public key and its binding over
+        /// the handshake transcript. Protobuf only, for the same reason as
+        /// <see cref="SealedClientHello"/>.
+        /// </summary>
+        SealedServerHello = 17
     }
 }
