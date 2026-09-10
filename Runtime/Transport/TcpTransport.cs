@@ -395,20 +395,44 @@ namespace Cuvara.Netcode.Transport
         /// arrives and parses frames out of it rather than paying an await per frame
         /// boundary. Returns 0 on EOF.
         /// </summary>
-        private static async UniTask<int> ReadSomeAsync(Stream stream, byte[] buffer, int offset, int count,
+        private async UniTask<int> ReadSomeAsync(Stream stream, byte[] buffer, int offset, int count,
             CancellationToken cancellationToken)
         {
-            try
+            // A read ALREADY WAITING on a socket is not interrupted by cancelling the
+            // token. NetworkStream.ReadAsync accepts a CancellationToken and ignores it
+            // once the read is pending, and SslStream inherits that; only closing the
+            // socket ends the wait.
+            //
+            // This is not a detail. Measured in a Unity play-mode run: a plaintext client
+            // pointed at a TLS listener connects (TLS is above TCP), then waits for a frame
+            // while the server waits for a ClientHello it will never get. With a 3-second
+            // token the read still sat until the test runner killed it at 180 seconds. And
+            // because GatewayClient's ConnectTimeout is a token, the whole gateway
+            // handshake inherited that: a client with TLS misconfigured hung indefinitely,
+            // not for ten seconds.
+            //
+            // Closing on cancellation turns the wait into a failed read, which the catch
+            // below translates back into the cancellation the caller asked for.
+            using (cancellationToken.Register(Close))
             {
-                return await stream.ReadAsync(buffer, offset, count, cancellationToken).AsUniTask();
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
-            {
-                throw new TransportException("read failed: " + ex.Message, ex);
+                try
+                {
+                    return await stream.ReadAsync(buffer, offset, count, cancellationToken).AsUniTask();
+                }
+                catch (Exception) when (cancellationToken.IsCancellationRequested)
+                {
+                    // The close above is what broke the read; report the cause, not the
+                    // symptom, so a timeout does not read as a peer that hung up.
+                    throw new OperationCanceledException(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
+                {
+                    throw new TransportException("read failed: " + ex.Message, ex);
+                }
             }
         }
     }
