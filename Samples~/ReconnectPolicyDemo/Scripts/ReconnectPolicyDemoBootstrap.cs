@@ -57,6 +57,15 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
         [SerializeField] private string gatewayHost = "127.0.0.1";
         [SerializeField] private int gatewayPort = 8000;
         [SerializeField] private string mapId = "map_01";
+        [Header("Transport security")]
+        [Tooltip("Run the sealed-session handshake on the GAMEPLAY hop (not the gateway hop) " +
+                 "and encrypt every frame after it. MUST match the game server's " +
+                 "GAMESERVER_SEALED: there is no negotiation and no fallback, by design " +
+                 "(ADR-22), so a mismatch is a misconfiguration rather than a degradation. " +
+                 "On here with the server off times out naming the cause; off here with the " +
+                 "server on has the join accepted and the connection then closed.")]
+        [SerializeField] private bool requireSealedSession;
+
 
         [Header("Heartbeat")]
         [Tooltip("PingInterval for this demo. Shorter than the 10 s default so a starved heartbeat " +
@@ -166,6 +175,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
                 GatewayHost = _backend.GatewayHost,
                 GatewayPort = _backend.GatewayPort,
                 PingInterval = TimeSpan.FromSeconds(Mathf.Max(0.5f, pingIntervalSeconds)),
+                RequireSealedSession = requireSealedSession,
             };
             _chaos = new ChaosTransportFactory(new DefaultTransportFactory());
 

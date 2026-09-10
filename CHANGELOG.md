@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every live-backend sample can now run against a sealed server.** The six scenes that
+  connect to a real backend — DOTS Sample, World View, Reconnect Policy Demo and the three
+  E2E Certification harnesses — gained a `requireSealedSession` toggle wired into
+  `NetworkSettings`.
+
+  **Why this is not cosmetic.** Those scenes are the acceptance path for this package, not
+  demos: a package feature is accepted by the lead importing its sample and running it. The
+  moment a local compose stack sets `GAMESERVER_SEALED=require`, every one of them stops
+  working — and the person who runs one next finds a refusal with no indication that the
+  stack changed underneath them. This lands ahead of that flip rather than after it.
+
+  Defaults to **false**, so existing scenes are unaffected: Unity reads a missing serialized
+  field as its default, and no scene asset needed editing.
+
+  The toggle sits under its own **Transport security** header rather than the existing
+  *Gateway* one. My first pass put it under *Gateway*, which is actively wrong — the setting
+  governs the **gameplay hop**, and the gateway hop is precisely the one it does not protect.
+  A misleading label in the inspector is worse than no label, because the inspector is where
+  someone decides what to tick.
+
 - **`GameSessionClient` runs the sealed handshake when `NetworkSettings.RequireSealedSession`
   is on.** After the join reply and before `Start`, so no frame is ever written half-sealed —
   the same place the server runs its half. This is the last piece: a Unity client can now join
