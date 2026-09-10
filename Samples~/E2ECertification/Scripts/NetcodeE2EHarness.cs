@@ -24,6 +24,15 @@ namespace Samples.NetcodeE2E
     {
         [Header("Nakama")]
         [SerializeField] private string deviceId = "unity-e2e-device-0001";
+        [Header("Transport security")]
+        [Tooltip("Run the sealed-session handshake on the GAMEPLAY hop (not the gateway hop) " +
+                 "and encrypt every frame after it. MUST match the game server's " +
+                 "GAMESERVER_SEALED: there is no negotiation and no fallback, by design " +
+                 "(ADR-22), so a mismatch is a misconfiguration rather than a degradation. " +
+                 "On here with the server off times out naming the cause; off here with the " +
+                 "server on has the join accepted and the connection then closed.")]
+        [SerializeField] private bool requireSealedSession;
+
 
         [Header("Gateway")]
         [SerializeField] private string gatewayHost = "127.0.0.1";
@@ -173,7 +182,7 @@ namespace Samples.NetcodeE2E
             EncodingUsed = encoding.ToString();
             Debug.Log($"[E2E] wire encoding = {EncodingUsed}");
 
-            var netSettings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort };
+            var netSettings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             _client = new NetworkClient(
                 netSettings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog());
             _client.SnapshotReceived += OnSnapshot;
@@ -269,7 +278,7 @@ namespace Samples.NetcodeE2E
         /// </summary>
         private async UniTask CaptureAssignmentAsync(string jwt, CancellationToken ct)
         {
-            var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort };
+            var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             using (var probe = new GatewayClient(
                 settings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog()))
             {
@@ -295,7 +304,7 @@ namespace Samples.NetcodeE2E
         /// </summary>
         private async UniTask<string> TryGatewayAuthAsync(string jwt, CancellationToken ct)
         {
-            var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort };
+            var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             using (var probe = new GatewayClient(
                 settings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog()))
             {
