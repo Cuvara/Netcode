@@ -1,6 +1,9 @@
 using System;
 using System.IO;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 
@@ -22,6 +25,12 @@ namespace Cuvara.Netcode.Transport
     /// loops are started from it) — the awaits are on asynchronous socket
     /// operations, so nothing blocks that thread, and events therefore reach
     /// consumers where they can touch the scene.
+    /// </para>
+    /// <para>
+    /// Optionally wraps the socket in TLS (<see cref="TlsOptions"/>), which is what the
+    /// gateway hop uses when the gateway terminates TLS itself (ADR-23). The game-server
+    /// hop does not: it is sealed at the message layer instead (ADR-22), so a TLS
+    /// transport there would be a second, redundant encryption of the same bytes.
     /// </para>
     /// <para>
     /// <see cref="System.Net.Sockets"/> is unavailable on WebGL. A WebGL build needs
@@ -71,8 +80,43 @@ namespace Cuvara.Netcode.Transport
         private byte[] _writeBuf = Array.Empty<byte>();
 
         private TcpClient _client;
-        private NetworkStream _stream;
+
+        /// <summary>
+        /// The framing stream: the raw <see cref="NetworkStream"/>, or an
+        /// <see cref="SslStream"/> wrapping it. Typed as <see cref="Stream"/> so nothing
+        /// below this line has to know which, because nothing below this line should
+        /// behave differently.
+        /// </summary>
+        private Stream _stream;
         private int _closed;
+        private readonly TlsOptions _tls;
+
+        /// <summary>Creates a plaintext TCP transport.</summary>
+        public TcpTransport() : this(null)
+        {
+        }
+
+        /// <summary>
+        /// Creates a TCP transport, optionally wrapped in TLS.
+        /// </summary>
+        /// <param name="tls">
+        /// TLS settings, or null for plaintext. Note there is no "TLS on, validation off"
+        /// combination — see <see cref="TlsOptions"/> for why.
+        /// </param>
+        public TcpTransport(TlsOptions tls)
+        {
+            _tls = tls;
+        }
+
+        /// <summary>
+        /// The TLS protocol actually negotiated, or <see cref="SslProtocols.None"/> on a
+        /// plaintext link. Read it rather than assuming: a Windows IL2CPP player negotiates
+        /// <c>Tls12</c> where .NET 10 negotiates <c>Tls13</c> against the same server.
+        /// </summary>
+        public SslProtocols NegotiatedProtocol { get; private set; } = SslProtocols.None;
+
+        /// <summary>True when this link is carrying TLS.</summary>
+        public bool IsTls => _tls != null;
 
         public string RemoteEndPoint { get; private set; } = string.Empty;
 
@@ -108,8 +152,15 @@ namespace Cuvara.Netcode.Transport
             }
 
             _client = client;
-            _stream = client.GetStream();
             RemoteEndPoint = host + ":" + port;
+
+            if (_tls == null)
+            {
+                _stream = client.GetStream();
+                return;
+            }
+
+            await AuthenticateAsync(client, host, cancellationToken);
         }
 
         public async UniTask<byte[]> ReadFrameAsync(CancellationToken cancellationToken)
@@ -202,6 +253,9 @@ namespace Cuvara.Netcode.Transport
                 // Unity player loop that await was not free — the same measurement that
                 // put the read path's ceiling at playerLoopHz/2 puts this path's at
                 // playerLoopHz/2 as well, halved again by a flush that does nothing.
+                // SslStream does not change this: it encrypts one record and writes it
+                // straight through to the inner stream, so there is nothing held back
+                // that a flush would release.
                 await stream.WriteAsync(_writeBuf, 0, frameLen, cancellationToken).AsUniTask();
             }
             catch (OperationCanceledException)
@@ -242,7 +296,89 @@ namespace Cuvara.Netcode.Transport
 
         public void Dispose() => Close();
 
-        private NetworkStream RequireStream()
+        /// <summary>
+        /// Completes the TLS handshake, and leaves the transport unusable if it fails.
+        /// </summary>
+        /// <remarks>
+        /// A failed handshake closes the socket and throws. It must never fall back to
+        /// plaintext: a downgrade that "still works" is the failure mode this whole hop
+        /// exists to remove, and it would be invisible from the outside.
+        /// </remarks>
+        private async UniTask AuthenticateAsync(TcpClient client, string host, CancellationToken cancellationToken)
+        {
+            var targetHost = string.IsNullOrEmpty(_tls.TargetHost) ? host : _tls.TargetHost;
+
+            // A callback is installed ONLY to enforce a pin. With no pin the argument is
+            // null, so the platform's own validation decides and nothing here can weaken
+            // it -- there is no code path in this class that returns true for a
+            // certificate the platform rejected.
+            RemoteCertificateValidationCallback validate = _tls.IsPinned ? PinValidator(_tls) : null;
+
+            var ssl = new SslStream(client.GetStream(), false, validate);
+            try
+            {
+                // SslProtocols.None means "whatever the platform considers current".
+                // Pinning a list here would measure the list rather than the platform, and
+                // would silently drop a future protocol version.
+                await ssl.AuthenticateAsClientAsync(targetHost, null, SslProtocols.None, false)
+                    .AsUniTask().AttachExternalCancellation(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                ssl.Dispose();
+                client.Close();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                ssl.Dispose();
+                client.Close();
+                var why = _tls.IsPinned
+                    ? "the server did not present the pinned certificate"
+                    : "the server certificate was refused by platform validation";
+                throw new TransportException(
+                    $"TLS handshake with {targetHost} failed: {why} ({ex.GetType().Name}: {ex.Message})", ex);
+            }
+
+            _stream = ssl;
+            NegotiatedProtocol = ssl.SslProtocol;
+        }
+
+        /// <summary>
+        /// Builds the pin check. Static-shaped on purpose: it closes over the options and
+        /// nothing else, so it cannot be influenced by transport state at handshake time.
+        /// </summary>
+        private static RemoteCertificateValidationCallback PinValidator(TlsOptions tls)
+        {
+            var pinned = tls.PinnedCertificate;
+            return (sender, certificate, chain, errors) =>
+            {
+                // Deliberately ignores `errors`. A pin is not "platform validation plus
+                // some slack" -- it is a different, stricter question: is this the exact
+                // certificate we were told to expect? An attacker cannot answer yes
+                // without the matching private key, whatever the chain says.
+                if (certificate == null)
+                {
+                    return false;
+                }
+
+                var presented = certificate.GetRawCertData();
+                if (presented == null || presented.Length != pinned.Length)
+                {
+                    return false;
+                }
+
+                var diff = 0;
+                for (var i = 0; i < pinned.Length; i++)
+                {
+                    diff |= presented[i] ^ pinned[i];
+                }
+
+                return diff == 0;
+            };
+        }
+
+        private Stream RequireStream()
         {
             var stream = _stream;
             if (stream == null)
@@ -259,7 +395,7 @@ namespace Cuvara.Netcode.Transport
         /// arrives and parses frames out of it rather than paying an await per frame
         /// boundary. Returns 0 on EOF.
         /// </summary>
-        private static async UniTask<int> ReadSomeAsync(NetworkStream stream, byte[] buffer, int offset, int count,
+        private static async UniTask<int> ReadSomeAsync(Stream stream, byte[] buffer, int offset, int count,
             CancellationToken cancellationToken)
         {
             try

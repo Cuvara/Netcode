@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using Cuvara.Netcode.Transport;
 using Cysharp.Threading.Tasks;
 
 namespace Cuvara.Netcode.Client
@@ -67,6 +68,73 @@ namespace Cuvara.Netcode.Client
         /// </para>
         /// </remarks>
         public bool RequireSealedSession { get; set; }
+
+        /// <summary>
+        /// Wrap the <b>gateway</b> connection in TLS, because the gateway terminates TLS
+        /// itself (ADR-23). Off by default, matching the gateway's own default.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This covers the client↔gateway hop and nothing else. The gameplay hop is sealed
+        /// at the message layer instead (<see cref="RequireSealedSession"/>, ADR-22), and
+        /// the client↔Nakama meta hop is a third, separate decision made by whatever
+        /// Nakama URL the game is configured with — a scheme of <c>http://</c> there is
+        /// plaintext no matter what this property says.
+        /// </para>
+        /// <para>
+        /// <b>There is no matching "and skip validation" switch, by design.</b> To reach a
+        /// dev gateway holding a self-signed certificate, pin it with
+        /// <see cref="GatewayTlsPinnedCertificate"/>; that is stricter than the public
+        /// trust store, not looser. See <see cref="TlsOptions"/>.
+        /// </para>
+        /// <para>
+        /// Mismatches, so neither side is a silent no-op: client on / server off means the
+        /// handshake fails and <c>ConnectAsync</c> throws, because the gateway answers a
+        /// ClientHello with the first bytes of a wire frame. Client off / server on means
+        /// the same in reverse — the gateway sees a wire frame where a ClientHello should
+        /// be. Neither degrades to cleartext.
+        /// </para>
+        /// </remarks>
+        public bool GatewayUseTls { get; set; }
+
+        /// <summary>
+        /// DER bytes of the one certificate the gateway is allowed to present. Null (the
+        /// default) means the platform's trust store decides.
+        /// </summary>
+        /// <remarks>
+        /// Ignored unless <see cref="GatewayUseTls"/> is on. Use
+        /// <see cref="TlsOptions.FromPem"/> to load a PEM file. This is the supported way
+        /// to talk to a self-signed dev gateway.
+        /// </remarks>
+        public byte[] GatewayTlsPinnedCertificate { get; set; }
+
+        /// <summary>
+        /// Name to validate the gateway's certificate against, when it differs from
+        /// <see cref="GatewayHost"/>. Empty (the default) means use <c>GatewayHost</c>.
+        /// </summary>
+        /// <remarks>
+        /// For dialling <c>127.0.0.1</c> a certificate issued for a real name. The name
+        /// still has to match — this changes which name, not whether.
+        /// </remarks>
+        public string GatewayTlsTargetHost { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Builds the <see cref="TlsOptions"/> these settings describe, or null when
+        /// <see cref="GatewayUseTls"/> is off.
+        /// </summary>
+        public TlsOptions BuildGatewayTlsOptions()
+        {
+            if (!GatewayUseTls)
+            {
+                return null;
+            }
+
+            return new TlsOptions
+            {
+                TargetHost = GatewayTlsTargetHost,
+                PinnedCertificate = GatewayTlsPinnedCertificate,
+            };
+        }
 
         /// <summary>
         /// How long to wait for the server's sealed hello before giving up.
