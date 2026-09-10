@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Runtime/Protocol/Generated/Wire.cs` resynced with the backend — purely additive.**
+  `EnterWorldResponse` gains `SessionKey` (field 5, `bytes`), which the backend added in
+  `rpg-mmo-server@8aeb8b4` on 2026-09-09. Nothing else in the file changed: the only other
+  edits are the regenerated descriptor blob and reflowed comments, and no symbol was
+  removed.
+
+  **The client does not read this field, and should not start.** It carries the
+  per-session key of the scheme **ADR-22 supersedes** — a key the gateway sends to the
+  client in the clear over the same plaintext transport it is meant to protect. ADR-22
+  records field 5 as **reserved, not reused**, so it is here to keep the generated file
+  byte-identical to the backend's and for no other reason.
+
+  **Why this was its own change.** The `Generated Wire.cs matches the backend` gate
+  compares against `rpg-mmo-server`'s `develop` at run time, so it turned red on every
+  netcode PR the moment that backend commit merged — including PRs that never touch the
+  protocol. The gate is right: a stale generated file does not fail loudly, it reads any
+  field added since generation as that type's default and presents as a feature that looks
+  wired up and silently does nothing.
+
 - **Per-entity facing and action state (`facing_brad`, `action`), client side.** The
   snapshot carried no orientation and no animation state at all, so a character could not
   be turned to face the way it was walking without a schema change across both repos.
