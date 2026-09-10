@@ -5,6 +5,47 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0] - 2026-09-10
+
+### Added
+- **TLS on the gateway hop (ADR-23), off by default.** `NetworkSettings.GatewayUseTls`
+  makes `GatewayClient` ask for `TransportKind.TcpTls`, and `TcpTransport` wraps the socket
+  in an `SslStream`. The gateway terminates TLS on the same port it already listens on, so
+  nothing else about the connection changes.
+
+  **Certificate validation is on, and cannot be turned off.** `TlsOptions` has exactly two
+  modes: no pin, where the platform's own validation decides and no callback is installed
+  at all; or pinned, where the leaf the gateway presents must be byte-for-byte
+  `GatewayTlsPinnedCertificate` — stricter than the public trust store, not looser, and the
+  supported way to reach a self-signed dev gateway. There is no third mode, deliberately:
+  validation that silently accepts anything is indistinguishable from validation that
+  works, if only a good certificate is ever tested. The server repo's IL2CPP probe measured
+  that platform validation genuinely refuses an untrusted certificate in a real Windows
+  player at both `Minimal` and `High` stripping, which is why "no pin" is the default
+  rather than something to be nervous about.
+
+  Nothing here degrades to cleartext. The factory **throws** when asked for `TcpTls`
+  without `TlsOptions` instead of returning a plaintext transport; a failed handshake
+  closes the socket and throws instead of retrying without TLS; and `TlsOptions.FromPem`
+  throws on unparseable input instead of returning a null pin, which would silently mean
+  "use the platform trust store".
+
+  `TransportKind.TcpTls` is client-side only. `TransportKinds.Parse` refuses it like any
+  other unknown value, so a game server cannot move a hop's protection by putting a string
+  in `enter_world_resp`. The gameplay hop is unaffected — it is sealed at the message layer
+  (ADR-22) so that a KCP session gets the same guarantee, which TLS cannot give it.
+
+- **`Samples~/GatewayTlsProbe`** — five cases against listeners the scene starts itself,
+  four of them refusals: TLS with a pinned certificate connects and round-trips a frame; an
+  unpinned connection to a self-signed certificate is refused by the platform; a TLS client
+  against a plaintext gateway does not downgrade; a plaintext client against a TLS gateway
+  gets no usable frame; and the factory asked for TLS with no options throws. Each button
+  reports what happened rather than what was intended.
+
+- `Documentation~/NETCODE.md` gained **Transport security: three hops, three different
+  answers** — Nakama, gateway and game server are protected by three different mechanisms,
+  configured independently, and turning one on says nothing about the other two.
+
 ## [Unreleased]
 
 ### Added

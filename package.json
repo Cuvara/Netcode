@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.35.0",
+  "version": "0.36.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -94,6 +94,11 @@
       "displayName": "Sealed Session Probe",
       "description": "Two peers in one process running ADR-22's transport crypto for real — no server, no network, no sockets. Fresh X25519 ephemerals authenticated by a join-token-derived binding, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame with the sequence as the nonce. Every frame is shown twice: the plaintext the game wrote, and the bytes a capture would get. Six buttons each mount an attack that must be refused — a flipped bit, a byte-perfect replay, a replayed header with a garbage body (the counter must not move), a cleartext Envelope, a peer with the wrong JOIN_TOKEN_SECRET, and a man in the middle who swaps an ephemeral key. It does NOT prove the shipped client uses any of this; the framing is not yet wired into GameSessionClient.",
       "path": "Samples~/SealedSessionProbe"
+    },
+    {
+      "displayName": "Gateway TLS Probe",
+      "description": "The client half of ADR-23, run for real against listeners the scene starts itself. One case connects over TLS with a pinned certificate and round-trips a frame; the other four are REFUSALS, because a TLS switch that quietly yields a plaintext link -- or a validation callback that returns true -- reads exactly like a working one everywhere else: an unpinned connection to a self-signed certificate must be refused by the platform trust store, a TLS client against a plaintext gateway must not downgrade, a plaintext client against a TLS gateway must not get a usable frame, and the transport factory asked for TcpTls with no TlsOptions must throw rather than hand back cleartext. It does NOT prove your gateway is configured for TLS, and says nothing about Android.",
+      "path": "Samples~/GatewayTlsProbe"
     }
   ],
   "testables": [

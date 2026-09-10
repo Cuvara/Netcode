@@ -71,7 +71,11 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("gateway client is already connected");
             }
 
-            var transport = _transports.Create(TransportKind.Tcp);
+            // TLS is a property of the gateway deployment, known before the first byte,
+            // so the kind is chosen here rather than negotiated. The factory throws if it
+            // was asked for TLS without options, instead of handing back cleartext.
+            var transport = _transports.Create(
+                _settings.GatewayUseTls ? TransportKind.TcpTls : TransportKind.Tcp);
             var connection = new WireConnection("gateway", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
