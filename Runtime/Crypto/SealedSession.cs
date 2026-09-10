@@ -55,11 +55,52 @@ namespace Cuvara.Netcode.Crypto
         private readonly ISequenceValidator _validator;
         private ulong _sendSequence;
 
+        /// <summary>Frames whose tag did not verify.</summary>
+        public ulong RejectedNotAuthenticated { get; private set; }
+
+        /// <summary>Frames refused as already seen or too old to judge.</summary>
+        public ulong RejectedReplayed { get; private set; }
+
+        /// <summary>Frames refused for leaping past <see cref="SequenceValidators.MaxForwardJump"/>.</summary>
+        public ulong RejectedForwardJump { get; private set; }
+
+        /// <summary>Bodies that were not sealed frames at all.</summary>
+        public ulong RejectedNotSealed { get; private set; }
+
+        /// <summary>Every refusal, by any cause.</summary>
+        /// <remarks>
+        /// These counters exist because a rejected sealed frame is otherwise
+        /// indistinguishable from an ordinary disconnect — both end as a closed socket. A
+        /// security check that fires and looks exactly like normal traffic will be assumed
+        /// to be working for as long as nobody deliberately breaks it. They are split by
+        /// cause for the operator and reported to the peer as one answer, which is the
+        /// point: the peer must not learn WHY.
+        /// </remarks>
+        public ulong RejectedTotal
+        {
+            get { return RejectedNotAuthenticated + RejectedReplayed + RejectedForwardJump + RejectedNotSealed; }
+        }
+
         /// <summary>Build a session around a one-direction AEAD and a replay validator.</summary>
-        public SealedSession(ISealedAead aead, ISequenceValidator validator)
+        /// <param name="aead">Keyed for ONE direction.</param>
+        /// <param name="validator">The replay rule.</param>
+        /// <param name="orderedDelivery">
+        /// Whether the transport underneath cannot reorder. Defaults to <c>true</c> because
+        /// both shipped transports guarantee it — TCP by definition, KCP through its
+        /// reassembly path. A validator that requires ordering refuses to be paired with a
+        /// transport that does not, so a future QUIC-datagram or raw-UDP transport fails
+        /// closed on day one instead of silently dropping legitimate frames.
+        /// </param>
+        public SealedSession(ISealedAead aead, ISequenceValidator validator, bool orderedDelivery = true)
         {
             if (aead == null) throw new ArgumentNullException(nameof(aead));
             if (validator == null) throw new ArgumentNullException(nameof(validator));
+
+            if (validator.RequiresOrderedTransport && !orderedDelivery)
+                throw new ArgumentException(
+                    validator.GetType().Name + " is only correct on a transport that cannot reorder, " +
+                    "and this one can. Use SlidingWindowSequence, or do not claim unordered delivery.",
+                    nameof(validator));
 
             if (aead.NonceSize != SealedFrame.NonceSize)
                 throw new ArgumentException(
@@ -119,9 +160,13 @@ namespace Cuvara.Netcode.Crypto
             ulong sequence;
             if (!SealedFrame.TryReadHeader(body, out sequence, out headerError))
             {
-                return headerError == SealedFrameError.NotSealed
-                    ? SealedOpenResult.NotSealed
-                    : SealedOpenResult.Rejected;
+                if (headerError == SealedFrameError.NotSealed)
+                {
+                    RejectedNotSealed++;
+                    return SealedOpenResult.NotSealed;
+                }
+                RejectedNotAuthenticated++;
+                return SealedOpenResult.Rejected;
             }
 
             ReadOnlySpan<byte> aad = body.Slice(0, SealedFrame.HeaderSize);
@@ -136,11 +181,19 @@ namespace Cuvara.Netcode.Crypto
             // this succeeds.
             int written;
             if (!_aead.TryOpen(nonce, ciphertext, aad, buffer, out written))
+            {
+                RejectedNotAuthenticated++;
                 return SealedOpenResult.Rejected;
+            }
 
             // STEP 2: only now is the sequence a fact rather than a claim.
-            if (!_validator.Accept(sequence))
+            SequenceResult sequenceResult = _validator.Accept(sequence);
+            if (sequenceResult != SequenceResult.Accepted)
+            {
+                if (sequenceResult == SequenceResult.ForwardJump) RejectedForwardJump++;
+                else RejectedReplayed++;
                 return SealedOpenResult.Rejected;
+            }
 
             plaintext = written == buffer.Length ? buffer : buffer.AsSpan(0, written).ToArray();
             return SealedOpenResult.Ok;

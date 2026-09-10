@@ -402,13 +402,42 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var v = new StrictMonotonicSequence();
 
-            Assert.IsTrue(v.Accept(0), "the first sequence a session sends is 0, and must be accepted");
-            Assert.IsFalse(v.Accept(0));
-            Assert.IsTrue(v.Accept(1));
-            Assert.IsFalse(v.Accept(1));
-            Assert.IsTrue(v.Accept(1000), "a forward jump is legal — a strict counter bounds replay, not loss");
-            Assert.IsFalse(v.Accept(999));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(0), "the first sequence a session sends is 0");
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(0));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(1));
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(1));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(1000), "a forward jump inside the bound is legal");
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(999));
             Assert.AreEqual(1000UL, v.Highest);
+        }
+
+        /// <summary>
+        /// The forward bound, at the exact boundary. Without it a corrupted counter can leap
+        /// near the top of the space and, with a strict counter, kill the session for ever —
+        /// every later legitimate frame carries a lower sequence and is refused.
+        /// </summary>
+        [Test]
+        public void Strict_BoundsTheForwardJump_AtTheExactBoundary()
+        {
+            var atLimit = new StrictMonotonicSequence();
+            Assert.AreEqual(SequenceResult.Accepted, atLimit.Accept(0));
+            Assert.AreEqual(SequenceResult.Accepted, atLimit.Accept(SequenceValidators.MaxForwardJump),
+                "exactly MaxForwardJump ahead is allowed");
+
+            var pastLimit = new StrictMonotonicSequence();
+            Assert.AreEqual(SequenceResult.Accepted, pastLimit.Accept(0));
+            Assert.AreEqual(SequenceResult.ForwardJump, pastLimit.Accept(SequenceValidators.MaxForwardJump + 1),
+                "one past it is refused");
+            Assert.AreEqual(0UL, pastLimit.Highest, "a refused jump must not move the counter");
+            Assert.AreEqual(SequenceResult.Accepted, pastLimit.Accept(1),
+                "and the session survives it — the next legitimate frame still lands");
+        }
+
+        [Test]
+        public void Strict_RequiresAnOrderedTransport()
+        {
+            Assert.IsTrue(new StrictMonotonicSequence().RequiresOrderedTransport);
+            Assert.IsFalse(new SlidingWindowSequence().RequiresOrderedTransport);
         }
 
         [Test]
@@ -416,11 +445,11 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var v = new SlidingWindowSequence();
 
-            Assert.IsTrue(v.Accept(10));
-            Assert.IsTrue(v.Accept(12));
-            Assert.IsTrue(v.Accept(11), "in-window reordering is what this validator exists for");
-            Assert.IsFalse(v.Accept(11));
-            Assert.IsFalse(v.Accept(12));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(10));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(12));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(11), "in-window reordering is what this exists for");
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(11));
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(12));
         }
 
         [Test]
@@ -428,10 +457,10 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var v = new SlidingWindowSequence(8);
 
-            Assert.IsTrue(v.Accept(100));
-            Assert.IsFalse(v.Accept(92), "8 behind is outside a width-8 window");
-            Assert.IsFalse(v.Accept(1), "a validator that cannot prove freshness must not claim it");
-            Assert.IsTrue(v.Accept(99));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(100));
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(92), "8 behind is outside a width-8 window");
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(1), "cannot prove freshness, must not claim it");
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(99));
         }
 
         [Test]
@@ -439,10 +468,324 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var v = new SlidingWindowSequence(8);
 
-            Assert.IsTrue(v.Accept(1));
-            Assert.IsTrue(v.Accept(100));
-            Assert.IsFalse(v.Accept(1), "already seen, and now far outside the window");
-            Assert.IsTrue(v.Accept(99));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(1));
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(100));
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(1), "seen, and now far outside the window");
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(99));
+        }
+
+        [Test]
+        public void Window_BoundsTheForwardJumpToo()
+        {
+            var v = new SlidingWindowSequence();
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(0));
+            Assert.AreEqual(SequenceResult.ForwardJump, v.Accept(SequenceValidators.MaxForwardJump + 1));
+        }
+    }
+
+    /// <summary>
+    /// The session's refusal counters and the transport-ordering guard.
+    /// </summary>
+    public class SealedSessionGuardTests
+    {
+        private static byte[] Key()
+        {
+            var k = new byte[SealedCrypto.KeySize];
+            for (int i = 0; i < k.Length; i++) k[i] = (byte)(i + 1);
+            return k;
+        }
+
+        /// <summary>
+        /// A strict counter paired with a transport that can reorder must refuse to exist.
+        /// Left to run, the symptom is dropped legitimate frames with nothing naming the
+        /// cause — so this fails closed on the day a new transport is added, not later.
+        /// </summary>
+        [Test]
+        public void RefusesAStrictCounterOnAnUnorderedTransport()
+        {
+            Assert.Throws<ArgumentException>(() =>
+                new SealedSession(new SealedAead(Key()), new StrictMonotonicSequence(), orderedDelivery: false));
+
+            Assert.DoesNotThrow(() =>
+                new SealedSession(new SealedAead(Key()), new SlidingWindowSequence(), orderedDelivery: false));
+        }
+
+        /// <summary>
+        /// Each refusal lands on its own counter. They exist because a rejected sealed frame
+        /// is otherwise indistinguishable from an ordinary disconnect — both end as a closed
+        /// socket — so a check that fires looks exactly like normal traffic.
+        /// </summary>
+        [Test]
+        public void CountsEachRefusalByCause()
+        {
+            var sender = new SealedSession(new SealedAead(Key()), new StrictMonotonicSequence());
+            var receiver = new SealedSession(new SealedAead(Key()), new StrictMonotonicSequence());
+            byte[] plaintext;
+
+            byte[] good = sender.Seal(System.Text.Encoding.UTF8.GetBytes("hello"));
+            Assert.AreEqual(SealedOpenResult.Ok, receiver.Open(good, out plaintext));
+            Assert.AreEqual(0UL, receiver.RejectedTotal);
+
+            // Replay of a frame it already took.
+            Assert.AreEqual(SealedOpenResult.Rejected, receiver.Open(good, out plaintext));
+            Assert.AreEqual(1UL, receiver.RejectedReplayed);
+
+            // Bad tag.
+            byte[] tampered = (byte[])sender.Seal(System.Text.Encoding.UTF8.GetBytes("hello")).Clone();
+            tampered[tampered.Length - 1] ^= 0x01;
+            Assert.AreEqual(SealedOpenResult.Rejected, receiver.Open(tampered, out plaintext));
+            Assert.AreEqual(1UL, receiver.RejectedNotAuthenticated);
+
+            // Cleartext Envelope.
+            Assert.AreEqual(SealedOpenResult.NotSealed, receiver.Open(new byte[] { 0x08, 0x01 }, out plaintext));
+            Assert.AreEqual(1UL, receiver.RejectedNotSealed);
+
+            Assert.AreEqual(3UL, receiver.RejectedTotal);
+            Assert.AreEqual(0UL, receiver.RejectedForwardJump, "nothing here jumped forward");
+        }
+
+        /// <summary>
+        /// A forward jump is counted separately from a replay, because the operator's
+        /// response differs: a replay is an attacker or a bug, a forward jump is a peer whose
+        /// counter is broken.
+        /// </summary>
+        [Test]
+        public void CountsAForwardJumpSeparately()
+        {
+            var receiver = new SealedSession(new SealedAead(Key()), new StrictMonotonicSequence());
+            var far = new SealedSession(new SealedAead(Key()), new StrictMonotonicSequence());
+            byte[] plaintext;
+
+            // A baseline first. Without one the bound does not apply at all — see
+            // AFreshSessionAcceptsAnyFirstSequence, which pins that on purpose.
+            Assert.AreEqual(SealedOpenResult.Ok, receiver.Open(far.Seal(new byte[] { 1 }), out plaintext));
+
+            // Now advance the sender past the bound the honest way and hand the receiver only
+            // the last frame — a genuine, authentic frame that leapt too far.
+            for (ulong i = 0; i <= SequenceValidators.MaxForwardJump; i++) far.Seal(new byte[] { 1 });
+            byte[] leaping = far.Seal(System.Text.Encoding.UTF8.GetBytes("way ahead"));
+
+            Assert.AreEqual(SealedOpenResult.Rejected, receiver.Open(leaping, out plaintext));
+            Assert.AreEqual(1UL, receiver.RejectedForwardJump);
+            Assert.AreEqual(0UL, receiver.RejectedReplayed);
+            Assert.AreEqual(0UL, receiver.RejectedNotAuthenticated, "the tag was perfectly valid — that is the point");
+        }
+
+        /// <summary>
+        /// A session with no baseline accepts ANY first sequence, however large. Deliberate,
+        /// and pinned here because it looks like a hole and is not: the forward bound exists
+        /// to stop a counter LEAPING, which needs somewhere to leap from, and a frame that
+        /// authenticates under the session key is by definition from the peer that holds it.
+        /// </summary>
+        [Test]
+        public void AFreshSessionAcceptsAnyFirstSequence()
+        {
+            var v = new StrictMonotonicSequence();
+
+            Assert.AreEqual(SequenceResult.Accepted, v.Accept(ulong.MaxValue / 2));
+            Assert.AreEqual(SequenceResult.Replayed, v.Accept(ulong.MaxValue / 2), "but only once");
+        }
+    }
+
+    /// <summary>
+    /// The client half of the handshake, against a hand-rolled server that mirrors
+    /// <c>SealedHandshakeServer</c>.
+    /// </summary>
+    public class SealedClientExchangeTests
+    {
+        private const string Jti = "exchange-jti-0001";
+        private const string Secret = "exchange-join-secret";
+
+        /// <summary>Stands in for the server half. Same steps, same order, no transport.</summary>
+        private static void Server(
+            byte[] clientPublic, string secret, string jti,
+            out byte[] serverPublic, out byte[] binding, out byte[] c2s, out byte[] s2c)
+        {
+            SealedKeyPair server = SealedKeyPair.Generate();
+            serverPublic = server.Public;
+
+            byte[] shared;
+            Assert.IsTrue(server.TryAgree(clientPublic, out shared));
+
+            byte[] transcript = SealedHandshake.Transcript(jti, clientPublic, serverPublic);
+            binding = new SealedTranscriptSigner(secret, jti).Sign(transcript);
+            SealedCrypto.DeriveDirectionKeys(shared, transcript, out c2s, out s2c);
+        }
+
+        /// <summary>
+        /// The whole exchange, and then real traffic through it in BOTH directions — which is
+        /// what catches an inbound/outbound swap that each side would otherwise fail to
+        /// notice against itself.
+        /// </summary>
+        [Test]
+        public void CompletesAndTheKeysMatchTheServersInBothDirections()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            byte[] clientPublic = client.CreateHello();
+
+            byte[] serverPublic, binding, c2s, s2c;
+            Server(clientPublic, Secret, Jti, out serverPublic, out binding, out c2s, out s2c);
+
+            SealedExchange result = client.AcceptServerHello(serverPublic, binding, null);
+
+            Assert.AreEqual(SealedExchangeResult.Ok, result.Result, result.Error);
+            Assert.IsTrue(result.BindingVerified);
+
+            // Client seals -> the server's c2s session opens it.
+            var serverInbound = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+            byte[] up;
+            Assert.AreEqual(SealedOpenResult.Ok,
+                serverInbound.Open(result.Outbound.Seal(System.Text.Encoding.UTF8.GetBytes("input")), out up));
+            Assert.AreEqual("input", System.Text.Encoding.UTF8.GetString(up));
+
+            // Server seals with s2c -> the client's inbound session opens it.
+            var serverOutbound = new SealedSession(new SealedAead(s2c), new StrictMonotonicSequence());
+            byte[] down;
+            Assert.AreEqual(SealedOpenResult.Ok,
+                result.Inbound.Open(serverOutbound.Seal(System.Text.Encoding.UTF8.GetBytes("snapshot")), out down));
+            Assert.AreEqual("snapshot", System.Text.Encoding.UTF8.GetString(down));
+        }
+
+        /// <summary>
+        /// A man in the middle substitutes its own ephemeral key. The binding it replayed
+        /// from the real server no longer verifies, because the transcript covers both
+        /// publics — and this is the ONLY thing that catches it.
+        /// </summary>
+        [Test]
+        public void RefusesAManInTheMiddle_WhenItCanVerifyTheBinding()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            byte[] clientPublic = client.CreateHello();
+
+            byte[] realServerPublic, realBinding, c2s, s2c;
+            Server(clientPublic, Secret, Jti, out realServerPublic, out realBinding, out c2s, out s2c);
+
+            // The attacker terminates the connection with its own key and forwards the
+            // binding it read off the wire.
+            byte[] attackerPublic = SealedKeyPair.Generate().Public;
+
+            SealedExchange result = client.AcceptServerHello(attackerPublic, realBinding, null);
+
+            Assert.AreEqual(SealedExchangeResult.BindingRejected, result.Result);
+            Assert.IsNull(result.Outbound, "a refused exchange must hand back no session at all");
+            Assert.IsNull(result.Inbound);
+        }
+
+        /// <summary>
+        /// The same attack against a client with no verification material SUCCEEDS. This test
+        /// asserts the weakness on purpose.
+        /// </summary>
+        /// <remarks>
+        /// <c>WithoutBindingVerification</c> documents that it buys confidentiality from a
+        /// passive listener and nothing from an active one. A comment saying that is a
+        /// promise; this is the proof, and it will start failing the day the pinned gateway
+        /// identity key ADR-22 specifies makes it untrue — which is exactly when someone
+        /// should be made to come and look at it.
+        /// </remarks>
+        [Test]
+        public void WithoutBindingVerification_AManInTheMiddleSucceeds_AndTheResultSaysSo()
+        {
+            var client = SealedClientExchange.WithoutBindingVerification(Jti);
+            byte[] clientPublic = client.CreateHello();
+
+            byte[] attackerPublic = SealedKeyPair.Generate().Public;
+
+            SealedExchange result = client.AcceptServerHello(attackerPublic, Array.Empty<byte>(), null);
+
+            Assert.AreEqual(SealedExchangeResult.Ok, result.Result,
+                "an unverified exchange still completes — that is the weakness");
+            Assert.IsFalse(result.BindingVerified,
+                "and the result must say so, because a caller reporting 'connected securely' has to read this");
+        }
+
+        [Test]
+        public void RefusesAServerKeyOfTheWrongLength()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            client.CreateHello();
+
+            SealedExchange result = client.AcceptServerHello(new byte[31], new byte[32], null);
+
+            Assert.AreEqual(SealedExchangeResult.BadServerKey, result.Result);
+        }
+
+        /// <summary>
+        /// An all-zero public key is a low-order point: it forces a shared secret the
+        /// attacker knows and both ends agree on — a complete break wearing the appearance of
+        /// a successful handshake.
+        /// </summary>
+        [Test]
+        public void RefusesALowOrderServerKey()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            client.CreateHello();
+
+            SealedExchange result = client.AcceptServerHello(new byte[32], new byte[32], null);
+
+            Assert.AreEqual(SealedExchangeResult.BadServerKey, result.Result);
+        }
+
+        [Test]
+        public void RefusesWhenTheServerReportsAnError()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            byte[] clientPublic = client.CreateHello();
+
+            byte[] serverPublic, binding, c2s, s2c;
+            Server(clientPublic, Secret, Jti, out serverPublic, out binding, out c2s, out s2c);
+
+            SealedExchange result = client.AcceptServerHello(serverPublic, binding, "not_configured");
+
+            Assert.AreEqual(SealedExchangeResult.ServerRefused, result.Result);
+            Assert.AreEqual("not_configured", result.Error);
+        }
+
+        /// <summary>Two exchanges never share an ephemeral — that is the forward secrecy.</summary>
+        [Test]
+        public void EveryExchangeGeneratesAFreshEphemeral()
+        {
+            byte[] a = new SealedClientExchange(Jti, Secret).CreateHello();
+            byte[] b = new SealedClientExchange(Jti, Secret).CreateHello();
+
+            Assert.AreNotEqual(BitConverter.ToString(a), BitConverter.ToString(b));
+        }
+
+        [Test]
+        public void RefusesToReuseOneExchange()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+            client.CreateHello();
+
+            Assert.Throws<InvalidOperationException>(() => client.CreateHello());
+        }
+
+        [Test]
+        public void RefusesToAcceptAHelloItNeverSent()
+        {
+            var client = new SealedClientExchange(Jti, Secret);
+
+            Assert.Throws<InvalidOperationException>(
+                () => client.AcceptServerHello(new byte[32], new byte[32], null));
+        }
+
+        /// <summary>
+        /// A different jti derives different keys, so a server hello captured from one
+        /// session cannot be replayed into another.
+        /// </summary>
+        [Test]
+        public void ADifferentJtiDerivesADifferentSession()
+        {
+            var client = new SealedClientExchange("jti-A", Secret);
+            byte[] clientPublic = client.CreateHello();
+
+            // The server computed everything under a DIFFERENT jti.
+            byte[] serverPublic, binding, c2s, s2c;
+            Server(clientPublic, Secret, "jti-B", out serverPublic, out binding, out c2s, out s2c);
+
+            SealedExchange result = client.AcceptServerHello(serverPublic, binding, null);
+
+            Assert.AreEqual(SealedExchangeResult.BindingRejected, result.Result,
+                "the transcript covers the jti, so the binding cannot cross sessions");
         }
     }
 }

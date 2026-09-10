@@ -57,9 +57,6 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
         private int _tick;
         private int _sealed;
         private int _opened;
-        private int _refusedTag;
-        private int _refusedReplay;
-        private int _refusedCleartext;
         private byte[] _lastFrame = Array.Empty<byte>();
         private string _lastPlain = string.Empty;
 
@@ -166,9 +163,6 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             _tick = 0;
             _sealed = 0;
             _opened = 0;
-            _refusedTag = 0;
-            _refusedReplay = 0;
-            _refusedCleartext = 0;
             _lastFrame = Array.Empty<byte>();
             _lastPlain = string.Empty;
             _tamperNext = false;
@@ -219,18 +213,7 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             byte[] plaintext;
             SealedOpenResult result = _receiving.Open(onTheWire, out plaintext);
 
-            switch (result)
-            {
-                case SealedOpenResult.Ok:
-                    _opened++;
-                    break;
-                case SealedOpenResult.Rejected:
-                    _refusedTag++;
-                    break;
-                case SealedOpenResult.NotSealed:
-                    _refusedCleartext++;
-                    break;
-            }
+            if (result == SealedOpenResult.Ok) _opened++;
 
             if (expectRefusal) RecordAttack("flipped one bit of ciphertext in flight", result != SealedOpenResult.Ok, result);
 
@@ -257,7 +240,6 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
 
             byte[] ignored;
             SealedOpenResult result = _receiving.Open(_lastFrame, out ignored);
-            if (result == SealedOpenResult.Rejected) _refusedReplay++;
 
             RecordAttack("replayed a frame the receiver had already accepted", result != SealedOpenResult.Ok, result);
         }
@@ -279,7 +261,6 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             byte[] ignored;
             SealedOpenResult result = _receiving.Open(forged, out ignored);
             bool counterHeld = _receiving.HighestReceived == before;
-            if (result == SealedOpenResult.Rejected) _refusedTag++;
 
             RecordAttack(
                 counterHeld
@@ -299,7 +280,6 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             byte[] ignored;
             // 0x08 is a Protobuf Envelope's first byte — field 1, type.
             SealedOpenResult result = _receiving.Open(new byte[] { 0x08, 0x01, 0x12, 0x04 }, out ignored);
-            if (result == SealedOpenResult.NotSealed) _refusedCleartext++;
 
             RecordAttack("sent a cleartext Envelope where a sealed frame is required",
                          result != SealedOpenResult.Ok, result);
@@ -371,7 +351,14 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             }
 
             _trafficLine.text = $"sealed {_sealed}   opened {_opened}   next sequence {_sending.NextSendSequence}   highest accepted {_receiving.HighestReceived}";
-            _refusedLine.text = $"refused: {_refusedTag} bad tag or forged header, {_refusedReplay} replay, {_refusedCleartext} cleartext";
+            // Read off the session's own counters, not the ones this scene incremented. A
+            // probe that keeps a parallel tally shows its own arithmetic; these are the
+            // values an operator sees, so a counter that stops being incremented shows up
+            // here instead of quietly reading zero forever.
+            _refusedLine.text =
+                $"refused (from the session): {_receiving.RejectedNotAuthenticated} bad tag, " +
+                $"{_receiving.RejectedReplayed} replay, {_receiving.RejectedForwardJump} forward jump, " +
+                $"{_receiving.RejectedNotSealed} cleartext  —  total {_receiving.RejectedTotal}";
             _lastAttackLine.text = _lastAttack;
 
             bool allRefused = _attacksRun == 0 || _attacksRun == _attacksRefused;
