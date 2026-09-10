@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.35.0",
+  "version": "0.36.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "com.cysharp.unitask": "2.5.10",
+    "org.nuget.system.runtime.compilerservices.unsafe": "6.0.0",
     "com.unity.modules.unitywebrequest": "1.0.0",
     "com.unity.modules.physics": "1.0.0"
   },
@@ -26,7 +27,7 @@
     "jp.hadashikick.vcontainer": "1.16.8 — enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
   },
   "x-manualDependencies": {
-    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0"
+    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1"
   },
   "samples": [
     {
@@ -70,9 +71,34 @@
       "path": "Samples~/ReconnectPolicyDemo"
     },
     {
+      "displayName": "AOI Visibility Probe",
+      "description": "Synthetic world, no server, no network: one observer with an AOI radius over hundreds to thousands of entities, with the visible set computed twice per frame - once by the plain scan, once by narrowing with a uniform grid - and the two answers compared live. Shows entities-in-view versus total, the observer's radius, how many entities each strategy examined, and whether the server's occupancy gate would use its index at this density. The mismatch counter is the point: narrowing the search must not change who is visible.",
+      "path": "Samples~/AoiVisibilityProbe"
+    },
+    {
+      "displayName": "Send Budget Probe",
+      "description": "A synthetic crowd through the game server's per-connection downlink budget, no server and no network: dial the population and how much of it moves, watch snapshot bytes flatten against the cap, entities get deferred oldest-first, and the client go a beat stale — while the 'handle errors' readout stays at zero, which is the invariant that makes shedding safe. Byte figures are measured from real Protobuf snapshots.",
+      "path": "Samples~/SendBudgetProbe"
+    },
+    {
       "displayName": "KCP Probe",
       "description": "Two KCP state machines back-to-back, no server, no network. Sends messages through the ARQ with configurable packet loss and renders the results on screen: reliable delivery, fragmentation/reassembly, and retransmission under loss — all visible rather than read about.",
       "path": "Samples~/KcpProbe"
+    },
+    {
+      "displayName": "Facing and Protocol Version",
+      "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder: three capsules orbit a ring and point along their direction of travel, and that direction arrives only in facing_brad — nothing in the scene derives it from movement. Press 'Stop sending facing' and they keep moving and stop turning, holding the last heading instead of snapping to east, which is the 'zero means not sent' rule made visible and the reason facing is a biased integer rather than a float. Three buttons also run a real JoinTokenResponse through the client's version rule: a matching server is admitted, a skewed one is refused with the named reason protocol_version_mismatch and marked permanent, and one that advertises nothing is admitted on trust and says so.",
+      "path": "Samples~/FacingAndVersion"
+    },
+    {
+      "displayName": "Sealed Session Probe",
+      "description": "Two peers in one process running ADR-22's transport crypto for real — no server, no network, no sockets. Fresh X25519 ephemerals authenticated by a join-token-derived binding, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame with the sequence as the nonce. Every frame is shown twice: the plaintext the game wrote, and the bytes a capture would get. Six buttons each mount an attack that must be refused — a flipped bit, a byte-perfect replay, a replayed header with a garbage body (the counter must not move), a cleartext Envelope, a peer with the wrong JOIN_TOKEN_SECRET, and a man in the middle who swaps an ephemeral key. It does NOT prove the shipped client uses any of this; the framing is not yet wired into GameSessionClient.",
+      "path": "Samples~/SealedSessionProbe"
+    },
+    {
+      "displayName": "Gateway TLS Probe",
+      "description": "The client half of ADR-23, run for real against listeners the scene starts itself. One case connects over TLS with a pinned certificate and round-trips a frame; the other four are REFUSALS, because a TLS switch that quietly yields a plaintext link -- or a validation callback that returns true -- reads exactly like a working one everywhere else: an unpinned connection to a self-signed certificate must be refused by the platform trust store, a TLS client against a plaintext gateway must not downgrade, a plaintext client against a TLS gateway must not get a usable frame, and the transport factory asked for TcpTls with no TlsOptions must throw rather than hand back cleartext. It does NOT prove your gateway is configured for TLS, and says nothing about Android.",
+      "path": "Samples~/GatewayTlsProbe"
     }
   ],
   "testables": [

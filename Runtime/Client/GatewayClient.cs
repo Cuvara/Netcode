@@ -49,6 +49,14 @@ namespace Cuvara.Netcode.Client
 
         public string UserId { get; private set; } = string.Empty;
 
+        /// <summary>
+        /// The wire protocol version the gateway reported on the last successful
+        /// authentication. Zero means it advertised none, i.e. it predates the field
+        /// and never checked ours — see
+        /// <see cref="WireProtocolVersion.IsUnversioned"/>.
+        /// </summary>
+        public uint GatewayProtocolVersion { get; private set; }
+
         /// <summary>True once the socket exists, whether or not the loops are running.</summary>
         public bool IsConnected => _connection != null;
 
@@ -63,7 +71,11 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("gateway client is already connected");
             }
 
-            var transport = _transports.Create(TransportKind.Tcp);
+            // TLS is a property of the gateway deployment, known before the first byte,
+            // so the kind is chosen here rather than negotiated. The factory throws if it
+            // was asked for TLS without options, instead of handing back cleartext.
+            var transport = _transports.Create(
+                _settings.GatewayUseTls ? TransportKind.TcpTls : TransportKind.Tcp);
             var connection = new WireConnection("gateway", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
@@ -73,7 +85,10 @@ namespace Cuvara.Netcode.Client
                 timeout.CancelAfter(_settings.ConnectTimeout);
 
                 await transport.ConnectAsync(_settings.GatewayHost, _settings.GatewayPort, timeout.Token);
-                await connection.SendFrameAsync(MsgType.Auth, new AuthRequest { Token = jwt }, timeout.Token);
+                await connection.SendFrameAsync(
+                    MsgType.Auth,
+                    new AuthRequest { Token = jwt, ProtocolVersion = WireProtocolVersion.Current },
+                    timeout.Token);
 
                 var frame = await ExpectAsync(connection, MsgType.AuthResp, timeout.Token);
                 if (!(frame.Payload is AuthResponse response))
@@ -85,6 +100,36 @@ namespace Cuvara.Netcode.Client
                 {
                     throw new NetworkException(
                         $"gateway rejected authentication: {response.Error}", response.Error);
+                }
+
+                // The gateway ACCEPTED us, so it either agreed with our version or is
+                // old enough not to have looked. Those two are worth telling apart,
+                // and this reply is the only place either is observable.
+                GatewayProtocolVersion = response.ProtocolVersion;
+                if (WireProtocolVersion.IsUnversioned(response.ProtocolVersion))
+                {
+                    // Not an error: the servers' shipping default admits unversioned
+                    // peers, and symmetry means we admit an unversioned server too.
+                    // Refusing here would make the client the strictest party in the
+                    // system and lock a working fleet out of itself. But it IS logged,
+                    // because "nobody checked" must never be indistinguishable from
+                    // "checked and agreed" — that silence is the whole defect.
+                    _log.Warn(
+                        "gateway did not advertise a wire protocol version; this client speaks " +
+                        WireProtocolVersion.Current +
+                        " and the agreement is unverified (the gateway predates the field)");
+                }
+                else if (!WireProtocolVersion.IsCompatible(response.ProtocolVersion))
+                {
+                    // Defence in depth: the gateway is supposed to have refused us
+                    // already. Reaching here means it accepted a version it does not
+                    // itself speak, so the two of us disagree and it did not notice —
+                    // exactly the silent-misparse state this mechanism exists to
+                    // prevent. Refusing loudly beats proceeding on a known conflict.
+                    throw new NetworkException(
+                        $"gateway speaks wire protocol version {response.ProtocolVersion}, " +
+                        $"this client speaks {WireProtocolVersion.Current}",
+                        KickReasons.ProtocolVersionMismatch);
                 }
 
                 UserId = response.UserId;

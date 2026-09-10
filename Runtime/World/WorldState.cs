@@ -97,7 +97,12 @@ namespace Cuvara.Netcode.World
                     // the server's actual value for an entity rather than assume the
                     // spawn default. Zero here means the server sent none — the
                     // fallback is the predictor's decision, not this adapter's.
-                    converted[i] = new EntitySnapshotData(e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed);
+                    // Facing and action ride through in their raw wire form for the same
+                    // reason speed does: whether an absent value should hold the last
+                    // known one or derive a new one is a presentation decision, and this
+                    // adapter is not where presentation decisions belong.
+                    converted[i] = new EntitySnapshotData(
+                        e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
                 }
             }
 
