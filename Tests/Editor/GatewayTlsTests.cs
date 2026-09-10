@@ -2,6 +2,7 @@ using System;
 using System.Text;
 using System.Threading;
 using Cuvara.Netcode.Client;
+using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Transport;
 using Cysharp.Threading.Tasks;
