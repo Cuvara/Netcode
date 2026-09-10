@@ -200,14 +200,25 @@ than returning null: a null pin silently means "use the platform trust store", w
 against a self-signed dev gateway fails with a message about the certificate and sends the
 reader to look at the wrong thing.
 
-### Mismatches are loud in both directions
+### Mismatches never degrade to cleartext — but only one direction is loud
 
-Neither side degrades to cleartext. Client on / gateway off: the TLS handshake fails,
-because the gateway answers a ClientHello with the first bytes of a wire frame, and
-`ConnectAsync` throws. Client off / gateway on: the same in reverse. The
-`Samples~/GatewayTlsProbe` scene runs both, plus an unpinned connection to a self-signed
-certificate and a factory asked for TLS with no options, and reports what actually
-happened.
+**Client on / gateway off** is loud: the gateway answers a ClientHello with the first
+bytes of a wire frame, the handshake fails, and `ConnectAsync` throws immediately.
+
+**Client off / gateway on is NOT loud.** It is a *stall*. The TCP connect succeeds —
+TLS is above it — and then both ends wait: the client to read a frame, the gateway for a
+ClientHello that a plaintext client will never send. Nothing refuses anything. Measured in
+a Unity play-mode run, where it sat until the test runner's own 180-second limit.
+
+What bounds it is `NetworkSettings.ConnectTimeout` (10 s by default), because
+`GatewayClient` wraps the whole exchange — connect, send, **and the reply read** — in one
+budget. A caller driving `TcpTransport` directly gets no bound at all. So a client shipped
+with TLS off against a TLS gateway does not report "TLS is off"; it reports a connect
+timeout, and the log will send the reader looking for a network problem.
+
+The `Samples~/GatewayTlsProbe` scene runs both directions, plus an unpinned connection to a
+self-signed certificate and a factory asked for TLS with no options, and reports what
+actually happened rather than what was intended.
 
 ## Framing
 

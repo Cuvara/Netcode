@@ -325,36 +325,54 @@ namespace Cuvara.Netcode.Samples.GatewayTlsProbe
 
         private async UniTask CasePlaintextClientAgainstTlsServer(CancellationToken ct)
         {
-            Case("plaintext client → TLS gateway", "no usable frame — the mismatch is loud");
+            Case("plaintext client → TLS gateway", "NO frame — it stalls, and a timeout is the shape of it");
 
             var serving = ServeOnceAsync(_tlsListener, true, ct);
             var transport = new TcpTransport();
 
-            try
+            // This case gets its OWN short budget, because a stall is the expected result
+            // and the scene must not sit on it. Measured in a Unity play-mode run: the TCP
+            // connect succeeds -- TLS is above it -- and then both ends wait. The client
+            // waits to read a frame; the server waits for a ClientHello that a plaintext
+            // client will never send. Nothing refuses anything.
+            //
+            // This scene originally claimed the mismatch was "loud". It is not. It is
+            // BOUNDED, which is a different and weaker property, and it is bounded only
+            // because GatewayClient wraps the whole exchange -- connect, send, and the
+            // reply read -- in NetworkSettings.ConnectTimeout (10 s by default). A caller
+            // driving TcpTransport directly, as this case does, gets no bound at all.
+            using (var stall = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                await transport.ConnectAsync("127.0.0.1", _tlsPort, ct);
+                stall.CancelAfter(TimeSpan.FromSeconds(2));
 
-                // The TCP connect succeeds — TLS is above it — so the mismatch can only
-                // show up as a frame that never arrives or never parses. That it is not
-                // caught at connect time is worth seeing rather than assuming.
-                var frame = await transport.ReadFrameAsync(ct);
-                Outcome(frame == null || frame.Length == 0,
-                    frame == null
-                        ? "connected, then the link closed with no frame, as it must"
-                        : $"read {frame.Length} bytes of something from a TLS listener");
-            }
-            catch (TransportException ex)
-            {
-                Outcome(true, "refused at the frame layer: " + ex.Message);
-            }
-            catch (Exception ex)
-            {
-                Outcome(false, $"unexpected: {ex.GetType().Name}: {ex.Message}");
-            }
-            finally
-            {
-                transport.Close();
-                await serving;
+                try
+                {
+                    await transport.ConnectAsync("127.0.0.1", _tlsPort, stall.Token);
+                    var frame = await transport.ReadFrameAsync(stall.Token);
+
+                    Outcome(frame == null || frame.Length == 0,
+                        frame == null
+                            ? "connected, then the link closed with no frame"
+                            : $"read {frame.Length} bytes of something from a TLS listener");
+                }
+                catch (OperationCanceledException)
+                {
+                    Outcome(true, "stalled with no frame until the 2s budget expired — " +
+                                  "in the real client this is ConnectTimeout, not a refusal");
+                }
+                catch (TransportException ex)
+                {
+                    Outcome(true, "refused at the frame layer: " + ex.Message);
+                }
+                catch (Exception ex)
+                {
+                    Outcome(false, $"unexpected: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    transport.Close();
+                    await serving;
+                }
             }
         }
 
