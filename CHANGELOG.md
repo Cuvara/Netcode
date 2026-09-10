@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SealedClientExchange` — the client half of the sealed handshake, with no transport in
+  it.** `CreateHello()` produces the ephemeral public key; `AcceptServerHello()` agrees,
+  builds the transcript, verifies the server's binding and returns the two one-direction
+  sessions. Mirrors the server's `SealedHandshakeServer` step for step.
+
+  Splitting the key schedule from the socket is deliberate: the schedule is the part that
+  goes wrong and the transport is the part that is expensive to test, so the schedule is
+  covered by ordinary tests now and the adapter that will sit on top has nothing left in it
+  but reading and writing two Envelopes.
+
+- **`SealedClientExchange.WithoutBindingVerification(jti)`, and a test that asserts it is
+  weak.** A production Unity client cannot hold `JOIN_TOKEN_SECRET` — shipping it in a
+  binary is the same mistake as the pre-shared transport key ADR-22 supersedes — so until
+  ADR-22's pinned gateway identity key is delivered, a real client has no material to verify
+  the server's binding with.
+
+  That state is **named on the result** (`SealedExchange.BindingVerified`) rather than
+  reached by passing an empty secret and getting a silent pass. And
+  `WithoutBindingVerification_AManInTheMiddleSucceeds_AndTheResultSaysSo` asserts the man in
+  the middle **succeeds** against it. A doc comment saying "this buys nothing against an
+  active attacker" is a promise; that test is the proof, and it starts failing the day the
+  identity key makes it untrue — which is exactly when someone should be made to look.
+
+### Changed
+
+- **`ISequenceValidator.Accept` returns `SequenceResult`, not `bool`**, and both validators
+  gained `RequiresOrderedTransport`. Ported from the server side, where these were added
+  after this package's first port. Breaking for any external implementer of the interface;
+  there are none in this package.
+
+- **A forward-jump bound, `SequenceValidators.MaxForwardJump = 1024`.** "Reject anything at
+  or below the highest seen" stops replays and says nothing about a leap *forward*. A peer
+  whose counter is corrupted can jump near the top of the space in one frame, and with a
+  strict counter that is **irreversible**: every legitimate frame afterwards carries a lower
+  sequence and is refused for ever. The session is dead and the symptom is a connection that
+  authenticated fine and then went quiet.
+
+  A *fresh* session still accepts any first sequence, which looks like a hole and is not —
+  the bound exists to stop a counter leaping, which needs somewhere to leap from.
+  `AFreshSessionAcceptsAnyFirstSequence` pins that so it stays deliberate.
+
+- **`SealedSession` refuses to pair a strict counter with a transport that can reorder.**
+  New `orderedDelivery` constructor argument, defaulting to `true` because both shipped
+  transports guarantee it. A future QUIC-datagram or raw-UDP transport now fails closed on
+  day one instead of silently dropping legitimate frames with nothing naming the cause.
+
+- **`SealedSession` counts every refusal by cause** — `RejectedNotAuthenticated`,
+  `RejectedReplayed`, `RejectedForwardJump`, `RejectedNotSealed`, `RejectedTotal`. Because a
+  rejected sealed frame is otherwise **indistinguishable from an ordinary disconnect**: both
+  end as a closed socket, so a security check that fires looks exactly like normal traffic
+  and will be assumed to work for as long as nobody deliberately breaks it. Found server-side
+  by `send-budget` while chasing why a wrong-key rejection left no trace in the log. Split by
+  cause for the operator, reported to the peer as one answer — the peer must still not learn
+  *why*.
+
+- **The Sealed Session Probe reads those counters instead of keeping its own tally.** A probe
+  that counts in parallel displays its own arithmetic; now a counter that stops being
+  incremented shows up on screen instead of quietly reading zero for ever.
+
 - **`Runtime/Protocol/Generated/Wire.cs` resynced with the backend — purely additive.**
   `EnterWorldResponse` gains `SessionKey` (field 5, `bytes`), which the backend added in
   `rpg-mmo-server@8aeb8b4` on 2026-09-09. Nothing else in the file changed: the only other
