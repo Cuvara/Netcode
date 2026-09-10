@@ -62,10 +62,11 @@ the log names which case and what happened.
   client against a *TLS* gateway is not refused at all: the TCP connect succeeds — TLS is
   above it — and then both ends wait, the client to read a frame and the server for a
   ClientHello that never comes. Measured in a Unity play-mode run, where it sat until the
-  test runner's own 180-second limit. It is **bounded, not loud**, and only because
-  `GatewayClient` wraps connect, send and the reply read in
-  `NetworkSettings.ConnectTimeout` (10 s by default). Drive `TcpTransport` directly and
-  there is no bound.
+  test runner's own 180-second limit. It is **bounded, not loud** — bounded by
+  `NetworkSettings.ConnectTimeout` (10 s by default), which `GatewayClient` applies to
+  connect, send and the reply read alike. Before 0.36.1 it was not bounded at all: a socket
+  read already waiting is not interrupted by cancelling a token, so the timeout could not
+  fire. `TcpTransport` now closes the socket when the token fires.
 
 - **Anything about Android.** The server repo's probe measured a Windows IL2CPP player at
   both Minimal and High stripping; Android is a separate answer, unmeasured.

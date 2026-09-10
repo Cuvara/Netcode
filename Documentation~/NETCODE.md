@@ -210,11 +210,17 @@ TLS is above it — and then both ends wait: the client to read a frame, the gat
 ClientHello that a plaintext client will never send. Nothing refuses anything. Measured in
 a Unity play-mode run, where it sat until the test runner's own 180-second limit.
 
-What bounds it is `NetworkSettings.ConnectTimeout` (10 s by default), because
-`GatewayClient` wraps the whole exchange — connect, send, **and the reply read** — in one
-budget. A caller driving `TcpTransport` directly gets no bound at all. So a client shipped
-with TLS off against a TLS gateway does not report "TLS is off"; it reports a connect
-timeout, and the log will send the reader looking for a network problem.
+`NetworkSettings.ConnectTimeout` (10 s by default) bounds it, because `GatewayClient`
+wraps the whole exchange — connect, send, **and the reply read** — in one budget. That was
+not true until 0.36.1: a read already waiting on a socket is not interrupted by cancelling
+a token (`NetworkStream.ReadAsync` accepts one and ignores it once the read is pending, and
+`SslStream` inherits that), so the timeout could not fire and the handshake hung
+**indefinitely**, not for ten seconds. `TcpTransport` now closes the socket when the token
+fires and reports the cancellation, which is what makes the budget real.
+
+Even so, a client shipped with TLS off against a TLS gateway does not report "TLS is off".
+It reports a connect timeout, and the log will send the reader looking for a network
+problem.
 
 The `Samples~/GatewayTlsProbe` scene runs both directions, plus an unpinned connection to a
 self-signed certificate and a factory asked for TLS with no options, and reports what
