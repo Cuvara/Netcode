@@ -1,1 +1,6 @@
 * text=auto eol=lf
+
+# Vendored assemblies. The auto-detection above happens to leave them alone today; saying
+# it outright means a future eol or filter setting cannot silently corrupt a 4.7 MB DLL
+# into something that still imports and then throws at runtime.
+*.dll binary

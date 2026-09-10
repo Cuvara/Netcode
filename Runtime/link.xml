@@ -9,12 +9,33 @@
   the Editor, which does not strip, stays perfectly green. That asymmetry is the
   reason this file exists.
 
-  Scope is deliberately narrow: the Protobuf runtime and the generated schema
-  types. Nothing else in the package relies on reflection.
+  BouncyCastle is here for a related but distinct reason. Cuvara.Netcode.Crypto
+  calls it directly, so the entry points below are reachable and would survive on
+  their own — but the library reaches parts of itself through its own registries,
+  and a CIL-Linker failure was reported against BouncyCastle 2.x on Android. Naming
+  the entry types is what a Windows IL2CPP player was verified against at BOTH
+  Minimal and High stripping (backend/docs/TRANSPORT-CRYPTO-LIBRARY-SURVEY.md).
+  The reported Android failure did not reproduce with this list — on Windows. The
+  Android question is open and merely no longer blocking.
+
+  If a High-stripped build ever fails inside BouncyCastle, widen to
+  <assembly fullname="BouncyCastle.Cryptography" preserve="all" /> and record the
+  size cost, rather than hunting types one at a time.
 -->
 <linker>
   <assembly fullname="Google.Protobuf" preserve="all" />
   <assembly fullname="Cuvara.Netcode.Runtime">
     <namespace fullname="RpgMmo.Wire.V1" preserve="all" />
+  </assembly>
+  <assembly fullname="BouncyCastle.Cryptography">
+    <type fullname="Org.BouncyCastle.Crypto.Modes.ChaCha20Poly1305" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Agreement.X25519Agreement" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Parameters.X25519PublicKeyParameters" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Generators.X25519KeyPairGenerator" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Generators.HkdfBytesGenerator" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Digests.Sha256Digest" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Macs.HMac" preserve="all" />
+    <type fullname="Org.BouncyCastle.Security.SecureRandom" preserve="all" />
   </assembly>
 </linker>

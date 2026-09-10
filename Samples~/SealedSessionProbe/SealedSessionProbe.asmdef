@@ -1,0 +1,16 @@
+{
+    "name": "SealedSessionProbe",
+    "rootNamespace": "Cuvara.Netcode.Samples.SealedSessionProbe",
+    "references": [
+        "Cuvara.Netcode.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

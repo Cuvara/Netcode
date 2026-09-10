@@ -27,6 +27,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol. The gate is right: a stale generated file does not fail loudly, it reads any
   field added since generation as that type's default and presents as a feature that looks
   wired up and silently does nothing.
+- **ADR-22's transport crypto, client side: `Cuvara.Netcode.Crypto`.** X25519 over the
+  join token's `jti`, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame
+  with the sequence as the nonce, and a strict replay counter. `SealedFrame`,
+  `SealedCrypto`, `SealedHandshake`, `SealedSession` and the two sequence validators mirror
+  the server's `GameServer.Net.Sealed` and Go's `backend/shared/sealed` **byte for byte**.
+
+  **This is not wired into `GameSessionClient` yet** and no traffic is sealed. The handshake
+  messages do not exist on the wire, so nothing in the shipped client changes behaviour.
+  What lands here is the half a Unity client needs in order to speak it once they do.
+
+- **`BouncyCastle.Cryptography` 2.7.0 vendored into `Runtime/Plugins/`.** Managed,
+  netstandard2.0, MIT, no package dependencies, no `DllImport`. It is here because Unity
+  IL2CPP supplies **none** of the three primitives: no `ChaCha20Poly1305`, no `HKDF`, and
+  no `ECDiffieHellman` curve25519 at all, with `AesGcm` compiling and then throwing. The
+  server takes the same library, so client and server run the identical implementation —
+  silent divergence is this protocol's failure mode, and one implementation removes a class
+  of it rather than answering it twice.
+
+  **The cost, stated rather than buried: the package roughly triples, 3.37 MB → 8.12 MB
+  on disk, and 4.76 MB of that is this one DLL.** Every consumer of `com.cuvara.netcode` pays it at
+  import. What reaches a *player* is smaller and is not yet measured — the assembly is
+  reachable from `Cuvara.Netcode.Crypto` and therefore survives stripping, but how much of
+  it the linker keeps is an open question tracked in
+  `backend/docs/TRANSPORT-CRYPTO-LIBRARY-SURVEY.md` §8.
+
+- **Sample: Sealed Session Probe.** Two peers in one process, no server and no network. The
+  plaintext the game wrote and the bytes a capture would get are shown one above the other,
+  live, and six buttons each mount an attack that must be refused: a flipped bit, a
+  byte-perfect replay, a replayed header with a garbage body, a cleartext Envelope, a peer
+  with the wrong `JOIN_TOKEN_SECRET`, and a man in the middle who substitutes an ephemeral
+  key. The verdict turns red if any is accepted. The README is explicit that the scene does
+  **not** prove the shipped client uses any of this.
+
+- **`SealedCrypto.Hkdf` overload taking raw `info` bytes.** RFC 5869 A.1's `info` is
+  `f0f1..f9`, which is not valid UTF-8 and therefore could not reach the construction
+  through the string overload at all. The test written without it was asserting a different
+  input and would have passed against a wrong implementation.
+
+### Changed
+
+- **`Runtime/link.xml` now preserves the nine BouncyCastle entry types** the crypto code
+  reaches, plus `Org.BouncyCastle.Crypto.Macs.HMac` — which the published survey's list
+  omitted, because the IL2CPP probe that produced that list did not exercise the transcript
+  binding. A Windows IL2CPP player passed the RFC vectors at both `Minimal` and `High`
+  stripping with this shape. **That result is Windows.** The reported Android CIL-Linker
+  failure did not reproduce there, and Android remains unverified for want of a device.
+
+- **`Cuvara.Netcode.Tests.Editor.asmdef` gains `BouncyCastle.Cryptography.dll`** in
+  `precompiledReferences`. The assembly sets `overrideReferences: true`, so without this
+  line the tests do not see the library at all.
+
+### Fixed
+
+- **A transcript test that asserted a property it did not test.** It claimed the NUL
+  separators close a split-ambiguity attack, and it *passed with the separators removed* —
+  because in this layout the label is a constant and both public keys are fixed at 32
+  bytes, leaving the jti as the only variable-length field with nothing adjacent to steal
+  bytes from. The separators are still correct and stay, as insurance against a future
+  variable-length field; the doc comment now says exactly that instead of claiming a live
+  hole, and the test pins the transcript's 108 bytes directly.
 
 - **Per-entity facing and action state (`facing_brad`, `action`), client side.** The
   snapshot carried no orientation and no animation state at all, so a character could not
