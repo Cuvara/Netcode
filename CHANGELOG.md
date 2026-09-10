@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SealedHandshakeClient` and the sealing seam on `WireConnection`.** A Unity client can
+  now complete the sealed handshake and speak a sealed session. `RunAsync` writes the hello,
+  reads the reply, and installs both one-direction sessions; everything written afterwards is
+  sealed and everything read afterwards must be.
+
+  Three seams, all of them: both encode paths (`SendFrameAsync`, `Send`) and the single
+  decode path. Sealing one and forgetting the other would produce a connection that looks
+  sealed and leaks half its traffic.
+
+- **A cleartext frame on a sealed connection is refused, not accepted.** `NotSealed` throws
+  the same way a bad tag does, and the caller kills the session. Accepting it would let
+  anyone who can inject one frame speak to the client unauthenticated — the sealing would
+  still be running and the session would look perfectly healthy the whole time. That is the
+  downgrade defence, and it is the one that silently does nothing if it is missing.
+
+  There is also **no uninstall and no second install**: a connection that can revert to
+  cleartext is a connection an attacker can talk down to cleartext.
+
+- **`WireConnection.IsSealed` and `SealedRejectedTotal`**, so an operator can see both that
+  a session is sealed and how many frames it has refused.
+
+### Changed
+
+- **`SealedTransportTests` drives a responding fixture, not a script.** The fake transport
+  plays the server: when the client writes its hello it derives its own keys from the same
+  primitives and answers inline. Two consequences, both deliberate:
+
+  - **Nothing yields.** EditMode does not pump the player loop, so a test needing a real
+    continuation hangs the suite rather than failing it — the trap already documented here
+    for UniTask realtime delays. The `Await` helper is a bounded frame loop that turns a
+    genuine stall into a failure.
+  - **It is not a mock.** A mock agrees with whatever the client does, which is the one
+    thing a handshake test must not do. The fixture derives its keys independently, and the
+    test opens the client's own traffic with them.
+
+  Assertions are against the **bytes the transport received**, not the connection's report of
+  itself. "The connection says it is sealed" would pass against a connection that sets a flag
+  and writes cleartext.
+
 - **`SealedClientHello` / `SealedServerHello` and `MsgType` 16/17, Protobuf only.** The two
   handshake messages a Unity client needs to open a sealed session on the gameplay hop.
   `Wire.cs` regenerated from the backend's `develop` after `rpg-mmo-server#294` merged.
