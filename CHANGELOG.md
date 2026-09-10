@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SealedClientHello` / `SealedServerHello` and `MsgType` 16/17, Protobuf only.** The two
+  handshake messages a Unity client needs to open a sealed session on the gameplay hop.
+  `Wire.cs` regenerated from the backend's `develop` after `rpg-mmo-server#294` merged.
+
+  **The JSON codec deliberately does not learn them, and refuses loudly.** Key material must
+  never be renderable into a human-readable payload, and JSON is the encoding someone is most
+  likely to paste into an issue — which is also why a server that requires sealing refuses a
+  JSON client outright rather than serving it in the clear. `JsonWireCodec.EncodeBody` throws
+  `no JSON encoder for payload type SealedClientHello`, and a test asserts the message *names
+  the type*: a silent empty body would be worse than the leak it prevents, because the server
+  would then refuse the handshake for a reason that names nothing.
+
+- **`EnterWorldResponse.session_key` is gone from the schema**, replaced by `reserved 5` on
+  the backend. It was the per-session key of the scheme ADR-22 supersedes — delivered to the
+  client in the clear over the same plaintext transport it was meant to protect. A test
+  asserts the generated type has no `SessionKey` property, because a future regeneration that
+  quietly brought it back would compile and pass everything else.
+
 - **`SealedClientExchange` — the client half of the sealed handshake, with no transport in
   it.** `CreateHello()` produces the ephemeral public key; `AcceptServerHello()` agrees,
   builds the transcript, verifies the server's binding and returns the two one-direction

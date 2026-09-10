@@ -109,6 +109,16 @@ namespace Cuvara.Netcode.Codec
                 case Msg.EnterWorldRequest m:
                     return new Pb.EnterWorldRequest { MapId = m.MapId ?? string.Empty }.ToByteArray();
 
+                case Msg.SealedClientHello m:
+                    // Protobuf only, deliberately: the JSON codec has no encoder for this
+                    // type and throws, so key material can never be rendered into a
+                    // human-readable payload. That is also why a server requiring sealing
+                    // refuses a JSON client outright rather than serving it in the clear.
+                    return new Pb.SealedClientHello
+                    {
+                        PublicKey = ByteString.CopyFrom(m.PublicKey ?? Array.Empty<byte>()),
+                    }.ToByteArray();
+
                 case Msg.JoinTokenRequest m:
                     return new Pb.JoinTokenRequest
                     {
@@ -215,6 +225,17 @@ namespace Cuvara.Netcode.Codec
                     {
                         var m = Pb.PongMessage.Parser.ParseFrom(bytes);
                         return new Msg.PongMessage { Timestamp = m.Timestamp, ServerTime = m.ServerTime };
+                    }
+
+                    case MsgType.SealedServerHello:
+                    {
+                        var m = Pb.SealedServerHello.Parser.ParseFrom(bytes);
+                        return new Msg.SealedServerHello
+                        {
+                            PublicKey = m.PublicKey.ToByteArray(),
+                            Binding = m.Binding.ToByteArray(),
+                            Error = m.Error,
+                        };
                     }
 
                     case MsgType.Resync:
