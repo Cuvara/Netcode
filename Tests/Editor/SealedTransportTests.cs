@@ -5,6 +5,7 @@ using System.Threading;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
 using UnityEngine.TestTools;
+using Google.Protobuf;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
@@ -59,7 +60,6 @@ namespace Cuvara.Netcode.Tests.Editor
         private sealed class RespondingTransport : ITransport
         {
             private readonly Queue<byte[]> _inbound = new Queue<byte[]>();
-            private readonly ProtobufWireCodec _codec = new ProtobufWireCodec();
 
             private readonly string _secret;
             private readonly string _jti;
@@ -135,16 +135,28 @@ namespace Cuvara.Netcode.Tests.Editor
                 ClientToServer = c2s;
                 ServerToClient = s2c;
 
-                var hello = new Msg.SealedServerHello
+                // Built from the Protobuf types directly, exactly as the real server does.
+                // The CLIENT codec has no encoder for a server hello — it only ever decodes
+                // one — and adding one so a fixture could call it would be production code
+                // whose only caller is a test.
+                var hello = new RpgMmo.Wire.V1.SealedServerHello
                 {
                     // A man in the middle advertises a key it did not use, and forwards the
                     // binding it read off the wire.
-                    PublicKey = _substituteKey ? SealedKeyPair.Generate().Public : server.Public,
-                    Binding = new SealedTranscriptSigner(_secret, _jti).Sign(transcript),
+                    PublicKey = Google.Protobuf.ByteString.CopyFrom(
+                        _substituteKey ? SealedKeyPair.Generate().Public : server.Public),
+                    Binding = Google.Protobuf.ByteString.CopyFrom(
+                        new SealedTranscriptSigner(_secret, _jti).Sign(transcript)),
                     Error = _error ?? string.Empty,
                 };
 
-                _inbound.Enqueue(_codec.EncodeBody(MsgType.SealedServerHello, hello));
+                var envelope = new RpgMmo.Wire.V1.Envelope
+                {
+                    Type = (uint)MsgType.SealedServerHello,
+                    Payload = Google.Protobuf.ByteString.CopyFrom(hello.ToByteArray()),
+                };
+
+                _inbound.Enqueue(envelope.ToByteArray());
             }
 
             public void Close() { }
@@ -162,6 +174,20 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             return new WireConnection("test", transport, new ProtobufWireCodec(),
                                       new NetworkSettings(), new SilentLog());
+        }
+
+        /// <summary>
+        /// Build a frame the SERVER would send. The client codec has encoders only for the
+        /// types a client sends, so a fixture playing the server cannot go through it — which
+        /// is correct, and is why this builds the Envelope directly.
+        /// </summary>
+        private static byte[] ServerEnvelope(MsgType type, Google.Protobuf.IMessage payload)
+        {
+            return new RpgMmo.Wire.V1.Envelope
+            {
+                Type = (uint)type,
+                Payload = ByteString.CopyFrom(payload.ToByteArray()),
+            }.ToByteArray();
         }
 
         // ------------------------------------------------------------------- the tests
@@ -224,8 +250,8 @@ namespace Cuvara.Netcode.Tests.Editor
             // A perfectly well-formed cleartext Envelope. Accepting it would let anyone who
             // can inject one frame speak to this client unauthenticated, while the session
             // still looks healthy from both ends.
-            byte[] cleartext = new ProtobufWireCodec().EncodeBody(
-                MsgType.Kick, new Msg.KickMessage { Reason = "injected" });
+            byte[] cleartext = ServerEnvelope(
+                MsgType.Kick, new RpgMmo.Wire.V1.KickMessage { Reason = "injected" });
             Assert.AreEqual(0x08, cleartext[0], "fixture check: this really is a cleartext Envelope");
 
             transport.Enqueue(cleartext);
@@ -250,7 +276,7 @@ namespace Cuvara.Netcode.Tests.Editor
             var serverOutbound = new SealedSession(
                 new SealedAead(transport.ServerToClient), new StrictMonotonicSequence());
             byte[] frame = serverOutbound.Seal(
-                new ProtobufWireCodec().EncodeBody(MsgType.Kick, new Msg.KickMessage { Reason = "bye" }));
+                ServerEnvelope(MsgType.Kick, new RpgMmo.Wire.V1.KickMessage { Reason = "bye" }));
 
             transport.Enqueue(frame);
             WireFrame? first = connection.ReceiveFrameAsync(CancellationToken.None).GetAwaiter().GetResult();
