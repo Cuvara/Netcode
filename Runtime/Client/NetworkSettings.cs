@@ -32,6 +32,54 @@ namespace Cuvara.Netcode.Client
         public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
         /// <summary>
+        /// Whether to run the sealed-session handshake on the gameplay hop after the join
+        /// reply. Must match the game server's <c>--sealed</c> setting.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Defaults to <c>false</c>, matching the server's own default
+        /// (<c>SealedRequirement.Disabled</c>), so an existing deployment is unaffected.
+        /// </para>
+        /// <para>
+        /// <b>This is a deployment-wide setting, not a negotiation, and ADR-22 is explicit
+        /// that it must not become one.</b> A protocol that can be talked down to cleartext
+        /// will be, so neither side offers a fallback and neither side asks the other what it
+        /// supports. The cost is that a mismatch is a misconfiguration rather than a
+        /// degradation:
+        /// </para>
+        /// <list type="bullet">
+        /// <item><description>
+        /// <b>Client on, server off:</b> the server never sends a hello, so the client's read
+        /// times out. It is reported as such, with the mismatch named as the likely cause,
+        /// rather than being left to hang — which is what this setting existing at all is
+        /// worth.
+        /// </description></item>
+        /// <item><description>
+        /// <b>Client off, server on:</b> the server refuses the session and closes. The
+        /// client sees a closed connection during the join.
+        /// </description></item>
+        /// </list>
+        /// <para>
+        /// A JSON client can never seal — the handshake messages are absent from the JSON
+        /// message set on purpose, so key material cannot be rendered into a human-readable
+        /// payload — and a server that requires sealing refuses one outright rather than
+        /// serving it in the clear.
+        /// </para>
+        /// </remarks>
+        public bool RequireSealedSession { get; set; }
+
+        /// <summary>
+        /// How long to wait for the server's sealed hello before giving up.
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="ConnectTimeout"/> and deliberately short: the server
+        /// answers immediately or not at all, since the hello needs no lookup and no I/O.
+        /// A long budget here buys nothing and turns the commonest misconfiguration into a
+        /// long silence.
+        /// </remarks>
+        public TimeSpan SealedHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
         /// Budget for one <c>enter_world</c> round trip, separate from
         /// <see cref="ConnectTimeout"/> and deliberately larger than the gateway's
         /// own handler window (18 s against a cold map — it may allocate a server
