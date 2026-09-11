@@ -5,6 +5,35 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.2] - 2026-09-11
+
+### Added
+- **A client refused for not sealing now retries WITH sealing, instead of being unable to
+  play.** A server running `GAMESERVER_SEALED=require` kicks a client that did not seal and
+  names the reason (`no_sealed_session`). That is a *configuration* answer, not an eviction:
+  the account is not playing elsewhere, and the same client sealing is accepted. The policy
+  now retries that one kick reason, and `NetworkClient` turns `RequireSealedSession` on
+  before reconnecting.
+
+  **It escalates and never downgrades, by construction rather than by promise.** There is
+  exactly one assignment to `RequireSealedSession` in the whole runtime and it is `= true`,
+  so a hostile peer can ask this client for MORE protection and never for less — which is
+  what keeps this from being the negotiated downgrade ADR-22 exists to forbid. A test scans
+  the runtime tree for `RequireSealedSession = false` and fails if one ever appears (and
+  fails if it scans zero files, so an empty scan cannot pass for a clean one).
+
+  Every other kick reason is still `Never`, `duplicate_login` included — retrying that one
+  would evict the newer login.
+
+  Why it was needed: dev and staging now require sealing, and without this a default player
+  build cannot connect at all unless whoever launches it knows to pass `-cuvara-sealed 1`.
+  Setting the flag still skips the one refused join.
+
+- `SealedRefusalReason` — the refusal strings as a named wire contract with the game server
+  (`GameServer/Net/Sealed/SealedPolicy.cs`), so a refusal can be acted on rather than only
+  logged. `EncodingCannotSeal` is there too, and deliberately not retried: nothing at
+  runtime fixes a JSON client, because the JSON message set has no sealed frame.
+
 ## [0.36.1] - 2026-09-11
 
 ### Fixed
