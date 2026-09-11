@@ -579,6 +579,27 @@ namespace Cuvara.Netcode.Client
             }
 
             var decision = ReconnectPolicy.ForSessionClose(info);
+
+            // ESCALATE, never downgrade. A `require` server refuses a client that did not
+            // seal and names the reason; the same client sealing is accepted. Turning our
+            // own requirement ON here is safe in the only direction that matters -- there
+            // is no path in this class that turns it OFF, so a hostile peer can ask us for
+            // more protection and never for less, which is what keeps this from being the
+            // negotiated downgrade ADR-22 exists to forbid.
+            //
+            // Without it, a client whose sealing flag is off simply cannot play on a
+            // `require` server, and every operator has to know to pass a flag.
+            if (info.Cause == DisconnectCause.Kicked
+                && info.Reason == SealedRefusalReason.NoSealedSession
+                && !_settings.RequireSealedSession)
+            {
+                _settings.RequireSealedSession = true;
+                _log.Warn(
+                    "the game server requires a sealed session and refused this one (" +
+                    info.Reason + "); reconnecting WITH sealing. Set " +
+                    "NetworkSettings.RequireSealedSession to skip this first refused join.");
+            }
+
             switch (decision)
             {
                 case ReconnectDecision.ReconnectAfterDelay:
