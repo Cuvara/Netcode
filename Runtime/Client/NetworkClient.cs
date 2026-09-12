@@ -281,6 +281,34 @@ namespace Cuvara.Netcode.Client
         }
 
         /// <summary>
+        /// Enters a dungeon instance with a caller-supplied JWT, the dungeon counterpart of
+        /// <see cref="ConnectAsync(string,string,CancellationToken)"/>.
+        /// </summary>
+        /// <remarks>
+        /// Present for the same reason the map overload is: a caller that already holds a token
+        /// should not be forced to install an auth provider. Without it, every harness and probe
+        /// that drives a dungeon entry has to fake a provider, which is machinery in the way of
+        /// the thing being tested.
+        /// </remarks>
+        public UniTask ConnectToDungeonAsync(
+            string jwt, string contentId, string partyId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(jwt))
+            {
+                throw new ArgumentException("jwt must not be empty", nameof(jwt));
+            }
+            if (string.IsNullOrEmpty(partyId))
+            {
+                throw new ArgumentException(
+                    "a dungeon entry needs a party id; pass one or call ConnectAsync for a map",
+                    nameof(partyId));
+            }
+
+            var generation = BeginOperation(userClosed: false);
+            return RunConnectAsync(generation, jwt, contentId, partyId, cancellationToken, inReconnect: false);
+        }
+
+        /// <summary>
         /// Runs both hops with a caller-supplied JWT. Throws <see cref="NetworkException"/>
         /// if either server refuses, after exhausting <see cref="NetworkSettings.JoinAttempts"/>.
         /// On any failure or cancel both hops are closed before the exception leaves.

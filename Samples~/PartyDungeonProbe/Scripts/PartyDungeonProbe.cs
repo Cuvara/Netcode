@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
+using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Protocol;
 using Cuvara.Netcode.Transport;
 using Cysharp.Threading.Tasks;
@@ -233,9 +234,9 @@ namespace Cuvara.Netcode.Samples.PartyDungeonProbe
                 JoinAttempts = 1,
                 ReconnectAttempts = 1,
             },
-            new TcpTransportFactory(),
+            new DefaultTransportFactory(),
             new JsonWireCodec(),
-            new UnityNetworkLog());
+            new UnityNetLog());
 
         private async UniTask CaseMapEntrySendsNoParty(CancellationToken ct)
         {
@@ -246,7 +247,7 @@ namespace Cuvara.Netcode.Samples.PartyDungeonProbe
             var client = NewClient();
             try { await client.ConnectAsync("jwt", Map, ct); }
             catch (Exception) { /* the fake gateway refuses the assignment on purpose */ }
-            finally { await client.DisposeAsync(); }
+            finally { client.Dispose(); }
 
             if (_seen.Count != 1) { Fail($"the gateway saw {_seen.Count} enter_world requests, wanted 1"); return; }
             if (_seen[0].PartyId != null)
@@ -264,9 +265,9 @@ namespace Cuvara.Netcode.Samples.PartyDungeonProbe
 
             ServeGatewayAsync(1, ct).Forget();
             var client = NewClient();
-            try { await client.ConnectToDungeonAsync(Content, Party, ct); }
+            try { await client.ConnectToDungeonAsync("probe-jwt", Content, Party, ct); }
             catch (Exception) { /* assignment refused on purpose */ }
-            finally { await client.DisposeAsync(); }
+            finally { client.Dispose(); }
 
             if (_seen.Count != 1) { Fail($"the gateway saw {_seen.Count} enter_world requests, wanted 1"); return; }
             if (_seen[0].PartyId != Party) { Fail($"party_id was \"{_seen[0].PartyId}\", wanted \"{Party}\""); return; }
@@ -282,7 +283,7 @@ namespace Cuvara.Netcode.Samples.PartyDungeonProbe
             var client = NewClient();
             try
             {
-                client.ConnectToDungeonAsync(Content, "", ct).Forget();
+                client.ConnectToDungeonAsync("probe-jwt", Content, "", ct).Forget();
                 Fail("an empty party id was accepted — it must throw rather than fall back to a map entry");
             }
             catch (ArgumentException ex)
@@ -306,13 +307,13 @@ namespace Cuvara.Netcode.Samples.PartyDungeonProbe
             ServeGatewayAsync(2, ct).Forget();
 
             var client = NewClient();
-            try { await client.ConnectToDungeonAsync(Content, Party, ct); }
+            try { await client.ConnectToDungeonAsync("probe-jwt", Content, Party, ct); }
             catch (Exception) { /* expected */ }
 
             // Drive one more attempt the way a dropped session would.
-            try { await client.ConnectToDungeonAsync(Content, Party, ct); }
+            try { await client.ConnectToDungeonAsync("probe-jwt", Content, Party, ct); }
             catch (Exception) { /* expected */ }
-            finally { await client.DisposeAsync(); }
+            finally { client.Dispose(); }
 
             if (_seen.Count < 2) { Fail($"only {_seen.Count} enter_world requests reached the gateway, wanted 2"); return; }
             for (var i = 0; i < _seen.Count; i++)
