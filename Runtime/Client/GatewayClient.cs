@@ -146,7 +146,49 @@ namespace Cuvara.Netcode.Client
         /// single-use and expires in 30 s, so a retry that replays one is rejected
         /// with <c>Token already used</c> rather than merely failing again.
         /// </remarks>
-        public async UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken)
+        public UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken) =>
+            EnterWorldAsync(mapId, null, cancellationToken);
+
+        /// <summary>
+        /// Asks for a DUNGEON INSTANCE of <paramref name="contentId"/> for
+        /// <paramref name="partyId"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every member of the party calls this with the same two arguments and is handed the
+        /// SAME address: the instance is keyed by the party, not by the content, so two parties
+        /// running the same dungeon get two servers (ADR-26 decision 2).
+        /// </para>
+        /// <para>
+        /// The gateway checks membership against Nakama before it allocates anything. Naming a
+        /// party you are not in throws with <c>not a member of that party</c>, and a party that
+        /// no longer exists throws with <c>party does not exist</c> -- two distinct messages
+        /// because they send a player to different places, and neither is retryable. A Nakama
+        /// outage is a THIRD answer and is retryable; do not collapse them.
+        /// </para>
+        /// <para>
+        /// Leaving a dungeon is not a call on this class: it is the ordinary map transfer the
+        /// game server already handles, so a party returns home the same way anyone changes map.
+        /// </para>
+        /// </remarks>
+        public UniTask<MapAssignment> EnterDungeonAsync(
+            string contentId, string partyId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(partyId))
+            {
+                // Refusing rather than falling back to a map entry. A caller that lost its
+                // party id wants to know, not to be quietly dropped into the open world with
+                // its party somewhere else.
+                throw new ArgumentException(
+                    "a dungeon entry needs a party id; pass one or call EnterWorldAsync for a map",
+                    nameof(partyId));
+            }
+
+            return EnterWorldAsync(contentId, partyId, cancellationToken);
+        }
+
+        private async UniTask<MapAssignment> EnterWorldAsync(
+            string mapId, string partyId, CancellationToken cancellationToken)
         {
             var connection = RequireHandshakeConnection();
 
@@ -159,7 +201,9 @@ namespace Cuvara.Netcode.Client
                 timeout.CancelAfter(_settings.EnterWorldTimeout);
 
                 await connection.SendFrameAsync(
-                    MsgType.EnterWorld, new EnterWorldRequest { MapId = mapId }, timeout.Token);
+                    MsgType.EnterWorld,
+                    new EnterWorldRequest { MapId = mapId, PartyId = partyId ?? string.Empty },
+                    timeout.Token);
 
                 var frame = await ReceiveAsync(connection, timeout.Token);
 

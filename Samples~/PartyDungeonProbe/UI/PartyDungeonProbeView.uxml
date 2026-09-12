@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="PartyDungeonProbeView.uss" />
+
+    <engine:VisualElement name="party-dungeon-probe" class="cuvara-probe">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Party &amp; dungeon probe" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="Dungeon entry (ADR-26), asked for by the real NetworkClient against a gateway this scene starts itself, reporting the bytes it actually sent. The backend half was proven by a Go probe, which proves a server and says nothing about whether the shipped client can reach it — and for a while it could not, because the client's wire had no party_id at all. No backend, no Nakama, no configuration." />
+
+            <engine:Label text="Listener" class="cuvara-probe__section" />
+            <engine:Label name="listeners-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
+
+            <engine:Label text="Cases" class="cuvara-probe__section" />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="map" text="Map entry → no party_id on the wire"
+                               class="cuvara-probe__button" />
+                <engine:Button name="dungeon" text="Dungeon entry → carries party_id"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="empty-party" text="Empty party id → refused locally"
+                               class="cuvara-probe__button" />
+                <engine:Button name="reconnect" text="Reconnect → SAME instance"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="all" text="Run every case"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Last case" class="cuvara-probe__section" />
+            <engine:Label name="last-case" class="cuvara-probe__readout" />
+            <engine:Label name="outcome-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="Log" class="cuvara-probe__section" />
+            <engine:ScrollView name="log" class="cuvara-probe__log" />
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

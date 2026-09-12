@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.36.2",
+  "version": "0.37.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -94,6 +94,11 @@
       "displayName": "Sealed Session Probe",
       "description": "Two peers in one process running ADR-22's transport crypto for real — no server, no network, no sockets. Fresh X25519 ephemerals authenticated by a join-token-derived binding, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame with the sequence as the nonce. Every frame is shown twice: the plaintext the game wrote, and the bytes a capture would get. Six buttons each mount an attack that must be refused — a flipped bit, a byte-perfect replay, a replayed header with a garbage body (the counter must not move), a cleartext Envelope, a peer with the wrong JOIN_TOKEN_SECRET, and a man in the middle who swaps an ephemeral key. It does NOT prove the shipped client uses any of this; the framing is not yet wired into GameSessionClient.",
       "path": "Samples~/SealedSessionProbe"
+    },
+    {
+      "displayName": "Party & Dungeon Probe",
+      "description": "Dungeon entry (ADR-26) asked for by the real NetworkClient against a gateway the scene starts itself, reporting the bytes actually sent. The backend half was proven by a Go probe -- which proves a server and says nothing about whether the shipped client can reach it, and for a while it could not, because the client's wire had no party_id at all. Four cases: a map entry OMITS party_id rather than sending \"\" (the backend uses omitempty and the golden vectors compare bytes across both implementations); a dungeon entry carries it; an empty party id throws before a socket is opened rather than falling back to a map; and every reconnect attempt carries the SAME party id -- a rejoin that forgets it asks for a map named after the dungeon content, so the player silently leaves their party behind. It does NOT prove a party exists, that Nakama's RPCs work, or that your gateway allocates anything.",
+      "path": "Samples~/PartyDungeonProbe"
     },
     {
       "displayName": "Gateway TLS Probe",
