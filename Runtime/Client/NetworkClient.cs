@@ -76,6 +76,13 @@ namespace Cuvara.Netcode.Client
         // user left" from "the server left"; _evicted records a gateway
         // duplicate_login so the session close that follows is never retried.
         private string _lastMapId;
+
+        // _lastPartyId is what makes a reconnect land back in the INSTANCE rather than in a
+        // map. Without it a dropped dungeon player reconnects with an empty party id, and the
+        // gateway reads that as "a map server for content id dungeon_01" -- a map that does
+        // not exist, so the rejoin fails; and if such a map ever did exist, the player would
+        // silently reappear in the open world while their party carried on without them.
+        private string _lastPartyId;
         private volatile bool _userClosed;
         private volatile bool _evicted;
         private readonly Random _jitter = new Random();
@@ -236,7 +243,69 @@ namespace Cuvara.Netcode.Client
         {
             RequireAuthProvider("the ConnectAsync(jwt, mapId, ct) overload");
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, null, mapId, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, null, mapId, null, cancellationToken, inReconnect: false);
+        }
+
+        /// <summary>
+        /// Runs both hops into a DUNGEON INSTANCE of <paramref name="contentId"/> for
+        /// <paramref name="partyId"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every member of the party calls this with the same two arguments and lands on the
+        /// same server: the instance is keyed by the party, not by the content (ADR-26).
+        /// </para>
+        /// <para>
+        /// The party id is remembered, so an automatic reconnect re-enters the SAME instance.
+        /// A reconnect that forgot it would ask for a map named after the dungeon content --
+        /// which does not exist, so the rejoin fails, and if it ever did exist the player
+        /// would reappear in the open world while their party carried on without them.
+        /// </para>
+        /// <para>
+        /// Leaving is <see cref="TransferToMapAsync"/> to the origin map, the path that
+        /// already exists; there is no LeaveDungeon call to forget to make.
+        /// </para>
+        /// </remarks>
+        public UniTask ConnectToDungeonAsync(string contentId, string partyId, CancellationToken cancellationToken)
+        {
+            RequireAuthProvider("dungeon entry");
+            if (string.IsNullOrEmpty(partyId))
+            {
+                throw new ArgumentException(
+                    "a dungeon entry needs a party id; pass one or call ConnectAsync for a map",
+                    nameof(partyId));
+            }
+
+            var generation = BeginOperation(userClosed: false);
+            return RunConnectAsync(generation, null, contentId, partyId, cancellationToken, inReconnect: false);
+        }
+
+        /// <summary>
+        /// Enters a dungeon instance with a caller-supplied JWT, the dungeon counterpart of
+        /// <see cref="ConnectAsync(string,string,CancellationToken)"/>.
+        /// </summary>
+        /// <remarks>
+        /// Present for the same reason the map overload is: a caller that already holds a token
+        /// should not be forced to install an auth provider. Without it, every harness and probe
+        /// that drives a dungeon entry has to fake a provider, which is machinery in the way of
+        /// the thing being tested.
+        /// </remarks>
+        public UniTask ConnectToDungeonAsync(
+            string jwt, string contentId, string partyId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(jwt))
+            {
+                throw new ArgumentException("jwt must not be empty", nameof(jwt));
+            }
+            if (string.IsNullOrEmpty(partyId))
+            {
+                throw new ArgumentException(
+                    "a dungeon entry needs a party id; pass one or call ConnectAsync for a map",
+                    nameof(partyId));
+            }
+
+            var generation = BeginOperation(userClosed: false);
+            return RunConnectAsync(generation, jwt, contentId, partyId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -252,7 +321,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, jwt, mapId, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, jwt, mapId, null, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -270,7 +339,10 @@ namespace Cuvara.Netcode.Client
             _log.Info($"transferring to map '{mapId}'");
             var generation = BeginOperation(userClosed: false, leavePolitely: true);
             SetState(NetworkClientState.Transferring, "transfer");
-            return RunConnectAsync(generation, null, mapId, cancellationToken, inReconnect: false);
+            // null party id on purpose: a transfer is how a party LEAVES its instance, so it
+            // must also clear what a later reconnect would rejoin. Passing the current party
+            // here would send a disconnected player back into the dungeon they just left.
+            return RunConnectAsync(generation, null, mapId, null, cancellationToken, inReconnect: false);
         }
 
         /// <summary>Leaves the world and drops both connections. Never reconnects.</summary>
@@ -313,8 +385,8 @@ namespace Cuvara.Netcode.Client
             return generation;
         }
 
-        private async UniTask RunConnectAsync(int generation, string jwt, string mapId, CancellationToken ct,
-            bool inReconnect)
+        private async UniTask RunConnectAsync(int generation, string jwt, string mapId, string partyId,
+            CancellationToken ct, bool inReconnect)
         {
             // Nothing from a previous session survives a new join: entity ids are
             // only meaningful within one game server's world.
@@ -354,7 +426,12 @@ namespace Cuvara.Netcode.Client
                         // starting, retry shortly" as retryable and its single-flight
                         // allocation ASSUMES the client retries (#54).
                         SetState(NetworkClientState.Assigning, "");
-                        var assignment = await gateway.EnterWorldAsync(mapId, ct);
+                        // One call, two meanings, decided by the party id -- the same shape
+                        // the wire has (ADR-26 decision 1). A null party id is a map entry and
+                        // produces exactly the bytes a pre-party client produced.
+                        var assignment = string.IsNullOrEmpty(partyId)
+                            ? await gateway.EnterWorldAsync(mapId, ct)
+                            : await gateway.EnterDungeonAsync(mapId, partyId, ct);
                         Guard(generation, ct);
 
                         session = new GameSessionClient(_settings, _transports, _codec, _log);
@@ -378,6 +455,11 @@ namespace Cuvara.Netcode.Client
                         _gateway = gateway;
                         _session = session;
                         _lastMapId = mapId;
+                        // Recorded together, so a reconnect cannot rejoin one without the
+                        // other. TransferToMapAsync passes null and therefore clears it --
+                        // which is exactly right, because a transfer is how a party LEAVES
+                        // its instance.
+                        _lastPartyId = partyId;
                         committed = true;
                         session.Closed += OnSessionClosed;
                         SetState(NetworkClientState.InWorld, "");
@@ -619,12 +701,12 @@ namespace Cuvara.Netcode.Client
             // session's generation — but it is the server's doing, not the user's.
             var generation = BeginOperation(userClosed: false);
             _reconnectCts = new CancellationTokenSource();
-            ReconnectLoopAsync(generation, _lastMapId, decision == ReconnectDecision.ReconnectAfterDelay, cause,
+            ReconnectLoopAsync(generation, _lastMapId, _lastPartyId, decision == ReconnectDecision.ReconnectAfterDelay, cause,
                 _reconnectCts.Token).Forget();
         }
 
-        private async UniTaskVoid ReconnectLoopAsync(int generation, string mapId, bool delayFirst,
-            DisconnectInfo cause, CancellationToken ct)
+        private async UniTaskVoid ReconnectLoopAsync(int generation, string mapId, string partyId,
+            bool delayFirst, DisconnectInfo cause, CancellationToken ct)
         {
             var startedMs = _settings.MonotonicClock();
             var budgetMs = (long)_settings.ReconnectBudget.TotalMilliseconds;
@@ -669,7 +751,7 @@ namespace Cuvara.Netcode.Client
                         // session record when our socket died. A cached-and-valid
                         // JWT costs the provider nothing; a cold re-auth is its
                         // business, not this loop's.
-                        await RunConnectAsync(generation, null, mapId, ct, inReconnect: true);
+                        await RunConnectAsync(generation, null, mapId, partyId, ct, inReconnect: true);
                         _reconnectCts?.Dispose();
                         _reconnectCts = null;
                         Reconnected?.Invoke();

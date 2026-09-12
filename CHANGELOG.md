@@ -5,6 +5,41 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0] - 2026-09-13
+
+### Added
+
+- **`EnterWorldRequest.PartyId`, and the client calls that use it.** One message asks for two
+  things (ADR-26 decision 1): empty means a map server, non-empty means a dungeon instance of
+  the content named by `MapId`, for that party. `GatewayClient.EnterDungeonAsync` and
+  `NetworkClient.ConnectToDungeonAsync` are the entry points; an empty party id **throws**
+  rather than falling back to a map entry, because a caller that lost its party id wants to
+  know rather than be dropped into the open world while its party is elsewhere.
+
+  **The party id is remembered and replayed on reconnect.** This is the part worth reading:
+  a reconnect that forgot it would ask for a map named after the dungeon content, which does
+  not exist, so the rejoin fails — and if such a map ever did exist the player would silently
+  reappear in the open world while their party carried on without them. Nothing in a log
+  distinguishes either outcome from a flaky network. `TransferToMapAsync` passes a null party
+  on purpose, because a transfer is how a party **leaves** its instance, and a reconnect after
+  one must not haul the player back in.
+
+  The JSON encoder **omits** `party_id` when empty, mirroring the backend's `omitempty`, so a
+  map entry produces byte-for-byte what a pre-party client produced. Without that, every JSON
+  map entry would start carrying `"party_id":""` — harmless to a server and a silent
+  divergence from the Go side's bytes, which the golden vectors compare.
+
+- **`Samples~/PartyDungeonProbe`.** The real `NetworkClient` against a gateway the scene starts
+  itself, reading back the bytes it sent. Four cases, one of which is the reconnect above.
+  It proves the client asks correctly; it proves nothing about Nakama, membership, or whether
+  a gateway allocates anything, and says so.
+
+### Changed
+
+- **`Runtime/Protocol/Generated/Wire.cs` resynced with the backend's `develop`.** The generated
+  file is byte-compared against the server repo in CI, so a backend proto merge reddens every
+  PR here until this happens. It carried `party_id` alongside whatever else has landed upstream.
+
 ## [0.36.2] - 2026-09-11
 
 ### Added

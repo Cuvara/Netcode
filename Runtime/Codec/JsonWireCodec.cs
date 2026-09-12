@@ -111,7 +111,12 @@ namespace Cuvara.Netcode.Codec
                     return b.ToString();
 
                 case EnterWorldRequest m:
-                    b.BeginObject().String("map_id", m.MapId).EndObject();
+                    b.BeginObject().String("map_id", m.MapId);
+                    // Omitted when empty, matching the backend's `omitempty`: a map entry
+                    // then produces the SAME bytes a pre-party client produced, so the field
+                    // is additive in JSON and not only in Protobuf.
+                    if (!string.IsNullOrEmpty(m.PartyId)) b.String("party_id", m.PartyId);
+                    b.EndObject();
                     return b.ToString();
 
                 case JoinTokenRequest m:

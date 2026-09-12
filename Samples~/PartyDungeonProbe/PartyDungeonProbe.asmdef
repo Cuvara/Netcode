@@ -1,0 +1,17 @@
+{
+    "name": "PartyDungeonProbe",
+    "rootNamespace": "Cuvara.Netcode.Samples.PartyDungeonProbe",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
