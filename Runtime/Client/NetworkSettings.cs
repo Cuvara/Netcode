@@ -70,6 +70,28 @@ namespace Cuvara.Netcode.Client
         public bool RequireSealedSession { get; set; }
 
         /// <summary>
+        /// Refuse a game server that does not prove its identity with an ADR-25 signature.
+        /// Off by default.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Off is not a weaker security posture, it is the only correct default during the
+        /// migration: the server and gateway ship the field first, and a client that demanded it
+        /// earlier would refuse every live deployment. Turn it on once the backend it talks to
+        /// is known to sign.
+        /// </para>
+        /// <para>
+        /// <b>This does not make a plaintext gateway hop safe.</b> With
+        /// <see cref="GatewayUseTls"/> off, the identity key itself arrives over a hop an active
+        /// attacker controls, so requiring a signature only forces the attacker to sign with the
+        /// key they already substituted. The pair that actually authenticates the server is this
+        /// flag AND gateway TLS, which is why the result reports the conjunction rather than
+        /// either half.
+        /// </para>
+        /// </remarks>
+        public bool RequireServerIdentity { get; set; }
+
+        /// <summary>
         /// Wrap the <b>gateway</b> connection in TLS, because the gateway terminates TLS
         /// itself (ADR-23). Off by default, matching the gateway's own default.
         /// </summary>

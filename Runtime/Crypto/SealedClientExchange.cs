@@ -26,6 +26,18 @@ namespace Cuvara.Netcode.Crypto
         /// with. A configuration fault, and still a refusal.
         /// </summary>
         NotConfigured,
+
+        /// <summary>
+        /// The server's ADR-25 identity signature was required and did not check out — a bad
+        /// signature, or none offered at all.
+        /// </summary>
+        /// <remarks>
+        /// Distinct from <see cref="BindingRejected"/> because the two are refused under
+        /// different trust anchors and a report that conflates them sends the reader to the
+        /// wrong secret: the binding is symmetric under <c>JOIN_TOKEN_SECRET</c>, the identity
+        /// signature is asymmetric under a key the pod generated for itself.
+        /// </remarks>
+        IdentityRejected,
     }
 
     /// <summary>
@@ -156,6 +168,43 @@ namespace Cuvara.Netcode.Crypto
         public SealedExchange AcceptServerHello(
             ReadOnlySpan<byte> serverPublic, ReadOnlySpan<byte> binding, string serverError)
         {
+            return AcceptServerHello(
+                serverPublic, binding, serverError,
+                identitySignature: ReadOnlySpan<byte>.Empty,
+                identityPublic: ReadOnlySpan<byte>.Empty,
+                identityKeyHopAuthenticated: false,
+                requireIdentity: false);
+        }
+
+        /// <summary>
+        /// As above, additionally checking the server's ADR-25 identity signature.
+        /// </summary>
+        /// <param name="identitySignature">
+        /// <c>SealedServerHello.server_signature</c>. Empty from a server that predates ADR-25.
+        /// </param>
+        /// <param name="identityPublic">
+        /// The identity key from <c>EnterWorldResponse.server_public_key</c> — it arrives on
+        /// the GATEWAY hop, not this one, which is the whole reason the next parameter exists.
+        /// </param>
+        /// <param name="identityKeyHopAuthenticated">
+        /// Whether that gateway hop was authenticated (TLS with a validated or pinned
+        /// certificate). A verified signature over a key the attacker supplied proves nothing,
+        /// so this is what decides whether the result reads as verified.
+        /// </param>
+        /// <param name="requireIdentity">
+        /// Refuse the handshake when no usable signature is offered. Off by default: the
+        /// migration order is server-and-gateway first, and a client that demanded identity
+        /// before then would refuse every live deployment.
+        /// </param>
+        public SealedExchange AcceptServerHello(
+            ReadOnlySpan<byte> serverPublic,
+            ReadOnlySpan<byte> binding,
+            string serverError,
+            ReadOnlySpan<byte> identitySignature,
+            ReadOnlySpan<byte> identityPublic,
+            bool identityKeyHopAuthenticated,
+            bool requireIdentity)
+        {
             if (_ephemeral == null)
                 throw new InvalidOperationException("CreateHello must be called first");
 
@@ -185,6 +234,14 @@ namespace Cuvara.Netcode.Crypto
                         "the server's binding did not verify over this transcript");
             }
 
+            // Identity is judged BEFORE the keys are derived, so a refusal costs nothing and
+            // cannot leave half a session installed.
+            ServerIdentityResult identity = ServerIdentityVerifier.Evaluate(
+                transcript, identityPublic, identitySignature, identityKeyHopAuthenticated, requireIdentity);
+
+            if (identity.Refused)
+                return SealedExchange.Failed(SealedExchangeResult.IdentityRejected, identity.Error);
+
             byte[] c2s;
             byte[] s2c;
             SealedCrypto.DeriveDirectionKeys(shared, transcript, out c2s, out s2c);
@@ -196,7 +253,8 @@ namespace Cuvara.Netcode.Crypto
                 outbound: new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence()),
                 inbound: new SealedSession(new SealedAead(s2c), new StrictMonotonicSequence()),
                 bindingVerified: _bindingVerifiable,
-                transcript: transcript);
+                transcript: transcript,
+                identity: identity);
         }
     }
 
@@ -228,11 +286,23 @@ namespace Cuvara.Netcode.Crypto
         /// <summary>The bytes both peers authenticated. Diagnostics; never logged whole.</summary>
         public byte[] Transcript { get; private set; }
 
+        /// <summary>
+        /// What this handshake learned about the server's identity (ADR-25).
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="BindingVerified"/> rather than merged into it: the two rest
+        /// on different anchors, only one of them can ever be true in a shipped client, and a
+        /// single boolean covering both would make the reachable state indistinguishable from
+        /// the unreachable one.
+        /// </remarks>
+        public ServerIdentityResult Identity { get; private set; }
+
         /// <summary>Why it failed, for the local log. Never sent to the peer.</summary>
         public string Error { get; private set; }
 
         internal static SealedExchange Succeeded(
-            SealedSession outbound, SealedSession inbound, bool bindingVerified, byte[] transcript)
+            SealedSession outbound, SealedSession inbound, bool bindingVerified, byte[] transcript,
+            ServerIdentityResult identity)
         {
             return new SealedExchange
             {
@@ -241,6 +311,7 @@ namespace Cuvara.Netcode.Crypto
                 Inbound = inbound,
                 BindingVerified = bindingVerified,
                 Transcript = transcript,
+                Identity = identity,
                 Error = string.Empty,
             };
         }

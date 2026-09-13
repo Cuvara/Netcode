@@ -18,6 +18,11 @@
   The reported Android failure did not reproduce with this list — on Windows. The
   Android question is open and merely no longer blocking.
 
+  The two Ed25519 entries are ADR-25 server identity verification, added with it.
+  They were NOT covered by the Windows verification above, which predates them:
+  treat Ed25519 under stripping as verified only once a player has run the
+  SealedSessionProbe Ed25519 case.
+
   If a High-stripped build ever fails inside BouncyCastle, widen to
   <assembly fullname="BouncyCastle.Cryptography" preserve="all" /> and record the
   size cost, rather than hunting types one at a time.
@@ -30,6 +35,8 @@
   <assembly fullname="BouncyCastle.Cryptography">
     <type fullname="Org.BouncyCastle.Crypto.Modes.ChaCha20Poly1305" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Agreement.X25519Agreement" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Signers.Ed25519Signer" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Parameters.Ed25519PublicKeyParameters" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Parameters.X25519PublicKeyParameters" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Generators.X25519KeyPairGenerator" preserve="all" />
