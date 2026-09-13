@@ -5,6 +5,22 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`Runtime/Protocol/Generated/Wire.cs` resynced to the backend's `develop`.** Byte-for-byte,
+  which is what CI's "Generated Wire.cs matches the backend" job compares — md5
+  `4f4fa16416c6bd80a6e8d730242df754`. Two fields arrive with it, both ADR-25 server identity:
+  `SealedServerHello.server_signature` (field 4, the Ed25519 signature) and
+  `EnterWorldResponse.server_public_key` (field 6, the public half needed to check it). Nothing
+  else changed but the serialized descriptor blob, which re-flows whenever any field is added.
+
+  **This commit adds no behaviour.** Nothing reads either field yet; the hand-written message
+  classes and the codecs come next. A generated-code resync lands on its own because it
+  reddens every other open netcode PR until it does, and mixing it with the feature would make
+  the feature's diff unreadable.
+
 ## [0.37.0] - 2026-09-13
 
 ### Added
