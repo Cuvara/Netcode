@@ -51,15 +51,27 @@ namespace Cuvara.Netcode.Client
 
             /// <summary>The transport failed while the handshake was in flight.</summary>
             TransportFailed,
+
+            /// <summary>
+            /// The server's ADR-25 identity signature was required and did not check out.
+            /// </summary>
+            IdentityRejected,
         }
 
         /// <summary>The result, and what it does and does not prove.</summary>
         public readonly struct Result
         {
             internal Result(Outcome outcome, bool bindingVerified, string error)
+                : this(outcome, bindingVerified, default(ServerIdentityResult), error)
+            {
+            }
+
+            internal Result(
+                Outcome outcome, bool bindingVerified, ServerIdentityResult identity, string error)
             {
                 Outcome = outcome;
                 BindingVerified = bindingVerified;
+                Identity = identity;
                 Error = error ?? string.Empty;
             }
 
@@ -77,6 +89,18 @@ namespace Cuvara.Netcode.Client
             /// securely" has to have looked at it.
             /// </remarks>
             public bool BindingVerified { get; }
+
+            /// <summary>
+            /// What the handshake learned about the server's identity (ADR-25).
+            /// </summary>
+            /// <remarks>
+            /// Unlike <see cref="BindingVerified"/>, this one CAN be true in a shipped client —
+            /// but only where the gateway hop is authenticated, because that is the hop the
+            /// identity key travels over. Read <c>Identity.Verified</c>, not
+            /// <c>Identity.Checked</c>: the first is the conjunction that matters and the second
+            /// is half of it.
+            /// </remarks>
+            public ServerIdentityResult Identity { get; }
 
             /// <summary>Local diagnostic. Never sent to the peer.</summary>
             public string Error { get; }
@@ -103,8 +127,40 @@ namespace Cuvara.Netcode.Client
         /// installing a session, and the caller must close the connection rather than
         /// continue. A protocol that can be talked down to cleartext will be.
         /// </remarks>
-        public static async UniTask<Result> RunAsync(
+        public static UniTask<Result> RunAsync(
             WireConnection connection, string jti, string joinTokenSecret, CancellationToken cancellationToken)
+        {
+            return RunAsync(
+                connection, jti, joinTokenSecret,
+                serverIdentityKey: null,
+                identityKeyHopAuthenticated: false,
+                requireServerIdentity: false,
+                cancellationToken: cancellationToken);
+        }
+
+        /// <summary>
+        /// As above, additionally checking the server's ADR-25 identity signature.
+        /// </summary>
+        /// <param name="serverIdentityKey">
+        /// The identity key from <c>EnterWorldResponse.server_public_key</c>, or null from a
+        /// gateway that predates ADR-25.
+        /// </param>
+        /// <param name="identityKeyHopAuthenticated">
+        /// Whether the gateway hop that delivered that key was authenticated. <b>Not the
+        /// gameplay hop</b> — this one is sealed by definition, and sealing it is not what makes
+        /// the identity key trustworthy.
+        /// </param>
+        /// <param name="requireServerIdentity">
+        /// Refuse rather than continue when no usable signature is offered.
+        /// </param>
+        public static async UniTask<Result> RunAsync(
+            WireConnection connection,
+            string jti,
+            string joinTokenSecret,
+            byte[] serverIdentityKey,
+            bool identityKeyHopAuthenticated,
+            bool requireServerIdentity,
+            CancellationToken cancellationToken)
         {
             if (connection == null) throw new ArgumentNullException(nameof(connection));
             if (string.IsNullOrEmpty(jti)) throw new ArgumentException("no jti", nameof(jti));
@@ -148,13 +204,20 @@ namespace Cuvara.Netcode.Client
             SealedExchange result = exchange.AcceptServerHello(
                 hello.PublicKey ?? Array.Empty<byte>(),
                 hello.Binding ?? Array.Empty<byte>(),
-                hello.Error);
+                hello.Error,
+                hello.ServerSignature ?? Array.Empty<byte>(),
+                serverIdentityKey ?? Array.Empty<byte>(),
+                identityKeyHopAuthenticated,
+                requireServerIdentity);
 
             switch (result.Result)
             {
                 case SealedExchangeResult.Ok:
                     connection.InstallSealedSession(inbound: result.Inbound, outbound: result.Outbound);
-                    return new Result(Outcome.Ok, result.BindingVerified, string.Empty);
+                    return new Result(Outcome.Ok, result.BindingVerified, result.Identity, string.Empty);
+
+                case SealedExchangeResult.IdentityRejected:
+                    return new Result(Outcome.IdentityRejected, false, result.Error);
 
                 case SealedExchangeResult.BadServerKey:
                     return new Result(Outcome.BadServerKey, false, result.Error);

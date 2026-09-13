@@ -43,6 +43,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal *caused* by the absence of a key reports `Offered == false`: that field is what a
   deployment audit reads to answer "did ADR-25 ship here?", and a refusal must not answer yes.
 
+- **The client now reads the server's ADR-25 identity and acts on it.** `ServerIdentityVerifier`
+  was the arithmetic; this is the plumbing. `EnterWorldResponse.ServerPublicKey` and
+  `SealedServerHello.ServerSignature` are decoded by both codecs, carried on `MapAssignment`,
+  and evaluated inside the sealed handshake before any key is derived — so a refusal costs
+  nothing and can never leave half a session installed.
+
+  **The key and the flag saying what its hop was worth travel together, on purpose.**
+  `MapAssignment` carries `ServerIdentityKey` *and* `IdentityKeyHopAuthenticated`, because the
+  identity key arrives on the gateway hop and anything that passes the key onward without the
+  flag has dropped the only thing that makes the signature mean something. `GatewayClient` sets
+  the flag from `GatewayUseTls` and that is sound rather than approximate: `TlsOptions` has no
+  accept-anything mode — it either pins a certificate or falls through to platform validation —
+  so there is no third state in which the flag would be true over a connection nobody checked.
+
+  `NetworkSettings.RequireServerIdentity` refuses a server that offers no usable signature,
+  off by default because the migration order is backend-first and a client demanding identity
+  earlier would refuse every live deployment. Turning it on does **not** make a plaintext
+  gateway hop safe: it forces the attacker to sign with the key they already substituted. The
+  pair that authenticates a server is that flag **and** gateway TLS.
+
+  `GameSessionClient`'s join log now has three branches instead of two, and the middle one is
+  the reason: identity verified, identity *checked but over an unauthenticated hop* (a warning,
+  because it is the state most likely to be misread as success), and not verified at all (info,
+  because with the default settings it is expected and a warning on every join trains the
+  reader to ignore the one that matters). The old "binding verified" branch is gone — it was
+  unreachable in any shipped client and always will be.
+
+  **JSON reads the key as base64**, matching Go's `encoding/json`, and malformed base64 arrives
+  at the verifier as "no key" rather than throwing: these bytes are attacker-chosen, and an
+  exception on the join path is a denial of service with extra steps. A missing field decodes to
+  empty, never null, which is what a pre-ADR-25 gateway looks like and must keep working.
+
+  5 wire tests cover exactly the failure this plumbing invites: a field that decodes to empty is
+  **indistinguishable from a pre-ADR-25 server**, which the client is required to accept — so a
+  dropped field does not fail, it silently degrades every session to unverified. Each of the
+  three plumbing paths was mutated and killed exactly its own test.
+
+- **The sealed-session probe sample gained the ADR-25 case**, including the part no unit test
+  can show: a `Gateway hop authenticated` toggle that changes the verdict **without changing
+  the signature**. Two new buttons — a flipped signature byte (refused by Ed25519 outright) and
+  a substituted identity key re-signed with the attacker's own private half. The second is the
+  only button in the scene whose honest answer depends on a setting, and it is there to make
+  that dependence visible: with the toggle off it reports ACCEPTED, which is not a defect but
+  the plaintext deployment reported truthfully. The sample signs by calling
+  `ServerIdentityVerifier.IdentityInput` rather than re-spelling the layout, because a probe
+  that assembles its own bytes agrees with itself while disagreeing with the server.
+
+  Its README also dropped a claim that had gone stale: that the sealed framing was "not yet
+  wired into `GameSessionClient`". It has been for some time.
+
 ### Changed
 
 - **`link.xml` now preserves `Ed25519Signer` and `Ed25519PublicKeyParameters`.** Without them

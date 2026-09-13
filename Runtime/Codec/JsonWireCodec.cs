@@ -187,7 +187,11 @@ namespace Cuvara.Netcode.Codec
                         ServerAddr = payload.GetString("server_addr"),
                         JoinToken = payload.GetString("join_token"),
                         Transport = payload.GetString("transport"),
-                        Error = payload.GetString("error")
+                        Error = payload.GetString("error"),
+                        // Base64 on this path, because Go marshals []byte that way. A JSON
+                        // gateway in front of a signing server is a real combination: the
+                        // encoding rule is per-hop, and only the GAMEPLAY hop refuses JSON.
+                        ServerPublicKey = payload.GetBytes("server_public_key")
                     };
 
                 case MsgType.JoinTokenResp:

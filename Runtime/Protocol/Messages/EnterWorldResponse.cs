@@ -1,3 +1,5 @@
+using System;
+
 namespace Cuvara.Netcode.Protocol.Messages
 {
     /// <summary>
@@ -25,5 +27,19 @@ namespace Cuvara.Netcode.Protocol.Messages
 
         /// <summary>Gateway error string, from the closed set. Empty on success.</summary>
         public string Error { get; set; } = string.Empty;
+
+        /// <summary>
+        /// The game server's per-pod Ed25519 identity public key, 32 bytes (ADR-25), or empty
+        /// from a gateway that predates it.
+        /// </summary>
+        /// <remarks>
+        /// <b>Read this before concluding that a verified signature authenticates the server.</b>
+        /// The key arrives HERE, on the gateway hop. Over plaintext an active attacker
+        /// substitutes both this key and the signature on the gameplay hop, and the check
+        /// passes against the attacker's own key — so the signature is worth exactly as much as
+        /// this hop is authenticated, and nothing more. That conjunction is computed once, in
+        /// <c>ServerIdentityResult.Verified</c>.
+        /// </remarks>
+        public byte[] ServerPublicKey { get; set; } = Array.Empty<byte>();
     }
 }

@@ -250,7 +250,14 @@ namespace Cuvara.Netcode.Client
                 }
 
                 _log.Info($"map '{mapId}' assigned to {endpoint} over {transport}");
-                return new MapAssignment(endpoint, response.JoinToken, transport);
+                // The hop is authenticated exactly when it is TLS: the transport has no
+                // accept-anything mode -- TlsOptions either pins a certificate or falls through
+                // to platform validation -- so there is no third state where the flag would be
+                // true over a connection nobody checked.
+                return new MapAssignment(
+                    endpoint, response.JoinToken, transport,
+                    response.ServerPublicKey,
+                    _settings.GatewayUseTls);
             }
         }
 

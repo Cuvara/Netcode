@@ -118,6 +118,34 @@ namespace Cuvara.Netcode.Json
             return TryGetMember(name, out var v) && v.Kind == JsonKind.Number ? (float)v._number : fallback;
         }
 
+        /// <summary>
+        /// Reads a member carrying raw bytes. Go's <c>encoding/json</c> marshals a
+        /// <c>[]byte</c> as a standard-alphabet, padded base64 string, and that is the only
+        /// encoding accepted here.
+        /// </summary>
+        /// <remarks>
+        /// Malformed base64 returns the fallback rather than throwing. These bytes come off
+        /// the wire and the one field that uses this is a cryptographic key: a junk value must
+        /// arrive at the verifier as "no key", which it refuses, instead of as an exception on
+        /// attacker-chosen input.
+        /// </remarks>
+        public byte[] GetBytes(string name, byte[] fallback = null)
+        {
+            if (!TryGetMember(name, out var v) || v.Kind != JsonKind.String || v._text.Length == 0)
+            {
+                return fallback ?? System.Array.Empty<byte>();
+            }
+
+            try
+            {
+                return System.Convert.FromBase64String(v._text);
+            }
+            catch (System.FormatException)
+            {
+                return fallback ?? System.Array.Empty<byte>();
+            }
+        }
+
         /// <summary>The value's own text, for a string element inside an array.</summary>
         public string AsString(string fallback = "")
         {

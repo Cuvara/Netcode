@@ -188,6 +188,7 @@ namespace Cuvara.Netcode.Codec
                             JoinToken = m.JoinToken,
                             Transport = m.Transport,
                             Error = m.Error,
+                            ServerPublicKey = m.ServerPublicKey.ToByteArray(),
                         };
                     }
 
@@ -239,6 +240,7 @@ namespace Cuvara.Netcode.Codec
                             PublicKey = m.PublicKey.ToByteArray(),
                             Binding = m.Binding.ToByteArray(),
                             Error = m.Error,
+                            ServerSignature = m.ServerSignature.ToByteArray(),
                         };
                     }
 
