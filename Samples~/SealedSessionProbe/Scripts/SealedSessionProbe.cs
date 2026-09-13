@@ -178,10 +178,13 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
                 SealedKeyPair a = SealedKeyPair.Generate();
                 SealedKeyPair b = SealedKeyPair.Generate();
 
+                // Both agreements run unconditionally: && would short-circuit the second, and
+                // the compiler is right that its out parameter would then be unassigned.
                 byte[] sa;
                 byte[] sb;
-                bool agreed = a.TryAgree(b.Public, out sa) && b.TryAgree(a.Public, out sb);
-                bool sameSecret = agreed && Hex(sa) == Hex(sb);
+                bool clientAgreed = a.TryAgree(b.Public, out sa);
+                bool serverAgreed = b.TryAgree(a.Public, out sb);
+                bool sameSecret = clientAgreed && serverAgreed && Hex(sa) == Hex(sb);
                 if (!sameSecret) failures++;
                 Debug.Log($"{tag} X25519 agreement: {(sameSecret ? "OK" : "FAILED")}");
 
