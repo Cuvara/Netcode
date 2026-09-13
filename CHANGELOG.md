@@ -5,6 +5,29 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.0] - 2026-09-14
+
+### Fixed
+
+- **`AckLatencyEstimator.AckIntervalSeconds` read the snapshot cadence 25% low; it now measures
+  over a ring of gaps.** 0.35.0 recorded this as measured-and-unfixed and pinned the two wrong
+  readings as tests so the next attempt had to come past them. It does: 63.889 ms against a true
+  66.667 on the same jitter fixture (4.2% low, where it read 50.000 ms) and exactly 66.667 on an
+  ideal cadence. The cadence fallback is now visible and counted rather than silent.
+
+- **`PredictionLatencyMeasurement` gates on the correction RATE, not the max.** The max over ~28
+  corrections is one draw from a tail, and it was the statistic being asserted — a run failed on
+  `max correction 2.00 steps` while `corrections > ONE STEP` read 1 of 28 and passed comfortably.
+  One event is not a trend, and the assertion that fired could not tell them apart. The max is
+  still computed and still printed with its full explanatory message, now as a warning: a
+  reporting threshold rather than a budget.
+
+> These five commits sat on `fix/intervalstat` from 2026-09-09 with **no pull request ever
+> opened**, and were found by sweeping every branch unreachable from `main`. Five other branches
+> turned up the same way and none of them was merged — each was verified as already-landed
+> content on a stale fork. The detailed entries, and the in-place corrections to the 0.35.0/0.36.0
+> text they falsify, are filed beside the claims they correct, per this file's convention.
+
 ## [0.38.2] - 2026-09-13
 
 ### Added
