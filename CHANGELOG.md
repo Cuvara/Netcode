@@ -5,6 +5,29 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The sealed-session probe now answers its own question with no UI, no window and nobody
+  clicking.** `RunHeadlessSelfCheck` runs before the `UIDocument` is required and writes one
+  line per claim to the log, ending in a single greppable `VERDICT:` line.
+
+  **This exists because a scene whose only output is labels cannot answer the question the
+  scene was built for.** IL2CPP strips managed code the Editor never strips, so a library
+  reached through its own registries can vanish from a player while every Editor test stays
+  green — no compile error, no exception, just a feature that silently stops working. Running a
+  player is the only way to find out, and until now that meant a person looking at a screen and
+  reporting what they saw. The checks are the ones with no UI in them: X25519 agreement, two
+  distinct HKDF direction keys, a ChaCha20-Poly1305 round trip, a refused flipped byte, Ed25519
+  signing and verification, a refused flipped signature byte, and the conjunction — the **same
+  genuine signature** evaluated over an authenticated and an unauthenticated hop, reading as
+  verified over only one of them.
+
+  The `catch` is part of the answer rather than defensive padding: on a stripped player a
+  missing type surfaces as a `TypeLoadException` or a null from a factory, never as a compile
+  error, so an exception is logged as the finding it is.
+
 ## [0.38.1] - 2026-09-13
 
 ### Fixed

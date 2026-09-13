@@ -99,6 +99,13 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
 
         private void OnEnable()
         {
+            // The self-check runs BEFORE the UI is required, so this scene answers its central
+            // question in a player's log with no window, no renderer and nobody clicking.
+            // Everything below it needs a human; this does not, and the thing most worth
+            // knowing -- does the cryptography survive IL2CPP's stripping? -- is exactly the
+            // thing that cannot be checked in the Editor, which never strips.
+            RunHeadlessSelfCheck();
+
             var document = GetComponent<UIDocument>();
             if (document == null || document.rootVisualElement == null)
             {
@@ -139,6 +146,128 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
                 _hopAuthenticated.RegisterValueChangedCallback(_ => { EvaluateIdentity(); Render(); });
 
             Handshake();
+        }
+
+        /// <summary>
+        /// Every claim this scene makes, checked once and written to the log, with no UI.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a scene grew a headless mode.</b> A player build strips managed code the
+        /// Editor never strips, so a library reached through its own registries can vanish from
+        /// a player while every Editor test stays green — no compile error, no exception, just a
+        /// feature that silently stops working. The only way to find out is to run a player. But
+        /// a player whose only output is a window full of labels answers nothing that can be
+        /// read from a script, so the answer used to depend on somebody looking at a screen and
+        /// reporting what they saw.
+        /// </para>
+        /// <para>
+        /// Each line below names what it checked and what happened, and the last line is a
+        /// single verdict a grep can find. The checks are deliberately the ones with no UI in
+        /// them: fresh keys, a real signature, a real refusal.
+        /// </para>
+        /// </remarks>
+        private static void RunHeadlessSelfCheck()
+        {
+            const string tag = "[SealedSessionProbe/selfcheck]";
+            int failures = 0;
+
+            try
+            {
+                // 1. X25519 + HKDF + the transcript: the ADR-22 half.
+                SealedKeyPair a = SealedKeyPair.Generate();
+                SealedKeyPair b = SealedKeyPair.Generate();
+
+                // Both agreements run unconditionally: && would short-circuit the second, and
+                // the compiler is right that its out parameter would then be unassigned.
+                byte[] sa;
+                byte[] sb;
+                bool clientAgreed = a.TryAgree(b.Public, out sa);
+                bool serverAgreed = b.TryAgree(a.Public, out sb);
+                bool sameSecret = clientAgreed && serverAgreed && Hex(sa) == Hex(sb);
+                if (!sameSecret) failures++;
+                Debug.Log($"{tag} X25519 agreement: {(sameSecret ? "OK" : "FAILED")}");
+
+                byte[] transcript = SealedHandshake.Transcript("selfcheck-jti", a.Public, b.Public);
+
+                byte[] c2s;
+                byte[] s2c;
+                SealedCrypto.DeriveDirectionKeys(sa, transcript, out c2s, out s2c);
+                bool twoKeys = Hex(c2s) != Hex(s2c) && c2s.Length == 32 && s2c.Length == 32;
+                if (!twoKeys) failures++;
+                Debug.Log($"{tag} HKDF two direction keys differ: {(twoKeys ? "OK" : "FAILED")}");
+
+                // 2. ChaCha20-Poly1305, both ways, plus one refusal.
+                var sealing = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+                var opening = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+                byte[] plain = Encoding.UTF8.GetBytes("selfcheck");
+                byte[] frame = sealing.Seal(plain);
+
+                byte[] opened;
+                bool roundTrip = opening.Open(frame, out opened) == SealedOpenResult.Ok
+                                 && Hex(opened) == Hex(plain);
+                if (!roundTrip) failures++;
+                Debug.Log($"{tag} ChaCha20-Poly1305 round trip: {(roundTrip ? "OK" : "FAILED")}");
+
+                var tampered = (byte[])frame.Clone();
+                tampered[tampered.Length - 1] ^= 0x01;
+                byte[] ignored;
+                bool tamperRefused = opening.Open(tampered, out ignored) != SealedOpenResult.Ok;
+                if (!tamperRefused) failures++;
+                Debug.Log($"{tag} a flipped ciphertext byte is refused: {(tamperRefused ? "OK" : "FAILED")}");
+
+                // 3. Ed25519 identity: the ADR-25 half, and the reason this mode exists. These
+                //    two lines are the IL2CPP stripping answer -- BouncyCastle's Ed25519 entry
+                //    points are named in the package's link.xml, and nothing but a player run
+                //    can show whether that was enough.
+                var gen = new Ed25519KeyPairGenerator();
+                gen.Init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+                AsymmetricCipherKeyPair pair = gen.GenerateKeyPair();
+                byte[] identityPublic = ((Ed25519PublicKeyParameters)pair.Public).GetEncoded();
+                byte[] signature = SignIdentity((Ed25519PrivateKeyParameters)pair.Private, transcript, identityPublic);
+
+                bool signed = signature.Length == ServerIdentityVerifier.IdentitySignatureSize;
+                if (!signed) failures++;
+                Debug.Log($"{tag} Ed25519 signing produced {signature.Length} bytes: {(signed ? "OK" : "FAILED")}");
+
+                bool verified = ServerIdentityVerifier.Verify(transcript, identityPublic, signature);
+                if (!verified) failures++;
+                Debug.Log($"{tag} Ed25519 verification of a genuine signature: {(verified ? "OK" : "FAILED")}");
+
+                var flipped = (byte[])signature.Clone();
+                flipped[0] ^= 0x01;
+                bool flipRefused = !ServerIdentityVerifier.Verify(transcript, identityPublic, flipped);
+                if (!flipRefused) failures++;
+                Debug.Log($"{tag} a flipped signature byte is refused: {(flipRefused ? "OK" : "FAILED")}");
+
+                // 4. The conjunction. Both calls use the SAME genuine signature; only the hop
+                //    differs, which is the claim in one assertion.
+                ServerIdentityResult overPlaintext = ServerIdentityVerifier.Evaluate(
+                    transcript, identityPublic, signature, keyHopAuthenticated: false, required: false);
+                ServerIdentityResult overTls = ServerIdentityVerifier.Evaluate(
+                    transcript, identityPublic, signature, keyHopAuthenticated: true, required: false);
+
+                bool conjunction = overPlaintext.Checked && !overPlaintext.Verified
+                                   && overTls.Checked && overTls.Verified;
+                if (!conjunction) failures++;
+                Debug.Log(
+                    $"{tag} the same signature reads as verified ONLY over an authenticated hop: " +
+                    $"{(conjunction ? "OK" : "FAILED")} " +
+                    $"(plaintext: checked={overPlaintext.Checked} verified={overPlaintext.Verified}; " +
+                    $"TLS: checked={overTls.Checked} verified={overTls.Verified})");
+            }
+            catch (Exception ex)
+            {
+                // An exception here IS the answer on a stripped player: a missing type surfaces
+                // as a TypeLoadException or a null from a factory, never as a compile error.
+                failures++;
+                Debug.LogError($"{tag} threw, which on a stripped player usually means a stripped type: {ex}");
+            }
+
+            if (failures == 0)
+                Debug.Log("[SealedSessionProbe/selfcheck] VERDICT: ALL CHECKS PASSED");
+            else
+                Debug.LogError($"[SealedSessionProbe/selfcheck] VERDICT: {failures} CHECK(S) FAILED");
         }
 
         /// <summary>
