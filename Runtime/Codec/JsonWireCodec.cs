@@ -102,15 +102,27 @@ namespace Cuvara.Netcode.Codec
                     return "{}";
 
                 case AuthRequest m:
-                    b.BeginObject().String("token", m.Token).EndObject();
+                    b.BeginObject().String("token", m.Token);
+                    // Omitted when 0, matching proto3's default-is-absent behaviour so the
+                    // two encodings carry the same information: absent means "did not
+                    // advertise", never "version zero".
+                    if (m.ProtocolVersion > 0) b.Number("protocol_version", (long)m.ProtocolVersion);
+                    b.EndObject();
                     return b.ToString();
 
                 case EnterWorldRequest m:
-                    b.BeginObject().String("map_id", m.MapId).EndObject();
+                    b.BeginObject().String("map_id", m.MapId);
+                    // Omitted when empty, matching the backend's `omitempty`: a map entry
+                    // then produces the SAME bytes a pre-party client produced, so the field
+                    // is additive in JSON and not only in Protobuf.
+                    if (!string.IsNullOrEmpty(m.PartyId)) b.String("party_id", m.PartyId);
+                    b.EndObject();
                     return b.ToString();
 
                 case JoinTokenRequest m:
-                    b.BeginObject().String("token", m.Token).EndObject();
+                    b.BeginObject().String("token", m.Token);
+                    if (m.ProtocolVersion > 0) b.Number("protocol_version", (long)m.ProtocolVersion);
+                    b.EndObject();
                     return b.ToString();
 
                 case InputMessage m:
@@ -162,7 +174,11 @@ namespace Cuvara.Netcode.Codec
                     {
                         Ok = payload.GetBool("ok"),
                         UserId = payload.GetString("user_id"),
-                        Error = payload.GetString("error")
+                        Error = payload.GetString("error"),
+                        // Absent leaves 0, which WireProtocolVersion reads as "this
+                        // gateway does not advertise" — the same meaning as an elided
+                        // proto3 field, so both encodings agree without a second rule.
+                        ProtocolVersion = payload.GetUInt("protocol_version")
                     };
 
                 case MsgType.EnterWorldResp:
@@ -171,7 +187,11 @@ namespace Cuvara.Netcode.Codec
                         ServerAddr = payload.GetString("server_addr"),
                         JoinToken = payload.GetString("join_token"),
                         Transport = payload.GetString("transport"),
-                        Error = payload.GetString("error")
+                        Error = payload.GetString("error"),
+                        // Base64 on this path, because Go marshals []byte that way. A JSON
+                        // gateway in front of a signing server is a real combination: the
+                        // encoding rule is per-hop, and only the GAMEPLAY hop refuses JSON.
+                        ServerPublicKey = payload.GetBytes("server_public_key")
                     };
 
                 case MsgType.JoinTokenResp:
@@ -180,7 +200,8 @@ namespace Cuvara.Netcode.Codec
                         Ok = payload.GetBool("ok"),
                         UserId = payload.GetString("user_id"),
                         Error = payload.GetString("error"),
-                        TickRate = payload.GetUInt("tick_rate")
+                        TickRate = payload.GetUInt("tick_rate"),
+                        ProtocolVersion = payload.GetUInt("protocol_version")
                     };
 
                 case MsgType.Snapshot:
@@ -238,7 +259,14 @@ namespace Cuvara.Netcode.Codec
                     // present with 0 from a server that has the field and simply has
                     // nothing to say. Same rule either way: non-positive means "no
                     // value", not "cannot move".
-                    Speed = item.GetFloat("speed")
+                    Speed = item.GetFloat("speed"),
+
+                    // Absent leaves 0, which both fields define as "not sent" — so the
+                    // two encodings agree here without a second rule. Note this is the
+                    // one place JSON does NOT write a zero the way it does for speed:
+                    // zero is a reserved value for these, not a legitimate reading.
+                    FacingBrad = item.GetUInt("facing_brad"),
+                    Action = (Shared.GameLogic.Components.EntityAction)item.GetInt("action")
                 });
             }
 

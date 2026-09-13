@@ -127,6 +127,42 @@ namespace Cuvara.Netcode.Tests.Editor
                     break;
                 }
 
+                case "simultaneous_kill":
+                {
+                    // Both parties strike in one exchange and both may die. The whole
+                    // point is that the CLIENT agrees with the server about the outcome
+                    // for BOTH entities, so both are asserted — an attacker-only check
+                    // would pass while the client disagreed about whether the target
+                    // survived, which is the disagreement that matters in a fight.
+                    //
+                    // Ordering is load-bearing and mirrors the server's runner exactly:
+                    // the attacker strikes first and the target's death is resolved,
+                    // THEN the target strikes back using its post-damage state. Reversing
+                    // it, or resolving both deaths at the end, gives different answers
+                    // whenever the first blow is lethal — a dead entity that still swings
+                    // is precisely what "simultaneous" has to pin down rather than leave
+                    // to each side's intuition.
+                    var attacker = Entity("a", 0f, 0f, attack: c.attackerAttack, defense: c.attackerDefense);
+                    attacker.Hp = c.attackerHp;
+
+                    var target = Entity("b", 1f, 0f, attack: c.targetAttack, defense: c.defenderDefense);
+                    target.Hp = c.targetHp;
+
+                    var damageToTarget = CombatLogic.CalculateDamage(attacker, target);
+                    target.Hp -= damageToTarget;
+                    CombatLogic.HandleDeath(ref target);
+
+                    var damageToAttacker = CombatLogic.CalculateDamage(target, attacker);
+                    attacker.Hp -= damageToAttacker;
+                    CombatLogic.HandleDeath(ref attacker);
+
+                    Assert.AreEqual(c.expectedAttackerHp, attacker.Hp, c.name + ".attackerHp");
+                    Assert.AreEqual(c.expectedTargetHp, target.Hp, c.name + ".targetHp");
+                    Assert.AreEqual(c.expectedAttackerDead, attacker.Dead, c.name + ".attackerDead");
+                    Assert.AreEqual(c.expectedTargetDead, target.Dead, c.name + ".targetDead");
+                    break;
+                }
+
                 case "validate_attack":
                 {
                     var attacker = Entity("a", GoldenVectors.Float(c.attackerX), GoldenVectors.Float(c.attackerY));

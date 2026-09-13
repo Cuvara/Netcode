@@ -50,6 +50,15 @@ namespace Samples.NetcodeE2E
         [SerializeField] private string gatewayHost = "127.0.0.1";
         [SerializeField] private int gatewayPort = 8000;
         [SerializeField] private string mapId = "map_01";
+        [Header("Transport security")]
+        [Tooltip("Run the sealed-session handshake on the GAMEPLAY hop (not the gateway hop) " +
+                 "and encrypt every frame after it. MUST match the game server's " +
+                 "GAMESERVER_SEALED: there is no negotiation and no fallback, by design " +
+                 "(ADR-22), so a mismatch is a misconfiguration rather than a degradation. " +
+                 "On here with the server off times out naming the cause; off here with the " +
+                 "server on has the join accepted and the connection then closed.")]
+        [SerializeField] private bool requireSealedSession;
+
 
         [Header("Wire")]
         [Tooltip("Protobuf is where interning and the handle table actually do work. " +
@@ -226,7 +235,7 @@ namespace Samples.NetcodeE2E
         private NetworkClient NewClient(string label)
         {
             var c = new NetworkClient(
-                new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
+                new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
                 new DefaultTransportFactory(), NewCodec(), new UnityNetLog());
 
             if (label == "A")

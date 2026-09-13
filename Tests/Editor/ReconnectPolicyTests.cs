@@ -155,5 +155,80 @@ namespace Cuvara.Netcode.Tests.Editor
                 new NetworkException("gateway rejected authentication: invalid token", "invalid token"));
             Assert.That(refused.Permanent, Is.True);
         }
-    }
+    
+        /// <summary>
+        /// A `require` server refuses a client that did not seal and NAMES the reason. That
+        /// is a configuration answer, not an eviction, and the same client sealing is
+        /// accepted — so it must be retried, or a client whose sealing flag is off simply
+        /// cannot play and the operator has to know to pass a flag.
+        /// </summary>
+        [Test]
+        public void AKickForNoSealedSession_IsRetried()
+        {
+            var info = new DisconnectInfo(DisconnectCause.Kicked, SealedRefusalReason.NoSealedSession);
+
+            Assert.That(ReconnectPolicy.ForSessionClose(info),
+                Is.EqualTo(ReconnectDecision.Reconnect),
+                "a sealing refusal is fixable by retrying with sealing on; refusing to retry " +
+                "leaves the client unable to play against its own server");
+        }
+
+        /// <summary>
+        /// And every other kick still means never. This is the half that matters most:
+        /// duplicate_login must not be retried, because coming back evicts the newer login.
+        /// </summary>
+        [Test]
+        public void EveryOtherKick_IsStillNever()
+        {
+            foreach (var reason in new[] { "duplicate_login", "", "banned", "no_sealed_session_x" })
+            {
+                Assert.That(ReconnectPolicy.ForSessionClose(new DisconnectInfo(DisconnectCause.Kicked, reason)),
+                    Is.EqualTo(ReconnectDecision.Never),
+                    $"kick reason '{reason}' must not be retried");
+            }
+        }
+
+        /// <summary>
+        /// The escalation is one-way by construction, and this pins the construction rather
+        /// than the intent: nothing in the runtime assigns RequireSealedSession = false, so
+        /// a hostile peer can ask the client for MORE protection and never for less. If a
+        /// future change adds such an assignment, this test is the thing that should have
+        /// stopped it — so it reads the source rather than the behaviour.
+        /// </summary>
+        [Test]
+        public void NothingInTheRuntimeTurnsSealingOff()
+        {
+            var runtime = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(UnityEngine.Application.dataPath, "..",
+                    "Packages", "com.cuvara.netcode", "Runtime"));
+            if (!System.IO.Directory.Exists(runtime))
+            {
+                // Running from a source checkout rather than a resolved package.
+                runtime = System.IO.Path.GetFullPath(
+                    System.IO.Path.Combine(UnityEngine.Application.dataPath, "..", "Runtime"));
+            }
+
+            Assert.That(System.IO.Directory.Exists(runtime), Is.True,
+                $"cannot find the Runtime tree to scan (looked at {runtime}); a scan that " +
+                "finds no files is not a pass");
+
+            var offending = new System.Collections.Generic.List<string>();
+            var scanned = 0;
+            foreach (var file in System.IO.Directory.GetFiles(runtime, "*.cs", System.IO.SearchOption.AllDirectories))
+            {
+                scanned++;
+                var text = System.IO.File.ReadAllText(file);
+                if (System.Text.RegularExpressions.Regex.IsMatch(
+                        text, @"RequireSealedSession\s*=\s*false"))
+                {
+                    offending.Add(file);
+                }
+            }
+
+            Assert.That(scanned, Is.GreaterThan(0), "scanned zero files, so this proves nothing");
+            Assert.That(offending, Is.Empty,
+                "something assigns RequireSealedSession = false, which turns the one-way " +
+                "escalation into a negotiated downgrade: " + string.Join(", ", offending));
+        }
+}
 }

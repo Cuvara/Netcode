@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="SendBudgetProbeView.uss" />
+
+    <engine:VisualElement name="send-budget-probe" class="cuvara-probe" picking-mode="Ignore">
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Snapshot send budget" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="A synthetic crowd through the game server's per-connection downlink budget — no server, no network. Byte figures are measured from real Protobuf snapshots, not estimated." />
+
+            <engine:Label text="Load" class="cuvara-probe__section" />
+            <engine:SliderInt name="entities" label="Entities in AOI" low-value="1" high-value="400"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Slider name="churn" label="Fraction moving / tick" low-value="0" high-value="1"
+                           show-input-field="true" class="cuvara-probe__slider" />
+
+            <engine:Label text="Server configuration" class="cuvara-probe__section" />
+            <engine:SliderInt name="budget" label="Budget (bytes)" low-value="0" high-value="8192"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="GAMESERVER_MAX_SNAPSHOT_BYTES. 0 disables it, which is what the server did before the budget existed: the AOI radius bounds area, not how many entities stand inside it." />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="resync" text="Force keyframe (MsgResync)" class="cuvara-probe__button" />
+                <engine:Button name="reset" text="Reset connection" class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:Label text="This snapshot" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__readout">
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="payload" class="cuvara-probe__key" />
+                    <engine:Label name="bytes-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="downlink" class="cuvara-probe__key" />
+                    <engine:Label name="rate-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="budget" class="cuvara-probe__key" />
+                    <engine:Label name="budget-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="visible" class="cuvara-probe__key" />
+                    <engine:Label name="visible-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="carried" class="cuvara-probe__key" />
+                    <engine:Label name="carried-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="shed / tick" class="cuvara-probe__key" />
+                    <engine:Label name="shed-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="max deferral" class="cuvara-probe__key" />
+                    <engine:Label name="age-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="stale on client" class="cuvara-probe__key" />
+                    <engine:Label name="stale-value" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="handle errors" class="cuvara-probe__key" />
+                    <engine:Label name="handle-errors-value" text="0" class="cuvara-probe__value" />
+                </engine:VisualElement>
+            </engine:VisualElement>
+
+            <engine:Label text="Payload bytes, last 64 snapshots" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__chart">
+                <engine:VisualElement name="histogram" class="cuvara-probe__histogram" />
+                <!-- Drawn over the bars rather than beside them: the question the strip
+                     answers is "how close to the cap", and a legend off to one side makes
+                     that a comparison rather than a glance. -->
+                <engine:VisualElement name="budget-line" class="cuvara-probe__budget-line" />
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" text="—" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

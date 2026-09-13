@@ -120,9 +120,31 @@ namespace Cuvara.Netcode.View
         {
             public EntitySampleRing Ring;
             public int Hp, MaxHp;
+
+            /// <summary>
+            /// Facing (biased wire form) and action, as of the newest snapshot.
+            /// </summary>
+            /// <remarks>
+            /// Snapped, never interpolated — the same treatment as Hp, and for a
+            /// stronger reason. Action is a discrete enum, so a blend between two of its
+            /// values is not a state the server ever occupied. Facing COULD be slerped,
+            /// and deliberately is not here: the wire value already changes at the
+            /// server's tick rate, and turning smoothing on inside the netcode would
+            /// impose a look on every consumer. A view that wants smoothing has the
+            /// authoritative value and can smooth toward it; a view that wants snapping
+            /// cannot recover a value that was already blended for it.
+            /// </remarks>
+            public uint FacingBrad;
+            public Shared.GameLogic.Components.EntityAction Action;
         }
 
         private readonly IEntityView _view;
+
+        /// <summary>
+        /// The same object as <see cref="_view"/> when it also implements
+        /// <see cref="IEntityPoseView"/>; null when it does not. See the constructor.
+        /// </summary>
+        private readonly IEntityPoseView _poseView;
         private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
@@ -150,6 +172,8 @@ namespace Cuvara.Netcode.View
         private bool _frameDriven;
         private int _localHp;
         private int _localMaxHp;
+        private uint _localFacingBrad;
+        private Shared.GameLogic.Components.EntityAction _localAction;
         private bool _localSeen;
 
         /// <summary>
@@ -263,6 +287,13 @@ namespace Cuvara.Netcode.View
                                InterpolationConfig interpolation)
         {
             _view = view;
+            // Resolved ONCE, here, rather than per entity per frame. This binder drives
+            // every visible entity every frame at render rate, so an `as` cast in that
+            // loop would be a type check per entity per frame forever, to answer a
+            // question whose answer cannot change for the life of the binder.
+            // Null simply means the view opted out of facing and action, which is a
+            // supported configuration and the whole reason IEntityPoseView is separate.
+            _poseView = view as IEntityPoseView;
             _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
             _clock = clock ?? new StopwatchViewClock();
             _interpConfig = interpolation.Normalized();
@@ -906,6 +937,8 @@ namespace Cuvara.Netcode.View
                     // is predicted, so HP stays whatever the server last said.
                     _localHp = e.Hp;
                     _localMaxHp = e.MaxHp;
+                    _localFacingBrad = e.FacingBrad;
+                    _localAction = e.Action;
                     _localSeen = true;
 
                     // Once AdvanceFrame owns the local entity's rendering (the same
@@ -917,6 +950,7 @@ namespace Cuvara.Netcode.View
                     {
                         var predicted = _predictor.Position;
                         _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
+                        _poseView?.SetPose(id, e.FacingBrad, e.Action);
                     }
 
                     // HP is deliberately still the server's. Only movement is predicted;
@@ -943,9 +977,13 @@ namespace Cuvara.Netcode.View
                     });
 
                     // HP is snapped, never interpolated. A half-applied hit is not a
-                    // state the server ever occupied.
+                    // state the server ever occupied. Facing and action get the same
+                    // treatment for the same reason - and action more strongly still,
+                    // since a blend between two enum values is not a state at all.
                     fresh.Hp = e.Hp;
                     fresh.MaxHp = e.MaxHp;
+                    fresh.FacingBrad = e.FacingBrad;
+                    fresh.Action = e.Action;
                     _interp[id] = fresh;
                 }
 
@@ -975,10 +1013,12 @@ namespace Cuvara.Netcode.View
                     }
 
                     _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
+                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action);
                 }
                 else
                 {
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
+                    _poseView?.SetPose(id, e.FacingBrad, e.Action);
                 }
             }
 
@@ -1067,7 +1107,12 @@ namespace Cuvara.Netcode.View
             _lastRenderMs = _clock.NowMs;
 
             var predicted = _predictor.Position;
+            // Facing and action come from the last snapshot, unchanged. AdvanceFrame
+            // extrapolates POSITION between snapshots and has nothing to extrapolate
+            // these from - inventing a facing from the predicted velocity here would
+            // fight the authoritative value on the very next snapshot.
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
+            _poseView?.SetPose(_localId, _localFacingBrad, _localAction);
         }
 
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
@@ -1099,6 +1144,8 @@ namespace Cuvara.Netcode.View
             _localId = string.Empty;
             _localHp = 0;
             _localMaxHp = 0;
+            _localFacingBrad = 0;
+            _localAction = Shared.GameLogic.Components.EntityAction.Unspecified;
             _localSeen = false;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;

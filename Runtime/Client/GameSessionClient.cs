@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Diagnostics;
@@ -64,6 +65,13 @@ namespace Cuvara.Netcode.Client
         /// </remarks>
         public uint TickRate { get; private set; }
 
+        /// <summary>
+        /// The wire protocol version the game server reported on the last successful
+        /// join. Zero means it advertised none, i.e. it predates the field and never
+        /// checked ours.
+        /// </summary>
+        public uint ServerProtocolVersion { get; private set; }
+
         /// <summary>Server tick of the newest snapshot applied. Never moves backwards.</summary>
         public long ServerTick { get; private set; }
 
@@ -116,7 +124,13 @@ namespace Cuvara.Netcode.Client
                 // The join token must be the very first frame; the game server
                 // rejects anything else outright.
                 await connection.SendFrameAsync(
-                    MsgType.JoinToken, new JoinTokenRequest { Token = assignment.JoinToken }, timeout.Token);
+                    MsgType.JoinToken,
+                    new JoinTokenRequest
+                    {
+                        Token = assignment.JoinToken,
+                        ProtocolVersion = WireProtocolVersion.Current,
+                    },
+                    timeout.Token);
 
                 var frame = await connection.ReceiveFrameAsync(timeout.Token);
                 if (frame == null)
@@ -135,8 +149,37 @@ namespace Cuvara.Netcode.Client
                     throw new NetworkException($"game server refused the join: {response.Error}", response.Error);
                 }
 
+                // Checked independently of the gateway hop (ADR-3: two connections,
+                // two separately deployed processes). It is THIS hop that a version
+                // disagreement corrupts, because the snapshot stream is where a
+                // misparse turns into a wrong world.
+                ServerProtocolVersion = response.ProtocolVersion;
+                if (WireProtocolVersion.IsUnversioned(response.ProtocolVersion))
+                {
+                    _log.Warn(
+                        "game server did not advertise a wire protocol version; this client speaks " +
+                        WireProtocolVersion.Current +
+                        " and the agreement is unverified (the server predates the field)");
+                }
+                else if (!WireProtocolVersion.IsCompatible(response.ProtocolVersion))
+                {
+                    // Defence in depth: the server should already have refused us. If
+                    // it accepted a version it does not speak, we disagree and it did
+                    // not notice — refuse rather than start merging snapshots whose
+                    // fields we may be reading as something else.
+                    throw new NetworkException(
+                        $"game server speaks wire protocol version {response.ProtocolVersion}, " +
+                        $"this client speaks {WireProtocolVersion.Current}",
+                        KickReasons.ProtocolVersionMismatch);
+                }
+
                 UserId = response.UserId;
                 TickRate = response.TickRate;
+
+                if (_settings.RequireSealedSession)
+                {
+                    await RunSealedHandshakeAsync(connection, assignment, cancellationToken);
+                }
             }
 
             _resolver.Reset();
@@ -146,6 +189,113 @@ namespace Cuvara.Netcode.Client
 
             connection.Start();
             _log.Info($"joined {assignment.Endpoint} as '{UserId}'");
+        }
+
+        /// <summary>
+        /// Run the sealed-session handshake, or fail the join. There is no cleartext
+        /// fallback on any path.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Runs after the join reply and before <c>Start</c>, so no frame is ever written
+        /// half-sealed, and it mirrors where the server runs its half.
+        /// </para>
+        /// <para>
+        /// <b>The client passes no join-token secret, and that is deliberate.</b> Verifying
+        /// the server's binding needs material derived from <c>JOIN_TOKEN_SECRET</c>, and a
+        /// client binary must not carry that secret — putting it there is the pre-shared-key
+        /// mistake ADR-22 supersedes, where extracting it once compromises everyone for ever.
+        /// So the session is confidential against a passive eavesdropper and offers nothing
+        /// against an active one until ADR-22's pinned gateway identity key lands. That is
+        /// logged at join, once, rather than left for someone to infer.
+        /// </para>
+        /// </remarks>
+        private async UniTask RunSealedHandshakeAsync(
+            WireConnection connection, MapAssignment assignment, CancellationToken cancellationToken)
+        {
+            string jti;
+            if (!JoinTokenClaims.TryReadJti(assignment.JoinToken, out jti))
+            {
+                // The jti is the handshake's salt. Without it the client would derive keys
+                // the server cannot match, and the failure would surface as an unexplained
+                // refusal several steps later.
+                throw new NetworkException(
+                    "the join token carries no readable jti, which the sealed handshake needs as its salt");
+            }
+
+            SealedHandshakeClient.Result result;
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeout.CancelAfter(_settings.SealedHandshakeTimeout);
+
+                try
+                {
+                    // The identity key and the flag saying what its hop was worth come from
+                    // the assignment together, because the gateway hop is where both are known
+                    // and neither means anything without the other.
+                    result = await SealedHandshakeClient.RunAsync(
+                        connection, jti, null,
+                        assignment.ServerIdentityKey,
+                        assignment.IdentityKeyHopAuthenticated,
+                        _settings.RequireServerIdentity,
+                        timeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // The commonest cause by far, and the one worth naming: this client is
+                    // configured to seal and the server is not, so no hello is ever coming.
+                    // Without this the symptom is a silent stall during join.
+                    throw new NetworkException(
+                        "timed out waiting for the server's sealed hello. The likeliest cause is a " +
+                        "configuration mismatch: NetworkSettings.RequireSealedSession is on and the " +
+                        "game server is not running with sealing required. There is no negotiation " +
+                        "and no fallback, by design, so the two must be set together.");
+                }
+            }
+
+            if (!result.Ok)
+            {
+                throw new NetworkException(
+                    $"sealed handshake failed ({result.Outcome}): {result.Error}");
+            }
+
+            // What the session is actually worth is now decided by the ADR-25 identity
+            // signature, not by the binding: no shipped client can verify the binding, and
+            // none ever will, because doing so would require the key that mints join tokens.
+            // The three branches below are the three states a real deployment can be in.
+            if (result.Identity.Verified)
+            {
+                _log.Info(
+                    "sealed session established and the server's identity VERIFIED: its Ed25519 " +
+                    "signature checked out and its key arrived over an authenticated gateway hop " +
+                    "(ADR-25)");
+            }
+            else if (result.Identity.Checked)
+            {
+                // The interesting state, and the one a reader is most likely to misread as
+                // success. The signature is genuine under the key we were handed -- but the key
+                // was handed over plaintext, so an active attacker supplies both halves and this
+                // branch is exactly what their session looks like too.
+                _log.Warn(
+                    "sealed session established and the server's identity signature checked out, " +
+                    "but its key arrived over an UNAUTHENTICATED gateway hop, so the signature " +
+                    "proves nothing against an active attacker -- who would substitute the key and " +
+                    "the signature together. Turn on NetworkSettings.GatewayUseTls (ADR-23) to make " +
+                    "this verification mean something");
+            }
+            else
+            {
+                // Covers both a pre-ADR-25 backend and a key with no signature. Info, not a
+                // warning: with RequireServerIdentity off this is the expected state, and a
+                // warning on every join trains the reader to ignore the one that matters.
+                _log.Info(
+                    "sealed session established; the server's identity was NOT verified" +
+                    (string.IsNullOrEmpty(result.Identity.Error) ? "" : " (" + result.Identity.Error + ")") +
+                    ". This session is confidential against a passive eavesdropper and offers no " +
+                    "man-in-the-middle protection. The server's binding is separately unverifiable " +
+                    "by design (ADR-22) and is not what closes this gap -- ADR-25 identity plus " +
+                    "gateway TLS is");
+            }
         }
 
         /// <summary>

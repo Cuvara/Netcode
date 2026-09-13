@@ -66,8 +66,24 @@ namespace Cuvara.Netcode.Client
                     return ReconnectDecision.Never;
 
                 case DisconnectCause.Kicked:
-                    // kick+disconnect, any reason. duplicate_login today: the account
-                    // is playing elsewhere and coming back would evict THAT login.
+                    // A server that requires a sealed session refuses a client that did
+                    // not seal, and says so. That refusal is a CONFIGURATION answer, not
+                    // an eviction: the account is not playing elsewhere, and the same
+                    // client sealing will be accepted. Retrying it is safe in the one
+                    // direction that matters -- the client can only end up MORE
+                    // protected, never less, because nothing here can turn sealing off.
+                    //
+                    // NetworkClient escalates RequireSealedSession before it reconnects;
+                    // see SealedRefusalReason. Without this, a client whose sealing flag
+                    // is off simply cannot play on a `require` server, and the operator
+                    // has to know to pass a flag.
+                    if (info.Reason == SealedRefusalReason.NoSealedSession)
+                    {
+                        return ReconnectDecision.Reconnect;
+                    }
+
+                    // Any other reason. duplicate_login today: the account is playing
+                    // elsewhere and coming back would evict THAT login.
                     return ReconnectDecision.Never;
 
                 case DisconnectCause.ProtocolError:
@@ -131,6 +147,12 @@ namespace Cuvara.Netcode.Client
                 // Gateway enter_world_resp: no fleet in this deployment hosts the
                 // map. Not "full" and not "starting" — it does not exist here.
                 case "map is not available":
+                // Either hop, refusing a client whose wire protocol version it cannot
+                // serve. This is the one failure in the set that no amount of time
+                // fixes: the client needs a different BUILD, not another attempt.
+                // Retrying spends the budget and then reports "could not join",
+                // burying the only message that said what was actually wrong.
+                case KickReasons.ProtocolVersionMismatch:
                     return true;
 
                 default:

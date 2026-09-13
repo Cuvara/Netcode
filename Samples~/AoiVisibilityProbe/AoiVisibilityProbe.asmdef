@@ -1,0 +1,16 @@
+{
+    "name": "AoiVisibilityProbe",
+    "rootNamespace": "Cuvara.Netcode.Samples.AoiVisibilityProbe",
+    "references": [
+        "Shared.GameLogic"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -5,7 +5,777 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.38.2] - 2026-09-13
+
+### Added
+
+- **The sealed-session probe now answers its own question with no UI, no window and nobody
+  clicking.** `RunHeadlessSelfCheck` runs before the `UIDocument` is required and writes one
+  line per claim to the log, ending in a single greppable `VERDICT:` line.
+
+  **This exists because a scene whose only output is labels cannot answer the question the
+  scene was built for.** IL2CPP strips managed code the Editor never strips, so a library
+  reached through its own registries can vanish from a player while every Editor test stays
+  green — no compile error, no exception, just a feature that silently stops working. Running a
+  player is the only way to find out, and until now that meant a person looking at a screen and
+  reporting what they saw. The checks are the ones with no UI in them: X25519 agreement, two
+  distinct HKDF direction keys, a ChaCha20-Poly1305 round trip, a refused flipped byte, Ed25519
+  signing and verification, a refused flipped signature byte, and the conjunction — the **same
+  genuine signature** evaluated over an authenticated and an unauthenticated hop, reading as
+  verified over only one of them.
+
+  The `catch` is part of the answer rather than defensive padding: on a stripped player a
+  missing type surfaces as a `TypeLoadException` or a null from a factory, never as a compile
+  error, so an exception is logged as the finding it is.
+
+## [0.38.1] - 2026-09-13
+
+### Fixed
+
+- **The Sealed Session Probe's entry in `package.json` still said "Six buttons" and "the framing
+  is not yet wired into `GameSessionClient`".** Both were false: the scene has eight buttons as
+  of 0.38.0, and the framing has been wired for several releases. That text is what a user reads
+  in the Package Manager window before importing anything, so it was the most-read and
+  least-reviewed description of the scene — 0.38.0 updated the README beside the scene and left
+  this one behind, which is exactly the half that gets missed. It now also names the ADR-25 case
+  and the toggle, and says plainly what the scene does not prove.
+
+## [0.38.0] - 2026-09-13
+
+### Added
+
+- **`ServerIdentityVerifier` — the client half of ADR-25 server identity.** The game server
+  signs the sealed handshake transcript with a per-pod Ed25519 key; this verifies that
+  signature and, more importantly, reports what verifying it is actually worth.
+
+  **A verified signature is worth exactly as much as the hop the key arrived over.** The
+  identity key reaches the client in `enter_world_resp`, on the gateway hop. Over plaintext an
+  active attacker substitutes *both* the key and the signature, and the check passes against
+  the attacker's own key. So `ServerIdentityResult.Verified` is the conjunction of "the
+  signature checked out" **and** "the key came over an authenticated hop" — and the second
+  half is asserted by the caller, because nothing inside a signature verifier can discover it.
+  That conjunction is computed in one place so no call site can re-derive it and get it wrong.
+  `Verified == false` alongside a perfectly successful handshake is the **expected** state on
+  any deployment that has not turned on ADR-23's gateway TLS.
+
+  This is **not** the ADR-22 binding and does not repair it. The binding's signer is a
+  symmetric HMAC under `JOIN_TOKEN_SECRET` — the key the gateway mints join tokens with — so a
+  client able to verify it is a client able to forge one. `BindingVerified` stays permanently
+  false. The identity signature sits beside it, not in front of it.
+
+  The identity key is **inside** the signed input (`label || 0x00 || transcript || 0x00 ||
+  identityPublic`), not merely alongside it, which is what stops a genuine signature being
+  replayed under a substituted key. The tests build the transcript back out of the server's own
+  interop vector rather than hard-coding one, so a label or layout change on either side fails
+  here instead of silently failing every signature in production.
+
+  `Verify` returns false rather than throwing on every malformed input — wrong sizes, junk
+  points. These bytes are attacker-chosen; an exception on them is a denial of service with
+  extra steps.
+
+  A gateway that sends no key still connects (`required: false` by default), because the
+  deployment order is server-then-client and the reverse would brick every existing client. A
+  refusal *caused* by the absence of a key reports `Offered == false`: that field is what a
+  deployment audit reads to answer "did ADR-25 ship here?", and a refusal must not answer yes.
+
+- **The client now reads the server's ADR-25 identity and acts on it.** `ServerIdentityVerifier`
+  was the arithmetic; this is the plumbing. `EnterWorldResponse.ServerPublicKey` and
+  `SealedServerHello.ServerSignature` are decoded by both codecs, carried on `MapAssignment`,
+  and evaluated inside the sealed handshake before any key is derived — so a refusal costs
+  nothing and can never leave half a session installed.
+
+  **The key and the flag saying what its hop was worth travel together, on purpose.**
+  `MapAssignment` carries `ServerIdentityKey` *and* `IdentityKeyHopAuthenticated`, because the
+  identity key arrives on the gateway hop and anything that passes the key onward without the
+  flag has dropped the only thing that makes the signature mean something. `GatewayClient` sets
+  the flag from `GatewayUseTls` and that is sound rather than approximate: `TlsOptions` has no
+  accept-anything mode — it either pins a certificate or falls through to platform validation —
+  so there is no third state in which the flag would be true over a connection nobody checked.
+
+  `NetworkSettings.RequireServerIdentity` refuses a server that offers no usable signature,
+  off by default because the migration order is backend-first and a client demanding identity
+  earlier would refuse every live deployment. Turning it on does **not** make a plaintext
+  gateway hop safe: it forces the attacker to sign with the key they already substituted. The
+  pair that authenticates a server is that flag **and** gateway TLS.
+
+  `GameSessionClient`'s join log now has three branches instead of two, and the middle one is
+  the reason: identity verified, identity *checked but over an unauthenticated hop* (a warning,
+  because it is the state most likely to be misread as success), and not verified at all (info,
+  because with the default settings it is expected and a warning on every join trains the
+  reader to ignore the one that matters). The old "binding verified" branch is gone — it was
+  unreachable in any shipped client and always will be.
+
+  **JSON reads the key as base64**, matching Go's `encoding/json`, and malformed base64 arrives
+  at the verifier as "no key" rather than throwing: these bytes are attacker-chosen, and an
+  exception on the join path is a denial of service with extra steps. A missing field decodes to
+  empty, never null, which is what a pre-ADR-25 gateway looks like and must keep working.
+
+  5 wire tests cover exactly the failure this plumbing invites: a field that decodes to empty is
+  **indistinguishable from a pre-ADR-25 server**, which the client is required to accept — so a
+  dropped field does not fail, it silently degrades every session to unverified. Each of the
+  three plumbing paths was mutated and killed exactly its own test.
+
+- **The sealed-session probe sample gained the ADR-25 case**, including the part no unit test
+  can show: a `Gateway hop authenticated` toggle that changes the verdict **without changing
+  the signature**. Two new buttons — a flipped signature byte (refused by Ed25519 outright) and
+  a substituted identity key re-signed with the attacker's own private half. The second is the
+  only button in the scene whose honest answer depends on a setting, and it is there to make
+  that dependence visible: with the toggle off it reports ACCEPTED, which is not a defect but
+  the plaintext deployment reported truthfully. The sample signs by calling
+  `ServerIdentityVerifier.IdentityInput` rather than re-spelling the layout, because a probe
+  that assembles its own bytes agrees with itself while disagreeing with the server.
+
+  Its README also dropped a claim that had gone stale: that the sealed framing was "not yet
+  wired into `GameSessionClient`". It has been for some time.
+
+### Changed
+
+- **`link.xml` now preserves `Ed25519Signer` and `Ed25519PublicKeyParameters`.** Without them
+  an IL2CPP player can strip the verifier's only entry points into BouncyCastle, and the
+  symptom is not a compile error — it is identity verification failing in the player while the
+  Editor, which does not strip, stays green. The existing Windows IL2CPP verification at
+  Minimal and High stripping **predates these two types and does not cover them**; the file now
+  says so, so nobody reads the old result as covering Ed25519.
+
+
+- **`Runtime/Protocol/Generated/Wire.cs` resynced to the backend's `develop`.** Byte-for-byte,
+  which is what CI's "Generated Wire.cs matches the backend" job compares — md5
+  `4f4fa16416c6bd80a6e8d730242df754`. Two fields arrive with it, both ADR-25 server identity:
+  `SealedServerHello.server_signature` (field 4, the Ed25519 signature) and
+  `EnterWorldResponse.server_public_key` (field 6, the public half needed to check it). Nothing
+  else changed but the serialized descriptor blob, which re-flows whenever any field is added.
+
+  **This commit adds no behaviour.** Nothing reads either field yet; the hand-written message
+  classes and the codecs come next. A generated-code resync lands on its own because it
+  reddens every other open netcode PR until it does, and mixing it with the feature would make
+  the feature's diff unreadable.
+
+## [0.37.0] - 2026-09-13
+
+### Added
+
+- **`EnterWorldRequest.PartyId`, and the client calls that use it.** One message asks for two
+  things (ADR-26 decision 1): empty means a map server, non-empty means a dungeon instance of
+  the content named by `MapId`, for that party. `GatewayClient.EnterDungeonAsync` and
+  `NetworkClient.ConnectToDungeonAsync` are the entry points; an empty party id **throws**
+  rather than falling back to a map entry, because a caller that lost its party id wants to
+  know rather than be dropped into the open world while its party is elsewhere.
+
+  **The party id is remembered and replayed on reconnect.** This is the part worth reading:
+  a reconnect that forgot it would ask for a map named after the dungeon content, which does
+  not exist, so the rejoin fails — and if such a map ever did exist the player would silently
+  reappear in the open world while their party carried on without them. Nothing in a log
+  distinguishes either outcome from a flaky network. `TransferToMapAsync` passes a null party
+  on purpose, because a transfer is how a party **leaves** its instance, and a reconnect after
+  one must not haul the player back in.
+
+  The JSON encoder **omits** `party_id` when empty, mirroring the backend's `omitempty`, so a
+  map entry produces byte-for-byte what a pre-party client produced. Without that, every JSON
+  map entry would start carrying `"party_id":""` — harmless to a server and a silent
+  divergence from the Go side's bytes, which the golden vectors compare.
+
+- **`Samples~/PartyDungeonProbe`.** The real `NetworkClient` against a gateway the scene starts
+  itself, reading back the bytes it sent. Four cases, one of which is the reconnect above.
+  It proves the client asks correctly; it proves nothing about Nakama, membership, or whether
+  a gateway allocates anything, and says so.
+
+### Changed
+
+- **`Runtime/Protocol/Generated/Wire.cs` resynced with the backend's `develop`.** The generated
+  file is byte-compared against the server repo in CI, so a backend proto merge reddens every
+  PR here until this happens. It carried `party_id` alongside whatever else has landed upstream.
+
+## [0.36.2] - 2026-09-11
+
+### Added
+- **A client refused for not sealing now retries WITH sealing, instead of being unable to
+  play.** A server running `GAMESERVER_SEALED=require` kicks a client that did not seal and
+  names the reason (`no_sealed_session`). That is a *configuration* answer, not an eviction:
+  the account is not playing elsewhere, and the same client sealing is accepted. The policy
+  now retries that one kick reason, and `NetworkClient` turns `RequireSealedSession` on
+  before reconnecting.
+
+  **It escalates and never downgrades, by construction rather than by promise.** There is
+  exactly one assignment to `RequireSealedSession` in the whole runtime and it is `= true`,
+  so a hostile peer can ask this client for MORE protection and never for less — which is
+  what keeps this from being the negotiated downgrade ADR-22 exists to forbid. A test scans
+  the runtime tree for `RequireSealedSession = false` and fails if one ever appears (and
+  fails if it scans zero files, so an empty scan cannot pass for a clean one).
+
+  Every other kick reason is still `Never`, `duplicate_login` included — retrying that one
+  would evict the newer login.
+
+  Why it was needed: dev and staging now require sealing, and without this a default player
+  build cannot connect at all unless whoever launches it knows to pass `-cuvara-sealed 1`.
+  Setting the flag still skips the one refused join.
+
+- `SealedRefusalReason` — the refusal strings as a named wire contract with the game server
+  (`GameServer/Net/Sealed/SealedPolicy.cs`), so a refusal can be acted on rather than only
+  logged. `EncodingCannotSeal` is there too, and deliberately not retried: nothing at
+  runtime fixes a JSON client, because the JSON message set has no sealed frame.
+
+## [0.36.1] - 2026-09-11
+
+### Fixed
+- **A read already waiting on the socket ignored cancellation, so no timeout above it could
+  fire.** `NetworkStream.ReadAsync` accepts a `CancellationToken` and ignores it once the
+  read is pending; `SslStream` inherits that. `TcpTransport` passed the token and assumed it
+  worked, so `ReadFrameAsync` was **uncancellable** — and because
+  `NetworkSettings.ConnectTimeout` is a token, everything built on it was too.
+
+  The consequence reached the shipped client: `GatewayClient.AuthenticateAsync` wraps
+  connect, send and the reply read in one `ConnectTimeout`, so a client whose gateway never
+  answers hung **indefinitely** rather than for ten seconds. A plaintext client against a
+  TLS gateway is exactly that case, and it is how this was found — a play-mode test asked
+  for a 3-second budget and sat until the test runner killed it at **180 seconds**.
+
+  `TcpTransport` now closes the socket when the token fires, which is the only thing that
+  ends a pending socket read, and translates the resulting failure back into the
+  `OperationCanceledException` the caller asked for — so a timeout does not read as a peer
+  that hung up. Verified in play mode against a real `SslStream` listener: the same case
+  now returns at its 3-second budget, and the four other cases are unchanged.
+
+- **"The mismatch is loud" was wrong in one direction, and 0.36.0 shipped it as a claim in
+  three places.** A *plaintext* client against a *TLS* gateway is not refused: the TCP
+  connect succeeds — TLS is above it — and then both ends wait, the client to read a frame
+  and the gateway for a ClientHello a plaintext client never sends. Measured in a Unity
+  play-mode run, where it sat until the test runner's own **180-second** limit.
+
+  It is **bounded, not loud**, and only because `GatewayClient` wraps connect, send **and
+  the reply read** in one `NetworkSettings.ConnectTimeout` (10 s by default). A caller
+  driving `TcpTransport` directly gets no bound at all. So a client shipped with TLS off
+  against a TLS gateway reports a connect timeout, not "TLS is off", and the log sends the
+  reader looking for a network problem.
+
+  `Documentation~/NETCODE.md`, the sample README and the sample scene now say that. The
+  scene's fourth case gets its own 2-second budget and counts the stall as the expected
+  outcome — as shipped in 0.36.0 it would have sat on that case and then reported it as a
+  surprise, which is a scene that cries wolf about the one behaviour it exists to describe.
+
+  The other direction is unchanged and is loud: client on / gateway off throws immediately.
+
+## [0.36.0] - 2026-09-10
+
+### Added
+- **TLS on the gateway hop (ADR-23), off by default.** `NetworkSettings.GatewayUseTls`
+  makes `GatewayClient` ask for `TransportKind.TcpTls`, and `TcpTransport` wraps the socket
+  in an `SslStream`. The gateway terminates TLS on the same port it already listens on, so
+  nothing else about the connection changes.
+
+  **Certificate validation is on, and cannot be turned off.** `TlsOptions` has exactly two
+  modes: no pin, where the platform's own validation decides and no callback is installed
+  at all; or pinned, where the leaf the gateway presents must be byte-for-byte
+  `GatewayTlsPinnedCertificate` — stricter than the public trust store, not looser, and the
+  supported way to reach a self-signed dev gateway. There is no third mode, deliberately:
+  validation that silently accepts anything is indistinguishable from validation that
+  works, if only a good certificate is ever tested. The server repo's IL2CPP probe measured
+  that platform validation genuinely refuses an untrusted certificate in a real Windows
+  player at both `Minimal` and `High` stripping, which is why "no pin" is the default
+  rather than something to be nervous about.
+
+  Nothing here degrades to cleartext. The factory **throws** when asked for `TcpTls`
+  without `TlsOptions` instead of returning a plaintext transport; a failed handshake
+  closes the socket and throws instead of retrying without TLS; and `TlsOptions.FromPem`
+  throws on unparseable input instead of returning a null pin, which would silently mean
+  "use the platform trust store".
+
+  `TransportKind.TcpTls` is client-side only. `TransportKinds.Parse` refuses it like any
+  other unknown value, so a game server cannot move a hop's protection by putting a string
+  in `enter_world_resp`. The gameplay hop is unaffected — it is sealed at the message layer
+  (ADR-22) so that a KCP session gets the same guarantee, which TLS cannot give it.
+
+- **`Samples~/GatewayTlsProbe`** — five cases against listeners the scene starts itself,
+  four of them refusals: TLS with a pinned certificate connects and round-trips a frame; an
+  unpinned connection to a self-signed certificate is refused by the platform; a TLS client
+  against a plaintext gateway does not downgrade; a plaintext client against a TLS gateway
+  gets no usable frame; and the factory asked for TLS with no options throws. Each button
+  reports what happened rather than what was intended.
+
+- `Documentation~/NETCODE.md` gained **Transport security: three hops, three different
+  answers** — Nakama, gateway and game server are protected by three different mechanisms,
+  configured independently, and turning one on says nothing about the other two.
+
+
+
+### Added
+
+- **Every live-backend sample can now run against a sealed server.** The six scenes that
+  connect to a real backend — DOTS Sample, World View, Reconnect Policy Demo and the three
+  E2E Certification harnesses — gained a `requireSealedSession` toggle wired into
+  `NetworkSettings`.
+
+  **Why this is not cosmetic.** Those scenes are the acceptance path for this package, not
+  demos: a package feature is accepted by the lead importing its sample and running it. The
+  moment a local compose stack sets `GAMESERVER_SEALED=require`, every one of them stops
+  working — and the person who runs one next finds a refusal with no indication that the
+  stack changed underneath them. This lands ahead of that flip rather than after it.
+
+  Defaults to **false**, so existing scenes are unaffected: Unity reads a missing serialized
+  field as its default, and no scene asset needed editing.
+
+  The toggle sits under its own **Transport security** header rather than the existing
+  *Gateway* one. My first pass put it under *Gateway*, which is actively wrong — the setting
+  governs the **gameplay hop**, and the gateway hop is precisely the one it does not protect.
+  A misleading label in the inspector is worse than no label, because the inspector is where
+  someone decides what to tick.
+
+- **`GameSessionClient` runs the sealed handshake when `NetworkSettings.RequireSealedSession`
+  is on.** After the join reply and before `Start`, so no frame is ever written half-sealed —
+  the same place the server runs its half. This is the last piece: a Unity client can now join
+  a game server running with sealing required.
+
+  Defaults to **off**, matching the server's own `SealedRequirement.Disabled`, so no existing
+  deployment changes behaviour.
+
+- **A configuration mismatch fails with a message naming the cause, instead of hanging.**
+  ADR-22 forbids negotiation — a protocol that can be talked down to cleartext will be — so
+  neither side asks the other what it supports, and client-on/server-off means no hello is
+  ever coming. `SealedHandshakeTimeout` (5 s, separate from `ConnectTimeout` because the
+  server answers immediately or not at all) turns that silence into:
+
+  > *timed out waiting for the server's sealed hello. The likeliest cause is a configuration
+  > mismatch: NetworkSettings.RequireSealedSession is on and the game server is not running
+  > with sealing required.*
+
+- **`JoinTokenClaims.TryReadJti` — reads the join token's `jti` WITHOUT verifying it.** The
+  handshake needs it as an HKDF salt. A client holds no key that could verify a join token, so
+  every value it returns is an unverified claim; safe here only because a wrong `jti` derives
+  keys the server cannot match, so it can only *fail*, never grant. A test pins that an invalid
+  signature is deliberately not detected, so nobody later "fixes" the class by adding a
+  verification it has no key to perform.
+
+- **The client logs, once per join, that the server's binding was not verified.** Not a
+  warning about a defect — it is the shipped state until ADR-22's pinned gateway identity key
+  lands, and it is logged so that *"the session is encrypted"* is never read as *"the server is
+  authenticated"*.
+
+### Fixed
+
+- **A test that passed with the code deleted.** `JoinTokenClaimsTests` was built on a token
+  minted by the real backend signer, which is the right instinct and was not enough: a mutation
+  removing the base64url alphabet substitution entirely left all eleven tests green.
+
+  The reason turned out to be structural rather than luck. Base64 emits `+` or `/` — the two
+  characters base64url replaces — only from a 6-bit group of value 62 or 63, and with
+  pure-ASCII input that can only arise from a byte at index ≡ 2 (mod 3) being `>`, `?` or `~`.
+  Verified exhaustively across every printable ASCII byte at all three positions, and measured
+  against the signer: **0 of 20,000 real join tokens** have either character in the claims
+  segment, while 720 of 1,000 have one in the *signature* segment — which the client never
+  decodes.
+
+  So the substitution is required by RFC 7515, is correct, and was untested. A synthetic token
+  now exercises it, and says in its own remarks why it has to be synthetic.
+
+- **`SealedHandshakeClient` and the sealing seam on `WireConnection`.** A Unity client can
+  now complete the sealed handshake and speak a sealed session. `RunAsync` writes the hello,
+  reads the reply, and installs both one-direction sessions; everything written afterwards is
+  sealed and everything read afterwards must be.
+
+  Three seams, all of them: both encode paths (`SendFrameAsync`, `Send`) and the single
+  decode path. Sealing one and forgetting the other would produce a connection that looks
+  sealed and leaks half its traffic.
+
+- **A cleartext frame on a sealed connection is refused, not accepted.** `NotSealed` throws
+  the same way a bad tag does, and the caller kills the session. Accepting it would let
+  anyone who can inject one frame speak to the client unauthenticated — the sealing would
+  still be running and the session would look perfectly healthy the whole time. That is the
+  downgrade defence, and it is the one that silently does nothing if it is missing.
+
+  There is also **no uninstall and no second install**: a connection that can revert to
+  cleartext is a connection an attacker can talk down to cleartext.
+
+- **`WireConnection.IsSealed` and `SealedRejectedTotal`**, so an operator can see both that
+  a session is sealed and how many frames it has refused.
+
+### Changed
+
+- **`SealedTransportTests` drives a responding fixture, not a script.** The fake transport
+  plays the server: when the client writes its hello it derives its own keys from the same
+  primitives and answers inline. Two consequences, both deliberate:
+
+  - **Nothing yields.** EditMode does not pump the player loop, so a test needing a real
+    continuation hangs the suite rather than failing it — the trap already documented here
+    for UniTask realtime delays. The `Await` helper is a bounded frame loop that turns a
+    genuine stall into a failure.
+  - **It is not a mock.** A mock agrees with whatever the client does, which is the one
+    thing a handshake test must not do. The fixture derives its keys independently, and the
+    test opens the client's own traffic with them.
+
+  Assertions are against the **bytes the transport received**, not the connection's report of
+  itself. "The connection says it is sealed" would pass against a connection that sets a flag
+  and writes cleartext.
+
+- **`SealedClientHello` / `SealedServerHello` and `MsgType` 16/17, Protobuf only.** The two
+  handshake messages a Unity client needs to open a sealed session on the gameplay hop.
+  `Wire.cs` regenerated from the backend's `develop` after `rpg-mmo-server#294` merged.
+
+  **The JSON codec deliberately does not learn them, and refuses loudly.** Key material must
+  never be renderable into a human-readable payload, and JSON is the encoding someone is most
+  likely to paste into an issue — which is also why a server that requires sealing refuses a
+  JSON client outright rather than serving it in the clear. `JsonWireCodec.EncodeBody` throws
+  `no JSON encoder for payload type SealedClientHello`, and a test asserts the message *names
+  the type*: a silent empty body would be worse than the leak it prevents, because the server
+  would then refuse the handshake for a reason that names nothing.
+
+- **`EnterWorldResponse.session_key` is gone from the schema**, replaced by `reserved 5` on
+  the backend. It was the per-session key of the scheme ADR-22 supersedes — delivered to the
+  client in the clear over the same plaintext transport it was meant to protect. A test
+  asserts the generated type has no `SessionKey` property, because a future regeneration that
+  quietly brought it back would compile and pass everything else.
+
+- **`SealedClientExchange` — the client half of the sealed handshake, with no transport in
+  it.** `CreateHello()` produces the ephemeral public key; `AcceptServerHello()` agrees,
+  builds the transcript, verifies the server's binding and returns the two one-direction
+  sessions. Mirrors the server's `SealedHandshakeServer` step for step.
+
+  Splitting the key schedule from the socket is deliberate: the schedule is the part that
+  goes wrong and the transport is the part that is expensive to test, so the schedule is
+  covered by ordinary tests now and the adapter that will sit on top has nothing left in it
+  but reading and writing two Envelopes.
+
+- **`SealedClientExchange.WithoutBindingVerification(jti)`, and a test that asserts it is
+  weak.** A production Unity client cannot hold `JOIN_TOKEN_SECRET` — shipping it in a
+  binary is the same mistake as the pre-shared transport key ADR-22 supersedes — so until
+  ADR-22's pinned gateway identity key is delivered, a real client has no material to verify
+  the server's binding with.
+
+  That state is **named on the result** (`SealedExchange.BindingVerified`) rather than
+  reached by passing an empty secret and getting a silent pass. And
+  `WithoutBindingVerification_AManInTheMiddleSucceeds_AndTheResultSaysSo` asserts the man in
+  the middle **succeeds** against it. A doc comment saying "this buys nothing against an
+  active attacker" is a promise; that test is the proof, and it starts failing the day the
+  identity key makes it untrue — which is exactly when someone should be made to look.
+
+### Changed
+
+- **`ISequenceValidator.Accept` returns `SequenceResult`, not `bool`**, and both validators
+  gained `RequiresOrderedTransport`. Ported from the server side, where these were added
+  after this package's first port. Breaking for any external implementer of the interface;
+  there are none in this package.
+
+- **A forward-jump bound, `SequenceValidators.MaxForwardJump = 1024`.** "Reject anything at
+  or below the highest seen" stops replays and says nothing about a leap *forward*. A peer
+  whose counter is corrupted can jump near the top of the space in one frame, and with a
+  strict counter that is **irreversible**: every legitimate frame afterwards carries a lower
+  sequence and is refused for ever. The session is dead and the symptom is a connection that
+  authenticated fine and then went quiet.
+
+  A *fresh* session still accepts any first sequence, which looks like a hole and is not —
+  the bound exists to stop a counter leaping, which needs somewhere to leap from.
+  `AFreshSessionAcceptsAnyFirstSequence` pins that so it stays deliberate.
+
+- **`SealedSession` refuses to pair a strict counter with a transport that can reorder.**
+  New `orderedDelivery` constructor argument, defaulting to `true` because both shipped
+  transports guarantee it. A future QUIC-datagram or raw-UDP transport now fails closed on
+  day one instead of silently dropping legitimate frames with nothing naming the cause.
+
+- **`SealedSession` counts every refusal by cause** — `RejectedNotAuthenticated`,
+  `RejectedReplayed`, `RejectedForwardJump`, `RejectedNotSealed`, `RejectedTotal`. Because a
+  rejected sealed frame is otherwise **indistinguishable from an ordinary disconnect**: both
+  end as a closed socket, so a security check that fires looks exactly like normal traffic
+  and will be assumed to work for as long as nobody deliberately breaks it. Found server-side
+  by `send-budget` while chasing why a wrong-key rejection left no trace in the log. Split by
+  cause for the operator, reported to the peer as one answer — the peer must still not learn
+  *why*.
+
+- **The Sealed Session Probe reads those counters instead of keeping its own tally.** A probe
+  that counts in parallel displays its own arithmetic; now a counter that stops being
+  incremented shows up on screen instead of quietly reading zero for ever.
+
+- **`Runtime/Protocol/Generated/Wire.cs` resynced with the backend — purely additive.**
+  `EnterWorldResponse` gains `SessionKey` (field 5, `bytes`), which the backend added in
+  `rpg-mmo-server@8aeb8b4` on 2026-09-09. Nothing else in the file changed: the only other
+  edits are the regenerated descriptor blob and reflowed comments, and no symbol was
+  removed.
+
+  **The client does not read this field, and should not start.** It carries the
+  per-session key of the scheme **ADR-22 supersedes** — a key the gateway sends to the
+  client in the clear over the same plaintext transport it is meant to protect. ADR-22
+  records field 5 as **reserved, not reused**, so it is here to keep the generated file
+  byte-identical to the backend's and for no other reason.
+
+  **Why this was its own change.** The `Generated Wire.cs matches the backend` gate
+  compares against `rpg-mmo-server`'s `develop` at run time, so it turned red on every
+  netcode PR the moment that backend commit merged — including PRs that never touch the
+  protocol. The gate is right: a stale generated file does not fail loudly, it reads any
+  field added since generation as that type's default and presents as a feature that looks
+  wired up and silently does nothing.
+- **ADR-22's transport crypto, client side: `Cuvara.Netcode.Crypto`.** X25519 over the
+  join token's `jti`, HKDF-SHA256 to two one-direction keys, ChaCha20-Poly1305 per frame
+  with the sequence as the nonce, and a strict replay counter. `SealedFrame`,
+  `SealedCrypto`, `SealedHandshake`, `SealedSession` and the two sequence validators mirror
+  the server's `GameServer.Net.Sealed` and Go's `backend/shared/sealed` **byte for byte**.
+
+  **This is not wired into `GameSessionClient` yet** and no traffic is sealed. The handshake
+  messages do not exist on the wire, so nothing in the shipped client changes behaviour.
+  What lands here is the half a Unity client needs in order to speak it once they do.
+
+- **`BouncyCastle.Cryptography` 2.7.0 vendored into `Runtime/Plugins/`.** Managed,
+  netstandard2.0, MIT, no package dependencies, no `DllImport`. It is here because Unity
+  IL2CPP supplies **none** of the three primitives: no `ChaCha20Poly1305`, no `HKDF`, and
+  no `ECDiffieHellman` curve25519 at all, with `AesGcm` compiling and then throwing. The
+  server takes the same library, so client and server run the identical implementation —
+  silent divergence is this protocol's failure mode, and one implementation removes a class
+  of it rather than answering it twice.
+
+  **The cost, stated rather than buried: the package roughly triples, 3.37 MB → 8.12 MB
+  on disk, and 4.76 MB of that is this one DLL.** Every consumer of `com.cuvara.netcode` pays it at
+  import. What reaches a *player* is smaller and is not yet measured — the assembly is
+  reachable from `Cuvara.Netcode.Crypto` and therefore survives stripping, but how much of
+  it the linker keeps is an open question tracked in
+  `backend/docs/TRANSPORT-CRYPTO-LIBRARY-SURVEY.md` §8.
+
+- **Sample: Sealed Session Probe.** Two peers in one process, no server and no network. The
+  plaintext the game wrote and the bytes a capture would get are shown one above the other,
+  live, and six buttons each mount an attack that must be refused: a flipped bit, a
+  byte-perfect replay, a replayed header with a garbage body, a cleartext Envelope, a peer
+  with the wrong `JOIN_TOKEN_SECRET`, and a man in the middle who substitutes an ephemeral
+  key. The verdict turns red if any is accepted. The README is explicit that the scene does
+  **not** prove the shipped client uses any of this.
+
+- **`SealedCrypto.Hkdf` overload taking raw `info` bytes.** RFC 5869 A.1's `info` is
+  `f0f1..f9`, which is not valid UTF-8 and therefore could not reach the construction
+  through the string overload at all. The test written without it was asserting a different
+  input and would have passed against a wrong implementation.
+
+### Changed
+
+- **`Runtime/link.xml` now preserves the nine BouncyCastle entry types** the crypto code
+  reaches, plus `Org.BouncyCastle.Crypto.Macs.HMac` — which the published survey's list
+  omitted, because the IL2CPP probe that produced that list did not exercise the transcript
+  binding. A Windows IL2CPP player passed the RFC vectors at both `Minimal` and `High`
+  stripping with this shape. **That result is Windows.** The reported Android CIL-Linker
+  failure did not reproduce there, and Android remains unverified for want of a device.
+
+- **`Cuvara.Netcode.Tests.Editor.asmdef` gains `BouncyCastle.Cryptography.dll`** in
+  `precompiledReferences`. The assembly sets `overrideReferences: true`, so without this
+  line the tests do not see the library at all.
+
+### Fixed
+
+- **A transcript test that asserted a property it did not test.** It claimed the NUL
+  separators close a split-ambiguity attack, and it *passed with the separators removed* —
+  because in this layout the label is a constant and both public keys are fixed at 32
+  bytes, leaving the jti as the only variable-length field with nothing adjacent to steal
+  bytes from. The separators are still correct and stay, as insurance against a future
+  variable-length field; the doc comment now says exactly that instead of claiming a live
+  hole, and the test pins the transcript's 108 bytes directly.
+
+- **Per-entity facing and action state (`facing_brad`, `action`), client side.** The
+  snapshot carried no orientation and no animation state at all, so a character could not
+  be turned to face the way it was walking without a schema change across both repos.
+  `EntitySnapshot`, `ResolvedEntity` and the merger adapter now carry both;
+  `Runtime/Protocol/FacingCodec.cs` decodes them.
+
+- **`IEntityPoseView` — a new OPTIONAL companion to `IEntityView`.** A view that wants to
+  render facing implements it alongside `IEntityView`; `WorldViewBinder` resolves it once
+  at construction (not per entity per frame) and calls `SetPose` beside every `SetState`.
+  `GameObjectEntityView` implements it and applies the facing as a Y rotation via
+  `FacingCodec.TryToUnityYaw`, which does the frame conversion (server angle is CCW from
+  +X; Unity's Y rotation is CW from +Z) — getting that wrong yields a mirrored or
+  quarter-turned world that still animates smoothly and survives a casual look, so it is
+  a named function with a test rather than an inline constant.
+
+  **`IEntityView` itself is unchanged — byte-identical to the previous release.** An
+  earlier revision of this branch instead widened `IEntityView.SetState` from five
+  arguments to seven. That compiled here and broke `com.cuvara.dots`, a separate package
+  in a separate repository, whose assembly could not even *name* `EntityAction` — so the
+  widening silently billed a sibling package a new assembly reference for a feature it
+  had not asked for. That package had already written the rule down, about its own
+  `SetStateAtTick`: *"Not part of IEntityView, and it cannot be. That interface is
+  netcode's ... widening it would make every GameObject view in every consumer implement
+  a method it has no use for."* `IEntityView`'s own remarks and a past `WorldViewBinder`
+  decision say the same thing. The interface is a cross-package contract, and the cost of
+  adding to it is paid by packages that never see the commit.
+
+  With the split, a view that does not care about facing needs no change at all — not a
+  stub, not a reference, not a recompile. `AViewWithoutThePoseInterfaceStillWorks` pins
+  that guarantee, because nothing in this repository could otherwise see it break.
+
+- **`Samples~/FacingAndVersion`** — one scene covering both wire changes, with **no
+  server and no network** (the `InterpolationProbe` / `ClockSyncProbe` shape). Capsules
+  orbit a ring pointing along their direction of travel, driven only by `facing_brad`
+  through the real codec, resolver, merger and binder. "Stop sending facing" withholds
+  the field and they keep moving while holding their last heading instead of snapping to
+  east — the "zero means not sent" rule made visible. Three buttons run a real
+  `JoinTokenResponse` through the client's version rule, including the named
+  `protocol_version_mismatch` refusal.
+
+### Added
+
+- **CI: `com.cuvara.dots` now compiles against this package in the `Compile samples` job.**
+  A third package implements `IEntityView`, in its own repository, and nothing here could
+  see it break — netcode's tests do not compile it and `Samples~` is not compiled until
+  imported. Widening `IEntityView.SetState` once compiled clean in this repo and broke
+  that package outright; it was caught only by a human importing a sample. Its
+  `Cuvara.DOTS.Netcode` asmdef gates on `com.cuvara.netcode >= 0.31.0`, which the
+  `file:../package` reference satisfies, so it now compiles against the local package on
+  every run.
+
+  Cost: three manifest lines. Every dependency `com.cuvara.dots@0.29.0` declares was
+  already present at the right version. The two MessagePipe lines exist because
+  `Cuvara.DOTS.DI` activates on VContainer (already present for ReconnectPolicyDemo) and
+  references `MessagePipe`; at 1.8.1 neither MessagePipe package declares a transitive
+  dependency, and the existing `com.cysharp` OpenUPM scope resolves both. Its
+  GameFoundation and Physics assemblies stay dormant — their defines' packages are absent.
+
+### Fixed
+
+- **Declared `org.nuget.system.runtime.compilerservices.unsafe`, a real dependency the
+  package was missing.** This package vendors `Google.Protobuf.dll` in `Runtime/Plugins/`
+  but not Protobuf's own dependency. Protobuf reaches it the first time it writes a string
+  field — and on a Protobuf connection that is the **first frame the client ever sends**,
+  `auth.token`, encoded by `ProtobufWireCodec.EncodePayload`. A project without it throws
+  `FileNotFoundException: System.Runtime.CompilerServices.Unsafe, Version=4.0.4.1` at the
+  handshake, not at import, because the plugin has `validateReferences: 0`.
+
+  **This is a runtime defect, not a test defect.** It surfaced as a failing test
+  (`ProtobufEmitsTheVersionAndElidesZero`) only because that test is the one which drives a
+  real `JoinTokenRequest` through Protobuf's encoder; the runtime reaches the same writer on
+  every Protobuf handshake. It stayed hidden because the consuming client happens to resolve
+  that assembly at depth 2 through an unrelated NuGet chain (`org.nuget.r3`,
+  `system.text.json`, …) belonging to GameFoundation — so the package only ever worked
+  where something else supplied its dependency. The install probes are built to catch
+  exactly this and did, the moment the Unity gate could run again.
+
+  Declared rather than vendored: adding a second copy of the assembly to `Runtime/Plugins/`
+  would collide with the copy consumers like the client already resolve. The `org.nuget`
+  OpenUPM scope the probes already use is now documented in the README too, which had
+  listed only `com.cysharp` and `jp.hadashikick`.
+
+
+- **CI: pinned `game-ci/unity-test-runner` by SHA, restoring every Unity-invoking job.**
+  On 2026-09-09 `Unity Tests`, `Compile samples` and two `Install probe` rows went red on
+  UNCHANGED code — develop and a whitespace-only control branch alike — with
+  `fatal: not a git repository (or any of the parent directories): .git`. Nothing here
+  moved; the **mutable `v4` tag** did, from `0ff419b9` (2024-06-15) to `32e57712`,
+  *"Thin wrapper: invoke game-ci/cli as a subprocess (#310)"*. The old action ran
+  `docker run unityci/editor` itself; the new one shells out to the game-ci CLI, which
+  runs `git` in its working directory — the workspace **root**, which is deliberately not
+  a git repository here, because `actions/checkout` places the repo in `package/` and the
+  throwaway Unity project is built around it so the manifest can say `file:../package`.
+  The two logs show it plainly: the last green run resolved `v4` to `0ff419b9` and ran
+  4m24s; the first red one resolved it to `32e57712` and died in 9s.
+
+  Pinning weakens nothing — Unity still runs and every test still executes; only the
+  third-party action is frozen, as protoc, the Unity version and every package version
+  already are. Adopting the new wrapper needs the CLI to find a git repository at its
+  working directory, i.e. a deliberate change to the checkout layout, not a tag bump.
+
+
+- **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
+  vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
+  `simkill_target_survives_high_defense`) were added server-side in `4eb0ba5` and sat in
+  `Shared.GameLogic`'s `[Unreleased]` where no client ever saw them; **`sgl-v0.4.0` is the
+  first tag to release them**, and the client runner refused the unknown kind — correctly,
+  and loudly, which is how the gap was found at all.
+
+  The kind is implemented against the same `CombatLogic` calls the other kinds use, and
+  mirrors the server's runner line for line, including the ordering: the attacker strikes
+  and the target's death is resolved, *then* the target strikes back from its
+  post-damage state. That ordering is the substance of the case — reversing it, or
+  resolving both deaths at the end, gives different answers whenever the first blow is
+  lethal, and "does a dead entity still swing" is exactly what a simultaneous-kill vector
+  exists to pin down rather than leave to each side's intuition. All four outcomes are
+  asserted for **both** entities; an attacker-only check would pass while the two sides
+  disagreed about whether the target survived.
+
+  The unknown-kind branch is unchanged and still fails loudly. No tolerance for unknown
+  kinds was added — a runner that skips what it does not recognise would have hidden this
+  instead of reporting it.
+
+### Changed
+
+- **The decode path never fabricates a value for either field.** A zero rides through the
+  codec and the resolver untouched, because whether to hold the last known facing or
+  derive one is a presentation decision and belongs where the context is. In the view
+  binder both are SNAPPED, never interpolated — action more strongly than facing, since a
+  blend between two enum values is not a state the server ever occupied.
+
+
+- **Wire protocol version negotiation (`protocol_version`), client side.** The
+  package sniffed the *encoding* from byte 0 and called that settled — `EncodingSniffer`
+  said so in as many words: "there is no negotiation, no version field, and no extra
+  round trip." That is true of the encoding and says nothing about whether the two sides
+  agree on what the fields **mean**. A version-skewed build was not refused anywhere; it
+  connected, parsed every byte, and was confidently wrong about the world.
+
+  `Runtime/Protocol/WireProtocolVersion.cs` pins `Current = 1`, reserves `Unversioned = 0`,
+  and carries the rules. `AuthRequest` and `JoinTokenRequest` now advertise it **by
+  default**, so a caller cannot forget and silently be admitted on trust everywhere;
+  `AuthResponse` and `JoinTokenResponse` read the server's back. Both codecs carry the
+  field, and the JSON path omits a zero so the two encodings spell "did not advertise"
+  the same way.
+
+- **The client detects an OLD server, which is the one case the servers cannot report.**
+  A server predating the field ignores the version we send and answers without one, so a
+  `0` coming back is the client's only signal that nobody checked. `GatewayClient` and
+  `GameSessionClient` now expose `GatewayProtocolVersion` / `ServerProtocolVersion` and
+  **warn** on an unversioned peer. They do not refuse it: the servers' own shipping
+  default admits unversioned peers, and a client stricter than the servers would lock a
+  working fleet out of itself. But "nobody checked" must never look like "checked and
+  agreed" — that silence is the whole defect — so it is logged.
+
+### Changed
+
+- **`protocol_version_mismatch` is a PERMANENT failure, never retried.**
+  `KickReasons.ProtocolVersionMismatch` joins the closed reason set, and both
+  `ReconnectPolicy.IsPermanentServerError` and `NetworkClient.IsRetryable` now name it.
+  Previously an unrecognised server error was treated as transient — the right default
+  in general, and exactly wrong here: no number of retries turns this client into a
+  different build, so the reconnect budget would drain against a wall and the session
+  would end reporting "could not join", burying the one message that said what was
+  actually wrong.
+
+- **`Runtime/Protocol/Generated/Wire.cs` regenerated** from `wire.proto` for the four new
+  fields, byte-identical to the backend's committed copy (the CI drift gate compares
+  them). Note the ordering this implies: that job diffs against the backend's `develop`,
+  so it stays red until the matching backend change merges there. That is the gate
+  working, not a fault in this branch.
+- **`AOI Visibility Probe` sample** — a synthetic world (no server, no network) that makes
+  the game server's new AOI spatial index observable the only way it can be: through what a
+  player would actually see. One observer with a radius over hundreds to thousands of
+  entities, with the visible set computed twice per frame — once by
+  `AoiLogic.GetNearbyEntities` (the shared rule the client predicts with, used here as the
+  oracle) and once by narrowing with a uniform grid mirroring the server's `SpatialGrid` —
+  and the two answers compared live.
+
+  The headline readout is the **mismatch counter**, current and worst-seen, because that is
+  the failure that matters: an index that drops one entity does not throw or log, it renders
+  a monster that is not there. The scene also shows entities-in-view versus total, the
+  radius, how many entities each strategy had to examine for the identical answer, and
+  whether the server's occupancy gate would use its index at the current density — drag the
+  world size down until the population clumps and the gate visibly switches back to the
+  plain scan.
+
+  Reports entities examined rather than milliseconds: an Editor frame is dominated by
+  rendering, so a timing here would measure the host rather than the algorithm. Real
+  timings live in the server's committed `AoiIndexBench`. UI Toolkit throughout, with the
+  world painted via `Painter2D` rather than built from elements, so entity count does not
+  turn into layout cost.
+- **`Send Budget Probe` sample** — the game server gained a per-connection downlink budget
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`): when more has changed inside one observer's AOI than
+  fits in a snapshot, the lowest-priority entities are **deferred** to a later one. This
+  scene makes that observable, with no server and no network. Dial the crowd's population
+  and how much of it moves per tick, and watch payload bytes flatten against the cap,
+  entities get deferred oldest-first, and the client fall a beat behind — the trade the
+  budget makes, in front of you rather than in a changelog entry.
+  - The byte figures are **measured, not estimated**: snapshots are built as
+    `RpgMmo.Wire.V1.SnapshotMessage`, the same generated schema this package already
+    decodes with, so a number on screen is a number of bytes that would be on the wire.
+    Entity-id interning is modelled faithfully — the id travels only on the message that
+    introduces its handle, and handles reset at every keyframe.
+  - The readout that matters is **`handle errors`, and it stays at zero**. `wire.proto`
+    forbids a receiver from guessing at a handle it has no binding for, so if shedding and
+    the delta encoder's "what does this client already have" bookkeeping ever drifted
+    apart, an unbound handle is the first symptom. The sample's `FakeClient` applies that
+    rule strictly and counts violations on screen, because a check nobody reads is not a
+    check.
+  - **Sample-only.** The budget is a *server* decision and deferral is invisible in the
+    protocol — a client needs no change to work against a budgeted server.
+    `SendBudgetModel` mirrors the server's `SnapshotDeltaState` for the purpose of the
+    scene, and nothing in `Runtime/` depends on it.
+  - UI is UXML/UI Toolkit, like every sample scene in this package.
 
 ### Changed
 

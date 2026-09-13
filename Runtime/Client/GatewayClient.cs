@@ -49,6 +49,14 @@ namespace Cuvara.Netcode.Client
 
         public string UserId { get; private set; } = string.Empty;
 
+        /// <summary>
+        /// The wire protocol version the gateway reported on the last successful
+        /// authentication. Zero means it advertised none, i.e. it predates the field
+        /// and never checked ours — see
+        /// <see cref="WireProtocolVersion.IsUnversioned"/>.
+        /// </summary>
+        public uint GatewayProtocolVersion { get; private set; }
+
         /// <summary>True once the socket exists, whether or not the loops are running.</summary>
         public bool IsConnected => _connection != null;
 
@@ -63,7 +71,11 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("gateway client is already connected");
             }
 
-            var transport = _transports.Create(TransportKind.Tcp);
+            // TLS is a property of the gateway deployment, known before the first byte,
+            // so the kind is chosen here rather than negotiated. The factory throws if it
+            // was asked for TLS without options, instead of handing back cleartext.
+            var transport = _transports.Create(
+                _settings.GatewayUseTls ? TransportKind.TcpTls : TransportKind.Tcp);
             var connection = new WireConnection("gateway", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
@@ -73,7 +85,10 @@ namespace Cuvara.Netcode.Client
                 timeout.CancelAfter(_settings.ConnectTimeout);
 
                 await transport.ConnectAsync(_settings.GatewayHost, _settings.GatewayPort, timeout.Token);
-                await connection.SendFrameAsync(MsgType.Auth, new AuthRequest { Token = jwt }, timeout.Token);
+                await connection.SendFrameAsync(
+                    MsgType.Auth,
+                    new AuthRequest { Token = jwt, ProtocolVersion = WireProtocolVersion.Current },
+                    timeout.Token);
 
                 var frame = await ExpectAsync(connection, MsgType.AuthResp, timeout.Token);
                 if (!(frame.Payload is AuthResponse response))
@@ -85,6 +100,36 @@ namespace Cuvara.Netcode.Client
                 {
                     throw new NetworkException(
                         $"gateway rejected authentication: {response.Error}", response.Error);
+                }
+
+                // The gateway ACCEPTED us, so it either agreed with our version or is
+                // old enough not to have looked. Those two are worth telling apart,
+                // and this reply is the only place either is observable.
+                GatewayProtocolVersion = response.ProtocolVersion;
+                if (WireProtocolVersion.IsUnversioned(response.ProtocolVersion))
+                {
+                    // Not an error: the servers' shipping default admits unversioned
+                    // peers, and symmetry means we admit an unversioned server too.
+                    // Refusing here would make the client the strictest party in the
+                    // system and lock a working fleet out of itself. But it IS logged,
+                    // because "nobody checked" must never be indistinguishable from
+                    // "checked and agreed" — that silence is the whole defect.
+                    _log.Warn(
+                        "gateway did not advertise a wire protocol version; this client speaks " +
+                        WireProtocolVersion.Current +
+                        " and the agreement is unverified (the gateway predates the field)");
+                }
+                else if (!WireProtocolVersion.IsCompatible(response.ProtocolVersion))
+                {
+                    // Defence in depth: the gateway is supposed to have refused us
+                    // already. Reaching here means it accepted a version it does not
+                    // itself speak, so the two of us disagree and it did not notice —
+                    // exactly the silent-misparse state this mechanism exists to
+                    // prevent. Refusing loudly beats proceeding on a known conflict.
+                    throw new NetworkException(
+                        $"gateway speaks wire protocol version {response.ProtocolVersion}, " +
+                        $"this client speaks {WireProtocolVersion.Current}",
+                        KickReasons.ProtocolVersionMismatch);
                 }
 
                 UserId = response.UserId;
@@ -101,7 +146,49 @@ namespace Cuvara.Netcode.Client
         /// single-use and expires in 30 s, so a retry that replays one is rejected
         /// with <c>Token already used</c> rather than merely failing again.
         /// </remarks>
-        public async UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken)
+        public UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken) =>
+            EnterWorldAsync(mapId, null, cancellationToken);
+
+        /// <summary>
+        /// Asks for a DUNGEON INSTANCE of <paramref name="contentId"/> for
+        /// <paramref name="partyId"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every member of the party calls this with the same two arguments and is handed the
+        /// SAME address: the instance is keyed by the party, not by the content, so two parties
+        /// running the same dungeon get two servers (ADR-26 decision 2).
+        /// </para>
+        /// <para>
+        /// The gateway checks membership against Nakama before it allocates anything. Naming a
+        /// party you are not in throws with <c>not a member of that party</c>, and a party that
+        /// no longer exists throws with <c>party does not exist</c> -- two distinct messages
+        /// because they send a player to different places, and neither is retryable. A Nakama
+        /// outage is a THIRD answer and is retryable; do not collapse them.
+        /// </para>
+        /// <para>
+        /// Leaving a dungeon is not a call on this class: it is the ordinary map transfer the
+        /// game server already handles, so a party returns home the same way anyone changes map.
+        /// </para>
+        /// </remarks>
+        public UniTask<MapAssignment> EnterDungeonAsync(
+            string contentId, string partyId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(partyId))
+            {
+                // Refusing rather than falling back to a map entry. A caller that lost its
+                // party id wants to know, not to be quietly dropped into the open world with
+                // its party somewhere else.
+                throw new ArgumentException(
+                    "a dungeon entry needs a party id; pass one or call EnterWorldAsync for a map",
+                    nameof(partyId));
+            }
+
+            return EnterWorldAsync(contentId, partyId, cancellationToken);
+        }
+
+        private async UniTask<MapAssignment> EnterWorldAsync(
+            string mapId, string partyId, CancellationToken cancellationToken)
         {
             var connection = RequireHandshakeConnection();
 
@@ -114,7 +201,9 @@ namespace Cuvara.Netcode.Client
                 timeout.CancelAfter(_settings.EnterWorldTimeout);
 
                 await connection.SendFrameAsync(
-                    MsgType.EnterWorld, new EnterWorldRequest { MapId = mapId }, timeout.Token);
+                    MsgType.EnterWorld,
+                    new EnterWorldRequest { MapId = mapId, PartyId = partyId ?? string.Empty },
+                    timeout.Token);
 
                 var frame = await ReceiveAsync(connection, timeout.Token);
 
@@ -161,7 +250,14 @@ namespace Cuvara.Netcode.Client
                 }
 
                 _log.Info($"map '{mapId}' assigned to {endpoint} over {transport}");
-                return new MapAssignment(endpoint, response.JoinToken, transport);
+                // The hop is authenticated exactly when it is TLS: the transport has no
+                // accept-anything mode -- TlsOptions either pins a certificate or falls through
+                // to platform validation -- so there is no third state where the flag would be
+                // true over a connection nobody checked.
+                return new MapAssignment(
+                    endpoint, response.JoinToken, transport,
+                    response.ServerPublicKey,
+                    _settings.GatewayUseTls);
             }
         }
 

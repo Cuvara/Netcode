@@ -140,6 +140,92 @@ identity problem.
 > own `NetworkClient`, and falls back to `DevJwt` even though a provider is
 > registered.
 
+## Transport security: three hops, three different answers
+
+The client talks to three things, and each hop is protected by a different mechanism. They
+are configured independently, and turning one on says nothing about the other two — which
+is the mistake worth naming up front, because "the connection is encrypted" is usually said
+about one hop and believed about all three.
+
+| hop | mechanism | client setting |
+|---|---|---|
+| client ↔ **Nakama** (auth, meta) | TLS, terminated by Nakama | the URL scheme the game is built with — `http://` is plaintext no matter what else is set |
+| client ↔ **gateway** | TLS, terminated by the gateway (ADR-23) | `NetworkSettings.GatewayUseTls` |
+| client ↔ **game server** | sealed at the message layer (ADR-22) | `NetworkSettings.RequireSealedSession` |
+
+The gameplay hop is deliberately *not* TLS. It is sealed per message —
+ChaCha20-Poly1305 over an authenticated X25519 exchange — so a KCP session gets the same
+guarantee as a TCP one, which TLS cannot give it.
+
+### Turning on gateway TLS
+
+```csharp
+var settings = new NetworkSettings
+{
+    GatewayHost = "gateway.example.com",
+    GatewayPort = 8000,
+    GatewayUseTls = true,
+};
+```
+
+Off by default, matching the gateway's own default. When on, `GatewayClient` asks the
+transport factory for `TransportKind.TcpTls` instead of `TransportKind.Tcp`; the factory
+**throws** if it has no `TlsOptions`, rather than handing back a plaintext transport for a
+TLS request.
+
+`TransportKind.TcpTls` is client-side only. `TransportKinds.Parse` refuses it like any
+other unknown string, so a game server cannot ask the client to switch a hop's protection
+by putting a value in `enter_world_resp`.
+
+### There is no "skip validation" switch, and there should not be
+
+`TlsOptions` has two modes and nothing between them:
+
+- **no pin** — the platform's own validation decides, with no callback installed at all.
+  There is no code path in `TcpTransport` that returns true for a certificate the platform
+  rejected. The server repo's IL2CPP probe measured that this genuinely refuses an
+  untrusted certificate in a real Windows player, at both `Minimal` and `High` stripping.
+- **pinned** — the leaf the gateway presents must be byte-for-byte
+  `GatewayTlsPinnedCertificate`. Chain, expiry and name are then irrelevant *because a
+  stricter check already passed*: an attacker must present that exact certificate, which
+  they cannot without its private key.
+
+Pinning is how you reach a dev gateway holding a self-signed certificate. It is stricter
+than the public trust store, not looser — which is the whole reason "accept anything" is
+absent. Validation that silently accepts everything is indistinguishable from validation
+that works, if only a good certificate is ever tested.
+
+`TlsOptions.FromPem` loads a PEM file and **throws** on anything it cannot parse, rather
+than returning null: a null pin silently means "use the platform trust store", which
+against a self-signed dev gateway fails with a message about the certificate and sends the
+reader to look at the wrong thing.
+
+### Mismatches never degrade to cleartext — but only one direction is loud
+
+**Client on / gateway off** is loud: the gateway answers a ClientHello with the first
+bytes of a wire frame, the handshake fails, and `ConnectAsync` throws immediately.
+
+**Client off / gateway on is NOT loud.** It is a *stall*. The TCP connect succeeds —
+TLS is above it — and then both ends wait: the client to read a frame, the gateway for a
+ClientHello that a plaintext client will never send. Nothing refuses anything. Measured in
+a Unity play-mode run, where it sat until the test runner's own 180-second limit.
+
+`NetworkSettings.ConnectTimeout` (10 s by default) bounds it, because `GatewayClient`
+wraps the whole exchange — connect, send, **and the reply read** — in one budget. That was
+not true until 0.36.1: a read already waiting on a socket is not interrupted by cancelling
+a token (`NetworkStream.ReadAsync` accepts one and ignores it once the read is pending, and
+`SslStream` inherits that), so the timeout could not fire and the handshake hung
+**indefinitely**, not for ten seconds. `TcpTransport` now closes the socket when the token
+fires and reports the cancellation, which is what makes the budget real.
+
+Even so, a client shipped with TLS off against a TLS gateway does not report "TLS is off".
+It reports a connect timeout, and the log will send the reader looking for a network
+problem.
+
+The `Samples~/GatewayTlsProbe` scene runs both directions, plus an unpinned connection to a
+self-signed certificate and a factory asked for TLS with no options, and reports what
+actually happened rather than what was intended.
+
 ## Framing
 
 `[4-byte big-endian length][body]`, body at most 1 MiB. A length of zero, a

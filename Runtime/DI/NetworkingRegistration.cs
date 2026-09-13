@@ -83,7 +83,8 @@ namespace Cuvara.Netcode.DI
             IWireCodec codec = null,
             INetLog log = null)
         {
-            builder.RegisterInstance(settings ?? new NetworkSettings());
+            var networkSettings = settings ?? new NetworkSettings();
+            builder.RegisterInstance(networkSettings);
 
             if (log != null)
             {
@@ -109,7 +110,14 @@ namespace Cuvara.Netcode.DI
                 // "No such registration of type: System.String" the first time a scope
                 // resolved NetworkClient through this registration (MainScene,
                 // 2026-09-07). Every sample built the client by hand, so it never showed.
-                builder.Register<ITransportFactory>(_ => new DefaultTransportFactory(), Lifetime.Singleton);
+                //
+                // The TLS options are read INSIDE the lambda, so a caller that flips
+                // GatewayUseTls after RegisterNetworking still gets a factory that can
+                // build the TLS transport. Reading them here, at registration time, would
+                // bake in whatever the flag happened to be one line earlier.
+                builder.Register<ITransportFactory>(
+                    _ => new DefaultTransportFactory(null, networkSettings.BuildGatewayTlsOptions()),
+                    Lifetime.Singleton);
             }
 
             if (codec != null)

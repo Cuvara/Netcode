@@ -54,6 +54,15 @@ namespace Samples.NetcodeE2E
         // Do not "fix" this to match the default; read InputCadence first.
         [SerializeField] private int inputRateHz = 15;
 
+        [Header("Transport security")]
+        [Tooltip("Run the sealed-session handshake on the GAMEPLAY hop (not the gateway hop) " +
+                 "and encrypt every frame after it. MUST match the game server's " +
+                 "GAMESERVER_SEALED: there is no negotiation and no fallback, by design " +
+                 "(ADR-22), so a mismatch is a misconfiguration rather than a degradation. " +
+                 "On here with the server off times out naming the cause; off here with the " +
+                 "server on has the join accepted and the connection then closed.")]
+        [SerializeField] private bool requireSealedSession;
+
         private NetworkClient _client;
         private CancellationTokenSource _cts;
         private string _role;
@@ -97,7 +106,7 @@ namespace Samples.NetcodeE2E
                 Line($"USER_ID={auth.UserId}");
 
                 _client = new NetworkClient(
-                    new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort },
+                    new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
                     new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
 
                 await _client.ConnectAsync(jwt, mapId, ct);

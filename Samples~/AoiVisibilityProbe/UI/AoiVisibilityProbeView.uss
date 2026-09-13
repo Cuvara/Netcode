@@ -1,0 +1,166 @@
+/* Area-of-interest visibility probe.
+ *
+ * Class names carry the cuvara- prefix, matching the convention com.cuvara.uitoolkit
+ * enforces on its own exported classes: USS class names are public API, and a scene that
+ * invents an unprefixed name collides with whatever a host project already calls that.
+ *
+ * The world is painted into #world-canvas by the component rather than built out of
+ * elements. Several thousand entities as several thousand VisualElements would spend the
+ * frame in layout, which is exactly the wrong thing for a scene whose subject is how the
+ * cost scales with entity count.
+ */
+
+.cuvara-probe {
+    flex-grow: 1;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+/* Fills the panel and sits behind the readout. position:absolute keeps it out of the
+ * flex flow so the panel's own layout is unaffected by it. */
+.cuvara-probe__canvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgb(14, 16, 20);
+}
+
+.cuvara-probe__panel {
+    width: 460px;
+    margin: 14px;
+    padding: 14px 16px;
+    background-color: rgba(20, 22, 27, 0.92);
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: rgb(46, 50, 58);
+}
+
+.cuvara-probe__title {
+    font-size: 18px;
+    -unity-font-style: bold;
+    color: rgb(233, 237, 243);
+    margin-bottom: 2px;
+}
+
+.cuvara-probe__subtitle {
+    font-size: 11px;
+    color: rgb(140, 152, 166);
+    margin-bottom: 10px;
+    white-space: normal;
+}
+
+.cuvara-probe__section {
+    font-size: 10px;
+    -unity-font-style: bold;
+    letter-spacing: 1px;
+    color: rgb(118, 130, 145);
+    margin-top: 10px;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__legend {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 5px;
+    margin-right: 5px;
+    margin-left: 2px;
+}
+
+/* These mirror the colour fields on AoiVisibilityProbe. Two places, changed together —
+ * generating the legend from the component is more machinery than three dots are worth. */
+.cuvara-probe__swatch--visible {
+    background-color: rgb(92, 217, 140);
+}
+
+.cuvara-probe__swatch--hidden {
+    background-color: rgb(77, 84, 99);
+}
+
+.cuvara-probe__swatch--observer {
+    background-color: rgb(242, 191, 64);
+}
+
+.cuvara-probe__legend-text {
+    font-size: 10px;
+    color: rgb(140, 152, 166);
+    margin-right: 10px;
+}
+
+.cuvara-probe__row {
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 5px;
+}
+
+.cuvara-probe__control-label {
+    width: 74px;
+    font-size: 11px;
+    color: rgb(160, 172, 186);
+}
+
+.cuvara-probe__slider {
+    flex-grow: 1;
+}
+
+.cuvara-probe__slider-value {
+    width: 52px;
+    font-size: 11px;
+    color: rgb(176, 187, 199);
+    -unity-text-align: middle-right;
+}
+
+.cuvara-probe__button {
+    min-width: 92px;
+    height: 24px;
+    margin-right: 5px;
+}
+
+.cuvara-probe__button--secondary {
+    min-width: 60px;
+    opacity: 0.75;
+}
+
+.cuvara-probe__toggle {
+    margin-right: 16px;
+}
+
+.cuvara-probe__readout {
+    font-size: 11px;
+    color: rgb(226, 232, 240);
+    white-space: normal;
+    margin-bottom: 2px;
+}
+
+.cuvara-probe__readout--muted {
+    color: rgb(140, 152, 166);
+}
+
+/* The verdict is the reason the scene exists, so it is the one element allowed to shout.
+ * Green is the expected state: narrowing the search returned the identical visible set. */
+.cuvara-probe__verdict {
+    margin-top: 12px;
+    padding: 6px 8px;
+    font-size: 11px;
+    -unity-font-style: bold;
+    color: rgb(92, 217, 140);
+    background-color: rgb(21, 32, 26);
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: rgb(38, 92, 62);
+    white-space: normal;
+}
+
+.cuvara-probe__verdict--bad {
+    color: rgb(240, 126, 116);
+    background-color: rgb(38, 22, 22);
+    border-color: rgb(120, 52, 48);
+}

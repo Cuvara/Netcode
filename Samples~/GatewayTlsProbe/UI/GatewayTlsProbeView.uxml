@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="GatewayTlsProbeView.uss" />
+
+    <engine:VisualElement name="gateway-tls-probe" class="cuvara-probe">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Gateway TLS probe" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="The client half of ADR-23, run against listeners this scene starts itself. One case connects; the rest are refusals, because a TLS switch that quietly yields a plaintext link — or a validation callback that returns true — reads exactly like a working one everywhere else. Each button reports what happened, not what was intended." />
+
+            <engine:Label text="Certificate and listeners" class="cuvara-probe__section" />
+            <engine:Label name="cert-line" class="cuvara-probe__readout" />
+            <engine:Label name="listeners-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
+
+            <engine:Label text="Cases" class="cuvara-probe__section" />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="pinned" text="TLS + pinned certificate → connects"
+                               class="cuvara-probe__button" />
+                <engine:Button name="unpinned" text="TLS, no pin → refused"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="downgrade" text="TLS client → plaintext gateway"
+                               class="cuvara-probe__button" />
+                <engine:Button name="plain-to-tls" text="Plaintext client → TLS gateway"
+                               class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="no-options" text="Factory: TLS asked for, no options"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Button name="all" text="Run every case"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Last case" class="cuvara-probe__section" />
+            <engine:Label name="last-case" class="cuvara-probe__readout" />
+            <engine:Label name="outcome-line" class="cuvara-probe__readout" />
+
+            <engine:Label text="Log" class="cuvara-probe__section" />
+            <engine:ScrollView name="log" class="cuvara-probe__log" />
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

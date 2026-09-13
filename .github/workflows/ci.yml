@@ -102,6 +102,27 @@ jobs:
           done
           echo "samples imported: $(ls Assets/Samples | tr '\n' ' ')"
 
+          # com.cuvara.dots is here as a COMPILE GATE, not because a sample needs it.
+          # It is a third package implementing Cuvara.Netcode.View.IEntityView, in its own
+          # repository, and nothing in this repo could see it break: netcode's tests do not
+          # compile it and Samples~ is not compiled until imported. Widening
+          # IEntityView.SetState once compiled clean here and broke that package outright,
+          # and was only caught by a human importing a sample. With this line, its
+          # Cuvara.DOTS.Netcode assembly compiles against `file:../package` on every run --
+          # its asmdef gates on com.cuvara.netcode >= 0.31.0, which the file: reference
+          # satisfies -- so the next such break fails here instead.
+          #
+          # The two MessagePipe lines are the price of it, and only that. Cuvara.DOTS.DI is
+          # constrained on CUVARA_DOTS_VCONTAINER, whose versionDefine fires on
+          # jp.hadashikick.vcontainer -- already present for ReconnectPolicyDemo -- so that
+          # assembly activates and references MessagePipe and MessagePipe.VContainer. Both
+          # are resolved by the existing com.cysharp OpenUPM scope, and at 1.8.1 (the
+          # version the consuming client resolves) neither declares a single transitive
+          # dependency, so this pulls in nothing further. The org.nuget.* chain in the
+          # client's lockfile belongs to GameFoundation, not to MessagePipe.
+          #
+          # Everything else in that package stays dormant: GameFoundation and Physics are
+          # constrained on defines whose packages are absent here, so Unity skips them.
           # com.unity.modules.imageconversion is here for WorldView: its screenshot
           # helper calls Texture2D.EncodeToPNG, an extension method that lives in that
           # module. A real Unity project has it by default; this hand-written manifest
@@ -116,7 +137,10 @@ jobs:
               "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
-              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0",
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1",
+              "com.cuvara.dots": "https://github.com/Cuvara/UnityDots.git#v0.29.0",
+              "com.cysharp.messagepipe": "1.8.1",
+              "com.cysharp.messagepipe.vcontainer": "1.8.1",
               "com.unity.entities": "1.4.8",
               "com.unity.entities.graphics": "1.4.21",
               "com.unity.burst": "1.8.30",
@@ -130,7 +154,7 @@ jobs:
               {
                 "name": "OpenUPM",
                 "url": "https://package.openupm.com",
-                "scopes": ["com.cysharp", "jp.hadashikick"]
+                "scopes": ["com.cysharp", "jp.hadashikick", "org.nuget"]
               }
             ]
           }
@@ -157,7 +181,7 @@ jobs:
       - name: Compile
         id: compile
         continue-on-error: true
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -194,6 +218,13 @@ jobs:
           path: package
 
       # Build a Unity project at repo root that references the package
+          # org.nuget is in this scope list because the package DECLARES
+          # org.nuget.system.runtime.compilerservices.unsafe -- Google.Protobuf's own
+          # dependency, which this package vendors Google.Protobuf.dll without. These two
+          # jobs hand-write their manifests, so they can drift from what a real consumer
+          # resolves; the install probes already carried this scope and passed while these
+          # failed with "Package [...] cannot be found". Keep the three lists in step, or
+          # a genuine dependency becomes unresolvable here while looking fine to consumers.
       - name: Bootstrap test project
         run: |
           mkdir -p Assets ProjectSettings Packages
@@ -204,13 +235,13 @@ jobs:
               "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
-              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0"
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1"
             },
             "scopedRegistries": [
               {
                 "name": "OpenUPM",
                 "url": "https://package.openupm.com",
-                "scopes": ["com.cysharp", "jp.hadashikick"]
+                "scopes": ["com.cysharp", "jp.hadashikick", "org.nuget"]
               }
             ],
             "testables": ["com.cuvara.netcode"]
@@ -226,8 +257,34 @@ jobs:
             productName: NetcodeTest
           YAML
 
+      # PINNED BY SHA, NOT @v4, and it must stay that way until the checkout layout
+      # changes. On 2026-09-09 every Unity-invoking job in this workflow went red on
+      # UNCHANGED code, including develop and a whitespace-only control branch:
+      #
+      #   [ERROR] Error: fatal: not a git repository (or any of the parent directories)
+      #
+      # Nothing in this repository moved. The MUTABLE v4 tag did: it was re-pointed from
+      # 0ff419b9 (2024-06-15) to 32e57712, "Thin wrapper: invoke game-ci/cli as a
+      # subprocess (#310)". The old action ran `docker run unityci/editor` itself; the new
+      # one shells out to the game-ci CLI, and that CLI runs `git` in its working
+      # directory. That directory is the workspace ROOT, which by design is NOT a git
+      # repository here -- `actions/checkout` puts the repo in `package/` and the throwaway
+      # Unity project is built at the root around it, so the manifest can say
+      # `file:../package`. The evidence is the two run logs: the green one at 2026-09-08
+      # 17:03 resolved v4 to 0ff419b9 and ran docker directly; the first red one resolved
+      # it to 32e57712 and died in 9s where the green run took 4m24s.
+      #
+      # Pinning restores the implementation that was green. It weakens nothing -- Unity
+      # still runs and every test still executes; only the third-party action is frozen,
+      # exactly as protoc, the Unity version and every package version are frozen
+      # elsewhere in this repo.
+      #
+      # To move to the new wrapper, the CLI has to find a git repository at its working
+      # directory. That means changing this checkout layout (checking out at the root and
+      # relocating the throwaway project, or teaching the CLI where the repo is) -- a
+      # deliberate change with its own verification, not a tag bump.
       - name: Run EditMode tests
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -359,7 +416,7 @@ jobs:
 
           SGL=""
           if [ "${{ matrix.probe.sharedGameLogic }}" = "true" ]; then
-            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.3.0",'
+            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1",'
           fi
 
           cat > Packages/manifest.json << JSON
@@ -388,7 +445,7 @@ jobs:
       - name: Compile
         id: compile
         continue-on-error: true
-        uses: game-ci/unity-test-runner@v4
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9 # v4 as of 2026-09-08
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
