@@ -5,6 +5,18 @@ All notable changes to the Cuvara Netcode package will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.1] - 2026-09-13
+
+### Fixed
+
+- **The Sealed Session Probe's entry in `package.json` still said "Six buttons" and "the framing
+  is not yet wired into `GameSessionClient`".** Both were false: the scene has eight buttons as
+  of 0.38.0, and the framing has been wired for several releases. That text is what a user reads
+  in the Package Manager window before importing anything, so it was the most-read and
+  least-reviewed description of the scene — 0.38.0 updated the README beside the scene and left
+  this one behind, which is exactly the half that gets missed. It now also names the ADR-25 case
+  and the toggle, and says plainly what the scene does not prove.
+
 ## [0.38.0] - 2026-09-13
 
 ### Added
