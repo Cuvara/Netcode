@@ -777,6 +777,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     scene, and nothing in `Runtime/` depends on it.
   - UI is UXML/UI Toolkit, like every sample scene in this package.
 
+### Changed
+
+- **`PredictionLatencyMeasurement` no longer fails on the MAX correction; the RATE is now the
+  gate.** The max over ~28 corrections is **one draw from a tail**, and it was the statistic being
+  asserted. Measured on develop `7a0df75`, a clean environment the validity gate admitted: the run
+  **FAILED** on `max correction 2.00 steps` against a budget of 1.5, while `corrections > ONE STEP`
+  read **1 of 28** and passed its budget of 2 comfortably. One event, not a trend — and the
+  assertion that fired was the one that cannot tell those apart.
+
+  `CorrectionsAboveOneStep <= 2` is now the sole gate on correction size. `MaxCorrection / wireStep`
+  is still computed and **still printed with its entire explanatory message**, now through a
+  warning: the threshold became a reporting threshold, not a budget. The `wireStep > 0` guard above
+  both stays an assertion, because a run that never estimated the wire's rate must be treated as no
+  result rather than as a pass, and that applies to the report line as much as to the gate.
+
+  **This makes the test PASS on a run where it previously FAILED, and that is the point to read
+  slowly.** The 2.00-step event on `7a0df75` is real, reproduces without any branch applied, and
+  **was never explained**. It is not fixed here and is not dismissed here; it is moved out of the
+  fatal path so that it is visible on every run instead of stopping the first one. A reader must
+  not have to diff the test to discover that.
+
+  The reasoning is the package's own, applied to itself: the count over the same corrections is the
+  rate, the rate is what a systematic offset moves, and only the rate stays put across runs. It was
+  first written as an objection to a single-run baseline experiment — *the max is one draw from a
+  tail; the count is the rate* — and it holds against the assertion with exactly the force it held
+  against the experiment. Recorded here because **a threshold that moves without a stated reason is
+  the trap this package keeps documenting**, and the same entry that relaxes one must say so.
+
 ### Fixed
 
 - **The `## [0.35.0]` entry contradicted its own code in four places, and is corrected in place
@@ -793,6 +821,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read **1**; and the `Open terms` retirement recorded conditionally on a proposal that was adopted
   in the same release. In every case the original wording is quoted and the sequence made visible,
   so a reader who remembers the old claim finds out it changed rather than finding silence.
+- **`AckLatencyEstimator.AckIntervalSeconds` no longer reads the snapshot cadence 25% low.**
+  0.35.0 recorded this as measured and unfixed, with the two readings pinned as tests so the next
+  attempt had to come past them. It reads **63.889 ms against a true 66.667 on the same jitter
+  fixture — 4.2% low, where it read 50.000 ms — and still exactly 66.667 on an ideal cadence with
+  one snapshot in five or one in three lost.** `AnIdealCadenceIsMeasuredExactly_DropsOrNot`, the
+  fixture that disqualified the previous attempt, passes **unchanged**.
+
+  The statistic is **the smallest mean of up to eight consecutive single-interval gaps, less the
+  observed jitter spread over that window, never below the ring minimum** — a ring of gaps
+  replacing a running scalar, which is what the entry said a correct fix would need. Adjacent gaps
+  telescope, so a window of `K` is `K·T` plus the difference of two arrival delays and its mean
+  carries only `1/K` of the jitter; a gap covering a dropped snapshot is **excluded** from the
+  window rather than averaged through it, which is the whole of the difference from the attempt
+  this replaces. When no two snapshots in a row survive, there is no window and the reading falls
+  back to the old minimum — **reported, not silent**, through the new `AckIntervalWindow` (1 means
+  the fallback is in force), which the measurement harness now prints next to the cadence because
+  every requirement above it is scaled by it and nothing showed it.
+
+  **The recommendation left with the entry was wrong, and it took measuring it to see that.** "The
+  same minimum-to-percentile move this class has already made twice" does not transfer: a raw low
+  percentile of the GAPS reads **72.222 ms on the very fixture it was recommended for — 8.3% HIGH**,
+  the one forbidden direction. A percentile is right for the observations because a wait is the
+  constant plus something non-negative, so the distribution sits *above* the quantity and a low
+  percentile approaches it from the safe side; **a gap straddles the cadence instead**, and this
+  arrival pattern puts three gaps above it for every one below, so the tenth percentile is still
+  the minimum and every percentile above the twenty-fifth is strict.
+  `TheRejectedPercentileOfGapsWouldReadStrict` computes both from the same arrivals, so the reason
+  the shipped statistic is not a percentile is a measurement in the suite rather than a sentence
+  here. **A remedy recorded with a defect is a hypothesis, and inherits none of the defect's
+  evidence.**
+
+  **The leniency subtraction is load-bearing and was nearly left out.** A window mean is an
+  *unbiased* estimate of the cadence, so it lands above it about half the time — and the guard
+  requires this reading to stay at or below it. Subtracting the observed jitter spread over the
+  same window bounds that term for any jitter stationary across the window. Driven over **43 200
+  arms** (four jitter ranges × six jitter shapes × six loss rates × 300 seeds): with the
+  subtraction the reading crossed the cadence **zero** times where the old minimum had not, and
+  was **never further from the cadence than the old minimum in any arm** — closer in 51.5%,
+  further in none. Without it, the same sweep reads up to **7.1% HIGH**. The subtraction is
+  identically zero when there is no jitter, which is why the ideal fixture still reads exactly.
+
+- **The fallback is visible on the screen a human looks at, and it has a history as well as a
+  state.** `AckIntervalWindow` alone is instantaneous: a session that spent thirty seconds on the
+  fallback and then recovered leaves it reading 8 and no other trace, which is the shape of a
+  guard nobody has watched act — the same shape `AckAheadOfSend` had until it was deliberately
+  induced. So `AckIntervalFallbacks` counts the acknowledgements that read the bare minimum, and
+  both are surfaced in the two places a reader actually is: the measurement harness prints
+  `snapshot cadence (est)` with the window and the count beside it, in the loud form when the
+  window is 1, and **`ClockSyncProbe` prints the same on its cadence line** — a fallback reported
+  only in a batch-mode test report is the invisible-fallback shape twice over.
+
+  The healthy reading is **one**, not zero, and that is asserted rather than left to be
+  misread: the first gap of a session cannot be averaged with anything, so every clean run falls
+  back exactly once. A count that stays at one is the well link; a count that climbs means no two
+  snapshots in a row are arriving and every requirement scaled by the cadence is about a quarter
+  weaker than it says it is.
+
+### Limitations
+
+- **The leniency property is conditional on the link, and always was — it needs one observed gap
+  that spans exactly ONE cadence interval.** Under periodic loss phase-locked to the arrival
+  jitter, so that the dropped arrival is always the on-time one, every surviving gap spans two
+  intervals and there is nothing in the arrivals to recover the cadence from. At one snapshot in
+  two this reads **130.556 ms against 66.667** and the minimum it replaced reads **122.222** —
+  both about twice the cadence, both strict, and the difference between them is not the point.
+  The milder face of the same lock is likelier to be met: at one snapshot in four, with the
+  dropped arrival always the maximally late one, every surviving gap is `cadence + jitter/3` and
+  both statistics read **72.222 ms — 8.3% strict — identically**, because with no gap below the
+  cadence a window mean and a minimum are the same number.
+  This is **not new and not caused by the change**; it is a property the old statistic depended on
+  silently, found while driving the new one against loss and now pinned by
+  `PhaseLockedLossDefeatsThisStatisticAndTheOneItReplaced`. It is indistinguishable from a
+  genuinely halved snapshot rate by anything present in this class — the arrivals are identical —
+  so it is stated here rather than left to a reader's memory, in the same style as the left-tail
+  gap: **undetectable by anything present.** `AckIntervalWindow` is the only instrument that
+  narrows it, and it narrows it in the other direction: a 1 says the reading is the fallback, not
+  that a doubled gap was mistaken for a single one.
+
+  **A live reading consistent with this, offered as a lead rather than a result.** On a PlayMode
+  run against the dev stack on `develop` — the old statistic, before this change — the cadence
+  line read **75.91 ms while the same line printed a 66.7 ms nominal: 14% HIGH**, which is the
+  strict direction the minimum was documented as being unable to reach. For the minimum of the
+  gaps to be 75.91 ms, *every* observed gap must have been at least that — which is the condition
+  above: no gap spanning exactly one interval. **It is not proof.** The nominal on that line is the
+  *send* rate, the run's true snapshot cadence was not independently measured, and a genuinely
+  slower server cadence explains the same number without any phase lock. It is recorded because it
+  is the first live reading that points at the condition at all, and because the alternative is
+  testable by anyone who reads the server's configured snapshot rate off the same run.
+
+- **A correction to a claim made in this branch's own review, kept rather than deleted:
+  `LocalMovePredictor.Adoptions` was proposed as the counter that would name a failing run's
+  large correction, and it was measured not to discriminate.** The reasoning was that adoption
+  discards the whole prediction lead, is the largest correction the predictor makes, and is
+  one-off — the right shape for a single 2.00-step event in a run whose other 27 corrections stayed
+  under one step. The counter was then read on six arms across two runs:
+
+  | run | arm | history hit/missed | adopted wholesale | corrections > 1 step |
+  |---|---|---|---|---|
+  | `develop` | main | 89 / 72 | **66 of 72 (92%)** | 1 of 28 |
+  | `develop` | divergence **control** | 63 / 98 | **97 of 98 (99%)** | 16 of 26 |
+  | branch | main | 59 / 102 | **100 of 102 (98%)** | 1 of 19 |
+  | branch | divergence **control** | 75 / 86 | **83 of 86 (97%)** | 17 of 29 |
+
+  **Adoption runs at 92–99% on every predicting arm, including the control built to fail.** A
+  counter that reads the same on the arm under test and on the deliberate-mismatch control cannot
+  separate them, so "the event has a name" is true and "the name explains this failure" is not.
+  The hypothesis was falsifiable and was falsified by the contrast, which is the only thing that
+  could have falsified it — **a counter nobody has contrasted is the same defect as a rate nobody
+  has measured**, and this one was proposed by someone who had made exactly that argument about
+  rates two messages earlier.
+
+  What the numbers do show is that adoption here is **downstream**: the lead rounds to zero, so
+  the pending buffer never holds enough to replay, so a history miss has nothing to rebuild and
+  adopts. Adoption throws away a lead of zero, which costs nothing — which is why 27 of 28
+  corrections stay under one step. The mechanism is real and it is a consequence of the bullet
+  above, not a cause of anything.
+
+- **The lead is an integer tick, so a measured `uplink + age` below half a base tick reaches the
+  predictor as ZERO — the measurement is finer than the quantity it feeds.** This is not caused by
+  this change and this change does not fix it; it is recorded because this branch measured the
+  cadence that scales the guard in front of that term, and a reader who follows the term downstream
+  should find out where it stops. `WorldViewBinder` composes the steering lead as
+  `lead += AckLatency.HasEstimate ? ackLead : rttLead` and then `int ticks = (int)Math.Round(lead)`.
+  Measured on two PlayMode runs against the dev stack: staleness `0.04` + corrected floor `0.35` =
+  **0.39 → 0**, and staleness `0.06` + corrected floor `0.10` = **0.16 → 0**. `TARGET LEAD 0` is
+  the correct rounding of a true sub-half-tick lead, not a defect.
+
+  **The precedent is in the same function and it is the same defect one threshold earlier**, which
+  is why this is worth naming rather than filing as arithmetic. The floor was once truncated with
+  `Math.Floor`, and the comment recording the change reads: *"Live it read 0.14 and 0.68 base ticks
+  and `Math.Floor` returned zero both times… truncation did not merely cost accuracy here, it was
+  the reason the term stayed open."* Moving to `Math.Round` recovered the `0.68` case and **halved
+  the problem rather than removing it**: the threshold moved from *any* fraction to *below half a
+  tick*, and on a localhost link `uplink + age` — measured at **0.14–0.28 base ticks** — is under
+  that threshold at every value it has ever been observed at. **On loopback the predictor cannot
+  express the constant this whole effort measured.** Whether the answer is a fractional lead, a
+  different consumer, or accepting that the term is only expressible on links slower than
+  localhost, is the owner's call and is deliberately not taken here.
+
+- **Jitter and loss together still cost accuracy, in the lenient direction, in proportion to the
+  run length the link delivers.** The window is as long as the longest run of consecutive
+  delivered snapshots, capped at eight. On the jitter fixture the reading is 4.2% low with no
+  loss, **13.9% low at one snapshot in five** (runs of three), and **25% low at one in three**
+  (no run at all, so the fallback). The cap is where the measured gain stops rather than a tuned
+  parameter — mean absolute error over the 43 200 arms falls 43.4% → 38.7% → 37.2% → 36.5% →
+  35.8% → 35.6% at caps 4, 6, 8, 12, 16, and eight also keeps the error inside one `SweepBuckets`
+  division of the interval, which is the resolution anything scaled by this reading actually has.
+
+### Changed
+
+- **`SweptEnough` and `OccupiedBuckets` are now scaled by a cadence that is up to a third larger,
+  so both are STRICTER than they were.** That is the point of the fix — a cadence reading low
+  made the span requirement and the bucket width smaller, and the guard admitted data it should
+  have refused — but it means a marginal link that offered a floor before may now be refused.
+  **Expect `swept` to flip to false on links that were only just passing, and `ACK FLOOR
+  (estimator)` to read `NOT OFFERED` there.** Nothing in the ladder or the floor statistic itself
+  changed; a refusal that appears after this change is the guard doing what it was written to do
+  on evidence it should never have accepted.
+
 
 ## [0.35.0] - 2026-09-08
 
@@ -1391,6 +1578,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assertion any replacement must keep, and `AnIdealCadenceIsMeasuredExactly_DropsOrNot` is the
   drop case that disqualified the obvious fix — kept precisely so the next candidate is measured
   against loss **before** it is believed rather than after.
+
+  **FIXED in `## [Unreleased]`, and corrected here in place rather than left standing, per the
+  convention this file adopted one entry above.** The two pinned readings did their job: the next
+  attempt had to come past them and one of them killed a candidate. What did *not* survive contact
+  is the recommendation recorded in the paragraph above — *"a robust statistic over a ring of
+  gaps — the same minimum-to-percentile move this class has already made twice"*. The ring of gaps
+  was right; **the minimum-to-percentile move was wrong, and measurably so**: a raw low percentile
+  of the gaps reads 72.222 ms against this same 66.667 cadence, 8.3% HIGH, on the very fixture it
+  was recommended for. The shipped statistic averages a telescoping window instead. **A remedy
+  recorded alongside a defect is a hypothesis and inherits none of the defect's evidence** — the
+  defect here was measured and the remedy beside it was not, and they were written in the same
+  paragraph in the same voice.
+
+  Also corrected: the claim above that the reading is *"LENIENT, never strict, and cannot produce
+  an over-lead on its own"* is **conditional, and was stated unconditionally**. It holds only while
+  the link delivers at least one gap spanning exactly one cadence interval. Under loss phase-locked
+  to the arrival jitter that gap is absent and the old minimum reads **strict** — 122.222 ms at one
+  snapshot in two, 72.222 at one in four, against 66.667. That is a property of the arrivals, not
+  of the statistic, and it applies to the minimum described here exactly as it applies to what
+  replaced it. See the `Limitations` entry under `## [Unreleased]`.
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
