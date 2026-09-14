@@ -327,6 +327,81 @@ does not stand alone, so the dependency is unavoidable rather than a preference.
 lives inside the package so the package remains importable on its own, and
 `Runtime/link.xml` preserves it from IL2CPP stripping.
 
+## Game events (0.40.0)
+
+`ResolvedSnapshot.Events` carries the edge-triggered occurrences a tick produced. They arrive
+on the existing `SnapshotReceived` callback; there is deliberately no second channel, because
+two ways to reach the same events is two ways to consume them twice.
+
+### Why they are not derivable
+
+Every other field on a snapshot is level-triggered STATE. State is the wrong shape for an
+occurrence: "took 12 damage" cannot be reconstructed from two HP values a tick apart. A heal
+and a hit in the same tick net out; a delta may omit the entity entirely if it regenerated
+back; an entity leaving the AOI mid-fight stops reporting altogether. A client inferring
+damage numbers from HP deltas is wrong in exactly the cases a player notices, and silently.
+
+`Death` is likewise not redundant with `EntityAction.Dead`: `Dead` persists as long as the
+corpse does, so a client arriving afterwards sees it and cannot tell the death just happened.
+
+### Consuming them
+
+- **Once.** Events are not state and are never re-sent. A keyframe restates the world, not
+  its history, so a consumer that re-reads an old snapshot would show a hit twice.
+- **Ignore an unrecognised `Type`.** Dropping an unknown event costs a missing number;
+  guessing costs a wrong one.
+- **`SourceId` empty is normal.** It means "no such participant, or not visible to you". A
+  player who sees the victim but not the attacker still gets the number — the alternative is
+  a health bar that drops with no explanation. An empty `TargetId` is the case to skip:
+  there is nowhere to draw it.
+
+### Unresolved participants do NOT force a resync
+
+`SnapshotResolver.UnresolvedEventParticipants` counts event handles with no binding. The
+snapshot still resolves. That is a deliberate asymmetry with an entity, where an unresolvable
+handle aborts the snapshot: a wrong entity state is a wrong world and must be repaired, while
+a keyframe costs every observer bandwidth exactly when the link is already struggling.
+Guessing remains forbidden — only the escalation is.
+
+## `action_seq` — retriggering an animation (0.40.0)
+
+`ResolvedEntity.ActionSeq` changes every time an entity ENTERS an action, including
+re-entering the one it is already in. `Action` is level-triggered, so two attacks in a row are
+identical bytes and an animator driven from it alone plays the swing once and holds. No
+client-side edge detection recovers that: the edge is genuinely not in the data, and only the
+server knows an action was re-entered.
+
+```csharp
+// Inequality, NEVER greater-than.
+if (entity.ActionSeq != 0 && entity.ActionSeq != _lastSeen)
+{
+    _lastSeen = entity.ActionSeq;
+    animator.SetTrigger("Attack");
+}
+```
+
+The counter wraps at 2³² and resets when the server restarts or the entity respawns, so a
+`>` test stops retriggering for four billion actions after a single wrap, with nothing
+reporting an error. Zero means the sender does not send a counter at all — keep the
+pre-existing behaviour rather than treating it as an edge, or an old server retriggers every
+animation on every snapshot.
+
+`Samples~/GameEventProbe` reproduces both failure modes on a button.
+
+## Ability input (0.40.0)
+
+`InputMessage.AbilityId` (0 = none), `AbilityTargetId`, `AimX`/`AimY`. The target is a
+server-side entity id, never a handle — interning is built by the server for its own outbound
+snapshots and it would not recognise one coming back. The aim is a POINT, unlike
+`MoveX`/`MoveY` which are a direction, and the world origin is a legitimate aim point so
+`(0,0)` does not mean "not aimed".
+
+**Abilities are not predicted, and a UI must not pretend otherwise.** Movement is a pure
+function of input the client already has; an ability outcome depends on cooldowns, content and
+other entities' state. Drive a cast animation and a cooldown sweep off the `AbilityCast`
+event, not off the input — a mispredicted ability is visible as a cast that plays and then
+un-happens, which is worse than one that starts a round trip late.
+
 ## Heartbeat — implemented once
 
 Both hops ping every **10 s** and drop a peer after **30 s** without a pong, so

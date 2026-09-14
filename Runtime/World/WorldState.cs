@@ -101,8 +101,13 @@ namespace Cuvara.Netcode.World
                     // reason speed does: whether an absent value should hold the last
                     // known one or derive a new one is a presentation decision, and this
                     // adapter is not where presentation decisions belong.
+                    // ActionSeq rides through for the same reason, and the consequence of
+                    // dropping it here is the most invisible of the three: the entity would
+                    // render correctly, carry the right action, and simply never animate a
+                    // second swing — with the codec, the resolver and every test still green.
                     converted[i] = new EntitySnapshotData(
-                        e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
+                        e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
+                        e.ActionSeq);
                 }
             }
 

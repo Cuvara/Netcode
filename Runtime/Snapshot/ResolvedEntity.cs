@@ -25,9 +25,20 @@ namespace Cuvara.Netcode.Snapshot
         {
         }
 
+        /// <summary>
+        /// Constructs a resolved entity with no retrigger counter. Kept for source
+        /// compatibility, like the overloads above.
+        /// </summary>
         public ResolvedEntity(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, 0u)
+        {
+        }
+
+        public ResolvedEntity(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action, uint actionSeq)
         {
             Id = id;
             Type = type;
@@ -38,6 +49,7 @@ namespace Cuvara.Netcode.Snapshot
             Speed = speed;
             FacingBrad = facingBrad;
             Action = action;
+            ActionSeq = actionSeq;
         }
 
         public string Id { get; }
@@ -81,5 +93,17 @@ namespace Cuvara.Netcode.Snapshot
         /// "not sent", never "idle".
         /// </summary>
         public Shared.GameLogic.Components.EntityAction Action { get; }
+
+        /// <summary>
+        /// Retrigger counter for <see cref="Action"/>. A view retriggers an animation when
+        /// this CHANGES, never when it increases, and treats 0 as "not sent".
+        /// </summary>
+        /// <remarks>
+        /// Kept raw, like <see cref="FacingBrad"/>, so this layer decides nothing a view
+        /// should decide. The counter wraps and resets, so a greater-than test silently stops
+        /// retriggering for four billion actions — see
+        /// <see cref="Protocol.Messages.EntitySnapshot.ActionSeq"/>.
+        /// </remarks>
+        public uint ActionSeq { get; }
     }
 }

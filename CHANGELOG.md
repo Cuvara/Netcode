@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.40.0]
+
+### Added
+- **Game events — `SnapshotMessage.events`, `GameEvent`, `GameEventType`,
+  `ResolvedGameEvent`.** The edge-triggered channel. Everything the server sent until now was
+  level-triggered state, which is the right shape for state and the wrong shape for an
+  occurrence: "took 12 damage" is not recoverable from two HP values a tick apart, because a
+  heal and a hit in the same tick net out, a delta may omit the entity entirely, and an
+  entity leaving the AOI simply stops reporting. Events arrive on the existing
+  `SnapshotReceived` callback as `ResolvedSnapshot.Events`; **no second channel was added**,
+  deliberately, because two ways to reach the same events is two ways to consume them twice.
+- **Ability input — `InputMessage.AbilityId` / `AbilityTargetId` / `AimX` / `AimY`.** Encoded
+  by both codecs. Not predicted: an ability outcome depends on cooldowns, content and other
+  entities' state, so a mispredicted cast plays and then un-happens. Do not drive a cooldown
+  bar off the input — drive it off the `AbilityCast` event.
+- **`EntitySnapshot.ActionSeq` / `ResolvedEntity.ActionSeq`** — the retrigger counter.
+  `Action` is level-triggered, so two attacks in a row are identical bytes and an animator
+  driven from it plays the swing once. Retrigger on **inequality**, never on increase: the
+  counter wraps at 2³² and resets on restart or respawn, so a greater-than test stops
+  retriggering for four billion actions after a single wrap.
+- **`SnapshotResolver.UnresolvedEventParticipants`** — counted, never escalated. An
+  unresolvable EVENT participant is reported as an empty id and the snapshot still resolves,
+  unlike an unresolvable ENTITY handle which aborts it. A wrong entity state is a wrong
+  world; a missing damage number is a missing damage number, and escalating it would spend a
+  keyframe's bandwidth for every observer precisely when the link is already struggling.
+- **`Samples~/GameEventProbe`** — offline scene. Two buttons carry the argument: turning
+  events off leaves HP falling with no damage numbers, and turning `action_seq` off leaves
+  the attacker attacking with the swing flash fired exactly once.
+
+### Changed
+- **`Runtime/Protocol/Generated/Wire.cs` regenerated** from the backend's `wire.proto` and
+  verified byte-identical to the backend's committed copy. **The CI sync gate will be red
+  until the backend change is on `develop`** — the gate fetches from that branch by design,
+  so a schema change landing there turning this red is the drift it exists to catch.
+- **`WorldState.Apply` carries `ActionSeq` into the merge.** Worth its own line because it
+  was missing when the field was first wired through: the codec decoded it, the resolver
+  carried it, every test passed, and the value was dropped converting `ResolvedEntity` to
+  `EntitySnapshotData` — so no view ever saw it. The symptom would have been an entity that
+  renders perfectly, carries the right action, and never animates a second swing.
+  `ActionSeqSurvivesTheMergeIntoWorldState` is the guard.
+
+### Requires
+- `com.rpgmmo.shared-gamelogic` **≥ sgl-v0.5.0**, for `EntitySnapshotData.ActionSeq` and the
+  ability/event types. An older pin compiles against a struct that has no such field.
+
 ---
 
 ## [0.39.1] — 2026-09-14
