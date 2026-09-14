@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`APingIsAnsweredWithAPongCarryingTheSameTimestamp` failed roughly one CI run
+  in ten.** The wait was bounded by frames — 300 `yield return null` — but what it
+  waits for is a scheduler, not a renderer. Batchmode renders nothing, so 300
+  editor updates can elapse in a few milliseconds, before the continuation is
+  posted; the same 300 frames in an interactive Editor are several seconds, which
+  is why it passed everywhere except CI. The bound is now ten seconds of real
+  time. Verified as a race rather than a regression: the failing and passing runs
+  were the same commit.
+
+# Changelog
+
 All notable changes to the Cuvara Netcode package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
