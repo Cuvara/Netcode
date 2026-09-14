@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.39.1] — 2026-09-14
+
 ### Fixed
 
 - **`APingIsAnsweredWithAPongCarryingTheSameTimestamp` failed roughly one CI run
