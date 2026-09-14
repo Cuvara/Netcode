@@ -137,9 +137,30 @@ namespace Cuvara.Netcode.Samples.GameEventProbe
             cam.transform.rotation = Quaternion.Euler(40f, 0f, 0f);
         }
 
+        /// <summary>
+        /// One self-check, once, a few seconds in.
+        /// </summary>
+        /// <remarks>
+        /// A scene whose script failed to bind, or whose UXML lost an element, produces a window
+        /// that looks plausible and does nothing — and in a built player there is no console to
+        /// notice it in. This line turns the player log into evidence: it reports the counts the
+        /// scene has actually observed, so "it ran" and "it worked" stop being the same claim.
+        /// </remarks>
+        private void SelfCheck()
+        {
+            _selfChecked = true;
+            Debug.Log($"[GameEventProbe] SELFCHECK tick={_tick} eventsSeen={_eventsSeen} " +
+                      $"retriggers={_retriggers} victimHp={_victimHp} " +
+                      $"unresolvedEventParticipants={_resolver.UnresolvedEventParticipants}");
+        }
+
+        private bool _selfChecked;
+        private int _eventsSeen;
+
         private void Update()
         {
             double now = Time.timeAsDouble;
+            if (!_selfChecked && now > 8.0) SelfCheck();
             if (now >= _nextSnapshotAt)
             {
                 _nextSnapshotAt = now + 1.0 / Mathf.Max(1f, snapshotHz);
@@ -301,6 +322,7 @@ namespace Cuvara.Netcode.Samples.GameEventProbe
                 }
 
                 string source = e.HasSource ? e.SourceId : "(not visible)";
+                _eventsSeen++;
                 Remember($"t{resolved.Tick} {e.Type} {source} -> {e.TargetId} amount={e.Amount}");
             }
 
