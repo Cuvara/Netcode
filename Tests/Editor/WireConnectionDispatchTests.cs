@@ -185,9 +185,18 @@ namespace Cuvara.Netcode.Tests.Editor
 
             conn.Start();
 
-            // Bounded, so a genuinely missing pong fails in frames rather than hanging the
-            // suite; generous, because Editor pumping cadence is not a contract.
-            for (var i = 0; i < 300 && transport.Written.Count == 0; i++)
+            // Bounded by TIME, not by frames. A frame count is the wrong unit for a wait
+            // whose subject is a scheduler: batchmode renders nothing, so 300 editor
+            // updates can elapse in a few milliseconds, and the continuation this is
+            // waiting for had not been posted yet. The same 300 frames in an interactive
+            // Editor are several seconds, which is why it passed everywhere except CI —
+            // and there only sometimes, roughly one run in ten.
+            //
+            // Still bounded, so a genuinely missing pong fails in seconds rather than
+            // hanging the suite; generous, because Editor pumping cadence is not a
+            // contract and this test is not measuring latency.
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (transport.Written.Count == 0 && deadline.Elapsed < TimeSpan.FromSeconds(10))
             {
                 yield return null;
             }
