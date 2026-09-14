@@ -136,6 +136,13 @@ namespace Cuvara.Netcode.View
             /// </remarks>
             public uint FacingBrad;
             public Shared.GameLogic.Components.EntityAction Action;
+
+            /// <summary>
+            /// Retrigger counter for <see cref="Action"/>, carried through interpolation
+            /// unblended for the same reason the action is: it is an identity, not a
+            /// quantity, and a value between two counters names no occurrence at all.
+            /// </summary>
+            public uint ActionSeq;
         }
 
         private readonly IEntityView _view;
@@ -173,6 +180,7 @@ namespace Cuvara.Netcode.View
         private int _localHp;
         private int _localMaxHp;
         private uint _localFacingBrad;
+        private uint _localActionSeq;
         private Shared.GameLogic.Components.EntityAction _localAction;
         private bool _localSeen;
 
@@ -939,6 +947,7 @@ namespace Cuvara.Netcode.View
                     _localMaxHp = e.MaxHp;
                     _localFacingBrad = e.FacingBrad;
                     _localAction = e.Action;
+                    _localActionSeq = e.ActionSeq;
                     _localSeen = true;
 
                     // Once AdvanceFrame owns the local entity's rendering (the same
@@ -950,7 +959,7 @@ namespace Cuvara.Netcode.View
                     {
                         var predicted = _predictor.Position;
                         _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
-                        _poseView?.SetPose(id, e.FacingBrad, e.Action);
+                        _poseView?.SetPose(id, e.FacingBrad, e.Action, e.ActionSeq);
                     }
 
                     // HP is deliberately still the server's. Only movement is predicted;
@@ -984,6 +993,7 @@ namespace Cuvara.Netcode.View
                     fresh.MaxHp = e.MaxHp;
                     fresh.FacingBrad = e.FacingBrad;
                     fresh.Action = e.Action;
+                    fresh.ActionSeq = e.ActionSeq;
                     _interp[id] = fresh;
                 }
 
@@ -1013,12 +1023,12 @@ namespace Cuvara.Netcode.View
                     }
 
                     _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
-                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action);
+                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action, entry.ActionSeq);
                 }
                 else
                 {
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
-                    _poseView?.SetPose(id, e.FacingBrad, e.Action);
+                    _poseView?.SetPose(id, e.FacingBrad, e.Action, e.ActionSeq);
                 }
             }
 
@@ -1112,7 +1122,11 @@ namespace Cuvara.Netcode.View
             // these from - inventing a facing from the predicted velocity here would
             // fight the authoritative value on the very next snapshot.
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
-            _poseView?.SetPose(_localId, _localFacingBrad, _localAction);
+            // The counter rides the between-snapshot frames unchanged, like facing and
+            // action. Repeating the same value is exactly right: a consumer retriggers on
+            // CHANGE, so an unchanged counter says "no new occurrence since the last
+            // snapshot", which is the truth here.
+            _poseView?.SetPose(_localId, _localFacingBrad, _localAction, _localActionSeq);
         }
 
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
@@ -1145,6 +1159,7 @@ namespace Cuvara.Netcode.View
             _localHp = 0;
             _localMaxHp = 0;
             _localFacingBrad = 0;
+            _localActionSeq = 0;
             _localAction = Shared.GameLogic.Components.EntityAction.Unspecified;
             _localSeen = false;
             _lastWorldTick = 0;
