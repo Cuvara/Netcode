@@ -28,60 +28,62 @@ namespace RpgMmo.Wire.V1 {
             "eXBlGAEgASgNEg8KB3BheWxvYWQYAiABKAwiNgoLQXV0aFJlcXVlc3QSDQoF",
             "dG9rZW4YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJUCgxBdXRo",
             "UmVzcG9uc2USCgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJv",
-            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIiMKEUVudGVyV29y",
-            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSJyChJFbnRlcldvcmxkUmVzcG9u",
-            "c2USEwoLc2VydmVyX2FkZHIYASABKAkSEgoKam9pbl90b2tlbhgCIAEoCRIR",
-            "Cgl0cmFuc3BvcnQYAyABKAkSDQoFZXJyb3IYBCABKAlKBAgFEAZSC3Nlc3Np",
-            "b25fa2V5IjsKEEpvaW5Ub2tlblJlcXVlc3QSDQoFdG9rZW4YASABKAkSGAoQ",
-            "cHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJsChFKb2luVG9rZW5SZXNwb25zZRIK",
-            "CgJvaxgBIAEoCBIPCgd1c2VyX2lkGAIgASgJEg0KBWVycm9yGAMgASgJEhEK",
-            "CXRpY2tfcmF0ZRgEIAEoDRIYChBwcm90b2NvbF92ZXJzaW9uGAUgASgNIlYK",
-            "DElucHV0TWVzc2FnZRIMCgR0aWNrGAEgASgEEg4KBm1vdmVfeBgCIAEoAhIO",
-            "CgZtb3ZlX3kYAyABKAISGAoQYXR0YWNrX3RhcmdldF9pZBgEIAEoCSLtAQoO",
-            "RW50aXR5U25hcHNob3QSCgoCaWQYASABKAkSEQoJdHlwZV9uYW1lGAIgASgJ",
-            "EgkKAXgYAyABKAISCQoBeRgEIAEoAhIKCgJocBgFIAEoBRIOCgZtYXhfaHAY",
-            "BiABKAUSKAoEdHlwZRgHIAEoDjIaLnJwZ21tby53aXJlLnYxLkVudGl0eVR5",
-            "cGUSDgoGaGFuZGxlGAggASgNEg0KBXNwZWVkGAkgASgCEhMKC2ZhY2luZ19i",
-            "cmFkGAogASgNEiwKBmFjdGlvbhgLIAEoDjIcLnJwZ21tby53aXJlLnYxLkVu",
-            "dGl0eUFjdGlvbiKCAQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQS",
-            "EAoIYWNrX3RpY2sYAiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgE",
-            "IAMoCzIeLnJwZ21tby53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92",
-            "ZWQYBSADKAkiIwoRRGlzY29ubmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
-            "Ig8KDVJlc3luY1JlcXVlc3QiJAoSVHJhbnNmZXJNYXBSZXF1ZXN0Eg4KBm1h",
-            "cF9pZBgBIAEoCSIwChNUcmFuc2Zlck1hcFJlc3BvbnNlEgoKAm9rGAEgASgI",
-            "Eg0KBWVycm9yGAIgASgJIiAKC1BpbmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgB",
-            "IAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMSEwoLc2Vy",
-            "dmVyX3RpbWUYAiABKAMiHQoLS2lja01lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
-            "IicKEVNlYWxlZENsaWVudEhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwiRwoR",
-            "U2VhbGVkU2VydmVySGVsbG8SEgoKcHVibGljX2tleRgBIAEoDBIPCgdiaW5k",
-            "aW5nGAIgASgMEg0KBWVycm9yGAMgASgJKs8DCgdNc2dUeXBlEhgKFE1TR19U",
-            "WVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19U",
-            "WVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZ",
-            "TVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5f",
-            "VE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0df",
-            "VFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZ",
-            "UEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19U",
-            "WVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9S",
-            "RVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIR",
-            "Cg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9I",
-            "RUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoK",
-            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
-            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
-            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
-            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
-            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
-            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
-            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1",
-            "Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVw",
-            "YqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
+            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIjUKEUVudGVyV29y",
+            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCRIQCghwYXJ0eV9pZBgCIAEoCSKN",
+            "AQoSRW50ZXJXb3JsZFJlc3BvbnNlEhMKC3NlcnZlcl9hZGRyGAEgASgJEhIK",
+            "CmpvaW5fdG9rZW4YAiABKAkSEQoJdHJhbnNwb3J0GAMgASgJEg0KBWVycm9y",
+            "GAQgASgJEhkKEXNlcnZlcl9wdWJsaWNfa2V5GAYgASgMSgQIBRAGUgtzZXNz",
+            "aW9uX2tleSI7ChBKb2luVG9rZW5SZXF1ZXN0Eg0KBXRva2VuGAEgASgJEhgK",
+            "EHByb3RvY29sX3ZlcnNpb24YAiABKA0ibAoRSm9pblRva2VuUmVzcG9uc2US",
+            "CgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJvchgDIAEoCRIR",
+            "Cgl0aWNrX3JhdGUYBCABKA0SGAoQcHJvdG9jb2xfdmVyc2lvbhgFIAEoDSJW",
+            "CgxJbnB1dE1lc3NhZ2USDAoEdGljaxgBIAEoBBIOCgZtb3ZlX3gYAiABKAIS",
+            "DgoGbW92ZV95GAMgASgCEhgKEGF0dGFja190YXJnZXRfaWQYBCABKAki7QEK",
+            "DkVudGl0eVNuYXBzaG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEo",
+            "CRIJCgF4GAMgASgCEgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hw",
+            "GAYgASgFEigKBHR5cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlU",
+            "eXBlEg4KBmhhbmRsZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdf",
+            "YnJhZBgKIAEoDRIsCgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5F",
+            "bnRpdHlBY3Rpb24iggEKD1NuYXBzaG90TWVzc2FnZRIMCgR0aWNrGAEgASgE",
+            "EhAKCGFja190aWNrGAIgASgEEgwKBGZ1bGwYAyABKAgSMAoIZW50aXRpZXMY",
+            "BCADKAsyHi5ycGdtbW8ud2lyZS52MS5FbnRpdHlTbmFwc2hvdBIPCgdyZW1v",
+            "dmVkGAUgAygJIiMKEURpc2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
+            "CSIPCg1SZXN5bmNSZXF1ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZt",
+            "YXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEo",
+            "CBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAY",
+            "ASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3Nl",
+            "cnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
+            "CSInChFTZWFsZWRDbGllbnRIZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEK",
+            "EVNlYWxlZFNlcnZlckhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmlu",
+            "ZGluZxgCIAEoDBINCgVlcnJvchgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJl",
+            "GAQgASgMKs8DCgdNc2dUeXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAAS",
+            "EQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgK",
+            "FE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09S",
+            "TERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQ",
+            "RV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1T",
+            "R19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMK",
+            "D01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBAN",
+            "Eh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVf",
+            "UElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8S",
+            "IAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBF",
+            "X1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoKRW50aXR5VHlwZRIbChdFTlRJ",
+            "VFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhAB",
+            "EhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQK",
+            "EEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxF",
+            "EAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lG",
+            "SUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElP",
+            "Tl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVO",
+            "VElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBn",
+            "LW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYx",
+            "YgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.Envelope), global::RpgMmo.Wire.V1.Envelope.Parser, new[]{ "Type", "Payload" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error", "ProtocolVersion" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId", "PartyId" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error", "ServerPublicKey" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
@@ -95,7 +97,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.PongMessage), global::RpgMmo.Wire.V1.PongMessage.Parser, new[]{ "Timestamp", "ServerTime" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.KickMessage), global::RpgMmo.Wire.V1.KickMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedClientHello), global::RpgMmo.Wire.V1.SealedClientHello.Parser, new[]{ "PublicKey" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedServerHello), global::RpgMmo.Wire.V1.SealedServerHello.Parser, new[]{ "PublicKey", "Binding", "Error" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedServerHello), global::RpgMmo.Wire.V1.SealedServerHello.Parser, new[]{ "PublicKey", "Binding", "Error", "ServerSignature" }, null, null, null, null)
           }));
     }
     #endregion
@@ -1068,7 +1070,20 @@ namespace RpgMmo.Wire.V1 {
   }
 
   /// <summary>
-  /// EnterWorldRequest asks the gateway to assign a map server.
+  /// EnterWorldRequest asks the gateway to assign a game server.
+  ///
+  /// `party_id` selects between the two things this one message can ask for, and
+  /// ADR-26 decision 1 is the reason there is only one message:
+  ///
+  ///   empty     -> a MAP server for `map_id`, the flow that has always existed.
+  ///   non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
+  ///                party. The first member's request allocates a pod; every later
+  ///                member is handed the SAME address, because the instance is
+  ///                keyed by the party and not by the content (ADR-26 decision 2).
+  ///
+  /// The gateway verifies the caller really is a member of the named party against
+  /// Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
+  /// not in is refused; it is not quietly given a map.
   /// </summary>
   [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
   public sealed partial class EnterWorldRequest : pb::IMessage<EnterWorldRequest>
@@ -1106,6 +1121,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public EnterWorldRequest(EnterWorldRequest other) : this() {
       mapId_ = other.mapId_;
+      partyId_ = other.partyId_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1127,6 +1143,18 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "party_id" field.</summary>
+    public const int PartyIdFieldNumber = 2;
+    private string partyId_ = "";
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string PartyId {
+      get { return partyId_; }
+      set {
+        partyId_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1143,6 +1171,7 @@ namespace RpgMmo.Wire.V1 {
         return true;
       }
       if (MapId != other.MapId) return false;
+      if (PartyId != other.PartyId) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1151,6 +1180,7 @@ namespace RpgMmo.Wire.V1 {
     public override int GetHashCode() {
       int hash = 1;
       if (MapId.Length != 0) hash ^= MapId.GetHashCode();
+      if (PartyId.Length != 0) hash ^= PartyId.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1173,6 +1203,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(MapId);
       }
+      if (PartyId.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteString(PartyId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1187,6 +1221,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(MapId);
       }
+      if (PartyId.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteString(PartyId);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1199,6 +1237,9 @@ namespace RpgMmo.Wire.V1 {
       int size = 0;
       if (MapId.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(MapId);
+      }
+      if (PartyId.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(PartyId);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1214,6 +1255,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.MapId.Length != 0) {
         MapId = other.MapId;
+      }
+      if (other.PartyId.Length != 0) {
+        PartyId = other.PartyId;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1238,6 +1282,10 @@ namespace RpgMmo.Wire.V1 {
             MapId = input.ReadString();
             break;
           }
+          case 18: {
+            PartyId = input.ReadString();
+            break;
+          }
         }
       }
     #endif
@@ -1259,6 +1307,10 @@ namespace RpgMmo.Wire.V1 {
             break;
           case 10: {
             MapId = input.ReadString();
+            break;
+          }
+          case 18: {
+            PartyId = input.ReadString();
             break;
           }
         }
@@ -1313,6 +1365,7 @@ namespace RpgMmo.Wire.V1 {
       joinToken_ = other.joinToken_;
       transport_ = other.transport_;
       error_ = other.error_;
+      serverPublicKey_ = other.serverPublicKey_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1370,6 +1423,47 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "server_public_key" field.</summary>
+    public const int ServerPublicKeyFieldNumber = 6;
+    private pb::ByteString serverPublicKey_ = pb::ByteString.Empty;
+    /// <summary>
+    /// The game server's Ed25519 IDENTITY public key, 32 bytes (ADR-25).
+    ///
+    /// Generated by the pod at startup, never persisted, never configured; it
+    /// reaches this message by travelling pod -> Redis registry entry -> gateway.
+    /// It is the key that verifies `SealedServerHello.server_signature` on the
+    /// gameplay hop, and it is a NEW field number because field 5 is reserved
+    /// forever -- see above for why that reservation is not negotiable.
+    ///
+    /// WHAT A CLIENT MAY CONCLUDE FROM IT, WHICH IS LESS THAN IT LOOKS. This
+    /// message crosses the GATEWAY hop, which is plaintext in every environment
+    /// today (ADR-23's TLS is implemented and defaults off). An attacker able to
+    /// man-in-the-middle the gameplay hop is on the same network path as this hop,
+    /// so he substitutes this key and then forges a signature that verifies
+    /// against it. Checking the signature therefore proves the gameplay peer holds
+    /// the key NAMED HERE -- nothing more -- and that is only an identity claim
+    /// when this message itself arrived authenticated.
+    ///
+    /// So a client MUST report two different things: that it checked the
+    /// signature, and whether the hop that delivered this key was authenticated.
+    /// Only the conjunction is `server_identity_verified` (ADR-25 decision 6). An
+    /// instrument that reports the strong claim on the weak evidence is worse than
+    /// no instrument.
+    ///
+    /// Empty means the gateway has no key for that server -- an older game server,
+    /// or a registry entry written before this field existed. A client that
+    /// REQUIRES identity must refuse the join rather than continue unverified:
+    /// there is no negotiation and no fallback (ADR-22 decision 3).
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString ServerPublicKey {
+      get { return serverPublicKey_; }
+      set {
+        serverPublicKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1389,6 +1483,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken != other.JoinToken) return false;
       if (Transport != other.Transport) return false;
       if (Error != other.Error) return false;
+      if (ServerPublicKey != other.ServerPublicKey) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1400,6 +1495,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken.Length != 0) hash ^= JoinToken.GetHashCode();
       if (Transport.Length != 0) hash ^= Transport.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (ServerPublicKey.Length != 0) hash ^= ServerPublicKey.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1434,6 +1530,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (ServerPublicKey.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteBytes(ServerPublicKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1460,6 +1560,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (ServerPublicKey.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteBytes(ServerPublicKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1481,6 +1585,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (ServerPublicKey.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(ServerPublicKey);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1505,6 +1612,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.ServerPublicKey.Length != 0) {
+        ServerPublicKey = other.ServerPublicKey;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1541,6 +1651,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 50: {
+            ServerPublicKey = input.ReadBytes();
+            break;
+          }
         }
       }
     #endif
@@ -1574,6 +1688,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 34: {
             Error = input.ReadString();
+            break;
+          }
+          case 50: {
+            ServerPublicKey = input.ReadBytes();
             break;
           }
         }
@@ -5250,6 +5368,7 @@ namespace RpgMmo.Wire.V1 {
       publicKey_ = other.publicKey_;
       binding_ = other.binding_;
       error_ = other.error_;
+      serverSignature_ = other.serverSignature_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -5325,6 +5444,52 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "server_signature" field.</summary>
+    public const int ServerSignatureFieldNumber = 4;
+    private pb::ByteString serverSignature_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Ed25519 signature, 64 bytes, over the server's per-pod IDENTITY key
+    /// (ADR-25). This is the replacement for `binding` above, and it exists
+    /// because `binding` is a SYMMETRIC MAC under JOIN_TOKEN_SECRET: a client able
+    /// to verify it would hold the key the gateway mints join tokens with, and
+    /// could forge a token for any player on any server. `binding_verified` is
+    /// therefore permanently false for every shipped client, and no configuration
+    /// reaches true. An asymmetric signature has no such problem -- the client
+    /// needs only the public half.
+    ///
+    /// The signed input is NOT the transcript. It is:
+    ///
+    ///   "cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+    ///     || identity_public (32)
+    ///
+    /// where `transcript` is EXACTLY the bytes described on `binding` above,
+    /// unchanged byte for byte. That is deliberate: key derivation
+    /// (DeriveDirectionKeys) and the HMAC binding keep their current bytes and
+    /// their current cross-implementation vectors, so this field adds a guarantee
+    /// without invalidating one. The identity key is inside the signed input
+    /// because a signature that does not name its signer authenticates a statement
+    /// ABOUT a key rather than a key, and the NUL separators are load-bearing for
+    /// the same re-splitting reason given on `binding`.
+    ///
+    /// The server ALWAYS signs. There is no negotiation and no fallback: a client
+    /// that has been told to check and cannot is refused, never downgraded. A
+    /// client that ignores this field behaves exactly as it did before, which is
+    /// what makes the server-and-gateway-first migration order safe.
+    ///
+    /// The public half needed to check this arrives out of band, in
+    /// EnterWorldResponse.server_public_key -- read the note there before
+    /// concluding that a verified signature means the server is authenticated. It
+    /// does not, while the gateway hop is plaintext.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString ServerSignature {
+      get { return serverSignature_; }
+      set {
+        serverSignature_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -5343,6 +5508,7 @@ namespace RpgMmo.Wire.V1 {
       if (PublicKey != other.PublicKey) return false;
       if (Binding != other.Binding) return false;
       if (Error != other.Error) return false;
+      if (ServerSignature != other.ServerSignature) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -5353,6 +5519,7 @@ namespace RpgMmo.Wire.V1 {
       if (PublicKey.Length != 0) hash ^= PublicKey.GetHashCode();
       if (Binding.Length != 0) hash ^= Binding.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (ServerSignature.Length != 0) hash ^= ServerSignature.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -5383,6 +5550,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ServerSignature.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(ServerSignature);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -5405,6 +5576,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ServerSignature.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(ServerSignature);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -5423,6 +5598,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (ServerSignature.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(ServerSignature);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -5444,6 +5622,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.ServerSignature.Length != 0) {
+        ServerSignature = other.ServerSignature;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -5476,6 +5657,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 34: {
+            ServerSignature = input.ReadBytes();
+            break;
+          }
         }
       }
     #endif
@@ -5505,6 +5690,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 26: {
             Error = input.ReadString();
+            break;
+          }
+          case 34: {
+            ServerSignature = input.ReadBytes();
             break;
           }
         }

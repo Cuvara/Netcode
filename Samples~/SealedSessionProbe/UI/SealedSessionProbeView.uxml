@@ -22,6 +22,20 @@
             <engine:Label name="handshake-line" class="cuvara-probe__readout" />
             <engine:Label name="keys-line" class="cuvara-probe__readout cuvara-probe__readout--muted" />
 
+            <engine:Label text="Server identity (ADR-25)" class="cuvara-probe__section" />
+            <engine:Label name="identity-line" class="cuvara-probe__readout" />
+            <engine:Label name="identity-verdict" class="cuvara-probe__readout" />
+            <engine:Label text="The toggle is the whole lesson: the signature below is GENUINE either way. What changes is whether the key it names reached us over a hop an attacker could rewrite." class="cuvara-probe__caption" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Toggle name="hop-authenticated" text="Gateway hop authenticated (ADR-23 TLS)" class="cuvara-probe__toggle" />
+            </engine:VisualElement>
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="identity-flip" text="Flip one byte of the signature"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+                <engine:Button name="identity-swap" text="Substitute the identity key and re-sign"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
             <engine:Label text="The frame on the wire" class="cuvara-probe__section" />
             <engine:Label text="plaintext the game wrote" class="cuvara-probe__caption" />
             <engine:Label name="plain-line" class="cuvara-probe__hex cuvara-probe__hex--plain" />

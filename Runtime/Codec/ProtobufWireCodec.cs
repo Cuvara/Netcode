@@ -107,7 +107,11 @@ namespace Cuvara.Netcode.Codec
                     }.ToByteArray();
 
                 case Msg.EnterWorldRequest m:
-                    return new Pb.EnterWorldRequest { MapId = m.MapId ?? string.Empty }.ToByteArray();
+                    return new Pb.EnterWorldRequest
+                    {
+                        MapId = m.MapId ?? string.Empty,
+                        PartyId = m.PartyId ?? string.Empty,
+                    }.ToByteArray();
 
                 case Msg.SealedClientHello m:
                     // Protobuf only, deliberately: the JSON codec has no encoder for this
@@ -184,6 +188,7 @@ namespace Cuvara.Netcode.Codec
                             JoinToken = m.JoinToken,
                             Transport = m.Transport,
                             Error = m.Error,
+                            ServerPublicKey = m.ServerPublicKey.ToByteArray(),
                         };
                     }
 
@@ -235,6 +240,7 @@ namespace Cuvara.Netcode.Codec
                             PublicKey = m.PublicKey.ToByteArray(),
                             Binding = m.Binding.ToByteArray(),
                             Error = m.Error,
+                            ServerSignature = m.ServerSignature.ToByteArray(),
                         };
                     }
 

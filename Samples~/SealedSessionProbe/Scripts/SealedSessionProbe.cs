@@ -3,6 +3,11 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.UIElements;
 using Cuvara.Netcode.Crypto;
+using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Crypto.Signers;
+using Org.BouncyCastle.Security;
 
 namespace Cuvara.Netcode.Samples.SealedSessionProbe
 {
@@ -60,6 +65,17 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
         private byte[] _lastFrame = Array.Empty<byte>();
         private string _lastPlain = string.Empty;
 
+        // --- ADR-25 server identity -----------------------------------------------------
+        // The pod's Ed25519 keypair. Generated here for the same reason the real server
+        // generates it at startup and never persists it: there is no key to mount, so there is
+        // no fleet-wide private key sitting in a config map.
+        private Ed25519PrivateKeyParameters _identityPrivate;
+        private byte[] _identityPublic = Array.Empty<byte>();
+        private byte[] _identitySignature = Array.Empty<byte>();
+        private byte[] _transcript = Array.Empty<byte>();
+        private ServerIdentityResult _identity;
+        private string _identityNote = string.Empty;
+
         // --- attack bookkeeping ---------------------------------------------------------
         private bool _tamperNext;
         private string _lastAttack = "none pressed yet";
@@ -76,10 +92,20 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
         private Label _refusedLine;
         private Label _lastAttackLine;
         private Label _verdict;
+        private Label _identityLine;
+        private Label _identityVerdict;
         private Toggle _pause;
+        private Toggle _hopAuthenticated;
 
         private void OnEnable()
         {
+            // The self-check runs BEFORE the UI is required, so this scene answers its central
+            // question in a player's log with no window, no renderer and nobody clicking.
+            // Everything below it needs a human; this does not, and the thing most worth
+            // knowing -- does the cryptography survive IL2CPP's stripping? -- is exactly the
+            // thing that cannot be checked in the Editor, which never strips.
+            RunHeadlessSelfCheck();
+
             var document = GetComponent<UIDocument>();
             if (document == null || document.rootVisualElement == null)
             {
@@ -99,7 +125,10 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             _refusedLine = root.Q<Label>("refused-line");
             _lastAttackLine = root.Q<Label>("last-attack");
             _verdict = root.Q<Label>("verdict");
+            _identityLine = root.Q<Label>("identity-line");
+            _identityVerdict = root.Q<Label>("identity-verdict");
             _pause = root.Q<Toggle>("pause");
+            _hopAuthenticated = root.Q<Toggle>("hop-authenticated");
 
             root.Q<Button>("tamper").clicked += AttackTamperInFlight;
             root.Q<Button>("replay").clicked += AttackReplayLastFrame;
@@ -108,8 +137,137 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             root.Q<Button>("wrong-secret").clicked += AttackWrongJoinSecret;
             root.Q<Button>("mitm").clicked += AttackSubstitutedKey;
             root.Q<Button>("rehandshake").clicked += Handshake;
+            root.Q<Button>("identity-flip").clicked += AttackFlipIdentitySignature;
+            root.Q<Button>("identity-swap").clicked += AttackSubstituteIdentityKey;
+
+            // Re-evaluating on the toggle is the point of the toggle: the signature does not
+            // change, the verdict does.
+            if (_hopAuthenticated != null)
+                _hopAuthenticated.RegisterValueChangedCallback(_ => { EvaluateIdentity(); Render(); });
 
             Handshake();
+        }
+
+        /// <summary>
+        /// Every claim this scene makes, checked once and written to the log, with no UI.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a scene grew a headless mode.</b> A player build strips managed code the
+        /// Editor never strips, so a library reached through its own registries can vanish from
+        /// a player while every Editor test stays green — no compile error, no exception, just a
+        /// feature that silently stops working. The only way to find out is to run a player. But
+        /// a player whose only output is a window full of labels answers nothing that can be
+        /// read from a script, so the answer used to depend on somebody looking at a screen and
+        /// reporting what they saw.
+        /// </para>
+        /// <para>
+        /// Each line below names what it checked and what happened, and the last line is a
+        /// single verdict a grep can find. The checks are deliberately the ones with no UI in
+        /// them: fresh keys, a real signature, a real refusal.
+        /// </para>
+        /// </remarks>
+        private static void RunHeadlessSelfCheck()
+        {
+            const string tag = "[SealedSessionProbe/selfcheck]";
+            int failures = 0;
+
+            try
+            {
+                // 1. X25519 + HKDF + the transcript: the ADR-22 half.
+                SealedKeyPair a = SealedKeyPair.Generate();
+                SealedKeyPair b = SealedKeyPair.Generate();
+
+                // Both agreements run unconditionally: && would short-circuit the second, and
+                // the compiler is right that its out parameter would then be unassigned.
+                byte[] sa;
+                byte[] sb;
+                bool clientAgreed = a.TryAgree(b.Public, out sa);
+                bool serverAgreed = b.TryAgree(a.Public, out sb);
+                bool sameSecret = clientAgreed && serverAgreed && Hex(sa) == Hex(sb);
+                if (!sameSecret) failures++;
+                Debug.Log($"{tag} X25519 agreement: {(sameSecret ? "OK" : "FAILED")}");
+
+                byte[] transcript = SealedHandshake.Transcript("selfcheck-jti", a.Public, b.Public);
+
+                byte[] c2s;
+                byte[] s2c;
+                SealedCrypto.DeriveDirectionKeys(sa, transcript, out c2s, out s2c);
+                bool twoKeys = Hex(c2s) != Hex(s2c) && c2s.Length == 32 && s2c.Length == 32;
+                if (!twoKeys) failures++;
+                Debug.Log($"{tag} HKDF two direction keys differ: {(twoKeys ? "OK" : "FAILED")}");
+
+                // 2. ChaCha20-Poly1305, both ways, plus one refusal.
+                var sealing = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+                var opening = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+                byte[] plain = Encoding.UTF8.GetBytes("selfcheck");
+                byte[] frame = sealing.Seal(plain);
+
+                byte[] opened;
+                bool roundTrip = opening.Open(frame, out opened) == SealedOpenResult.Ok
+                                 && Hex(opened) == Hex(plain);
+                if (!roundTrip) failures++;
+                Debug.Log($"{tag} ChaCha20-Poly1305 round trip: {(roundTrip ? "OK" : "FAILED")}");
+
+                var tampered = (byte[])frame.Clone();
+                tampered[tampered.Length - 1] ^= 0x01;
+                byte[] ignored;
+                bool tamperRefused = opening.Open(tampered, out ignored) != SealedOpenResult.Ok;
+                if (!tamperRefused) failures++;
+                Debug.Log($"{tag} a flipped ciphertext byte is refused: {(tamperRefused ? "OK" : "FAILED")}");
+
+                // 3. Ed25519 identity: the ADR-25 half, and the reason this mode exists. These
+                //    two lines are the IL2CPP stripping answer -- BouncyCastle's Ed25519 entry
+                //    points are named in the package's link.xml, and nothing but a player run
+                //    can show whether that was enough.
+                var gen = new Ed25519KeyPairGenerator();
+                gen.Init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+                AsymmetricCipherKeyPair pair = gen.GenerateKeyPair();
+                byte[] identityPublic = ((Ed25519PublicKeyParameters)pair.Public).GetEncoded();
+                byte[] signature = SignIdentity((Ed25519PrivateKeyParameters)pair.Private, transcript, identityPublic);
+
+                bool signed = signature.Length == ServerIdentityVerifier.IdentitySignatureSize;
+                if (!signed) failures++;
+                Debug.Log($"{tag} Ed25519 signing produced {signature.Length} bytes: {(signed ? "OK" : "FAILED")}");
+
+                bool verified = ServerIdentityVerifier.Verify(transcript, identityPublic, signature);
+                if (!verified) failures++;
+                Debug.Log($"{tag} Ed25519 verification of a genuine signature: {(verified ? "OK" : "FAILED")}");
+
+                var flipped = (byte[])signature.Clone();
+                flipped[0] ^= 0x01;
+                bool flipRefused = !ServerIdentityVerifier.Verify(transcript, identityPublic, flipped);
+                if (!flipRefused) failures++;
+                Debug.Log($"{tag} a flipped signature byte is refused: {(flipRefused ? "OK" : "FAILED")}");
+
+                // 4. The conjunction. Both calls use the SAME genuine signature; only the hop
+                //    differs, which is the claim in one assertion.
+                ServerIdentityResult overPlaintext = ServerIdentityVerifier.Evaluate(
+                    transcript, identityPublic, signature, keyHopAuthenticated: false, required: false);
+                ServerIdentityResult overTls = ServerIdentityVerifier.Evaluate(
+                    transcript, identityPublic, signature, keyHopAuthenticated: true, required: false);
+
+                bool conjunction = overPlaintext.Checked && !overPlaintext.Verified
+                                   && overTls.Checked && overTls.Verified;
+                if (!conjunction) failures++;
+                Debug.Log(
+                    $"{tag} the same signature reads as verified ONLY over an authenticated hop: " +
+                    $"{(conjunction ? "OK" : "FAILED")} " +
+                    $"(plaintext: checked={overPlaintext.Checked} verified={overPlaintext.Verified}; " +
+                    $"TLS: checked={overTls.Checked} verified={overTls.Verified})");
+            }
+            catch (Exception ex)
+            {
+                // An exception here IS the answer on a stripped player: a missing type surfaces
+                // as a TypeLoadException or a null from a factory, never as a compile error.
+                failures++;
+                Debug.LogError($"{tag} threw, which on a stripped player usually means a stripped type: {ex}");
+            }
+
+            if (failures == 0)
+                Debug.Log("[SealedSessionProbe/selfcheck] VERDICT: ALL CHECKS PASSED");
+            else
+                Debug.LogError($"[SealedSessionProbe/selfcheck] VERDICT: {failures} CHECK(S) FAILED");
         }
 
         /// <summary>
@@ -154,6 +312,17 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
             // single readout would obscure which key produced which bytes.
             _sending = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
             _receiving = new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence());
+
+            // --- ADR-25: the server signs the transcript with its identity key -----------
+            _transcript = transcript;
+            var identityKeys = new Ed25519KeyPairGenerator();
+            identityKeys.Init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+            AsymmetricCipherKeyPair identityPair = identityKeys.GenerateKeyPair();
+            _identityPrivate = (Ed25519PrivateKeyParameters)identityPair.Private;
+            _identityPublic = ((Ed25519PublicKeyParameters)identityPair.Public).GetEncoded();
+            _identitySignature = SignIdentity(_identityPrivate, transcript, _identityPublic);
+            _identityNote = string.Empty;
+            EvaluateIdentity();
 
             _handshakeOk = bound;
             _handshakeLine.text = bound
@@ -321,6 +490,98 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
                          !accepted, accepted ? SealedOpenResult.Ok : SealedOpenResult.Rejected);
         }
 
+        /// <summary>
+        /// The server side of ADR-25, which no client ships: sign
+        /// <c>label || 0x00 || transcript || 0x00 || identityPublic</c>.
+        /// </summary>
+        /// <remarks>
+        /// The layout comes from <see cref="ServerIdentityVerifier.IdentityInput"/> rather than
+        /// being spelled out again here. A probe that rebuilt the bytes itself would agree with
+        /// itself while disagreeing with the server, which is the one failure it exists to
+        /// catch.
+        /// </remarks>
+        private static byte[] SignIdentity(
+            Ed25519PrivateKeyParameters key, byte[] transcript, byte[] identityPublic)
+        {
+            byte[] input = ServerIdentityVerifier.IdentityInput(transcript, identityPublic);
+            var signer = new Ed25519Signer();
+            signer.Init(true, key);
+            signer.BlockUpdate(input, 0, input.Length);
+            return signer.GenerateSignature();
+        }
+
+        private void EvaluateIdentity()
+        {
+            bool hop = _hopAuthenticated != null && _hopAuthenticated.value;
+            _identity = ServerIdentityVerifier.Evaluate(
+                _transcript, _identityPublic, _identitySignature, hop, required: false);
+        }
+
+        /// <summary>
+        /// One byte of the signature changed. Ed25519 must refuse it outright — there is no
+        /// partial credit and no "mostly correct" signature.
+        /// </summary>
+        private void AttackFlipIdentitySignature()
+        {
+            if (_identitySignature.Length == 0) return;
+
+            var flipped = (byte[])_identitySignature.Clone();
+            flipped[UnityEngine.Random.Range(0, flipped.Length)] ^= 0x01;
+
+            bool accepted = ServerIdentityVerifier.Verify(_transcript, _identityPublic, flipped);
+
+            _identityNote = accepted
+                ? "a flipped signature byte was ACCEPTED — that is a defect"
+                : "a flipped signature byte was refused";
+
+            RecordAttack("flipped one byte of the server's identity signature",
+                         !accepted, accepted ? SealedOpenResult.Ok : SealedOpenResult.Rejected);
+            Render();
+        }
+
+        /// <summary>
+        /// The attack the signature ALONE cannot stop, and the reason
+        /// <see cref="ServerIdentityResult.Verified"/> is a conjunction.
+        /// </summary>
+        /// <remarks>
+        /// An attacker on a plaintext gateway hop rewrites <c>server_public_key</c> to their own
+        /// and signs the transcript with the matching private key. The signature then verifies
+        /// perfectly — there is nothing wrong with it — so this is recorded as refused only when
+        /// the hop is authenticated, which is the condition that stops the substituted key ever
+        /// arriving. With the toggle off it is ACCEPTED, and that is not a defect in this code;
+        /// it is the plaintext deployment being honestly reported.
+        /// </remarks>
+        private void AttackSubstituteIdentityKey()
+        {
+            var attackerKeys = new Ed25519KeyPairGenerator();
+            attackerKeys.Init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+            AsymmetricCipherKeyPair attacker = attackerKeys.GenerateKeyPair();
+
+            byte[] attackerPublic = ((Ed25519PublicKeyParameters)attacker.Public).GetEncoded();
+            byte[] attackerSignature = SignIdentity(
+                (Ed25519PrivateKeyParameters)attacker.Private, _transcript, attackerPublic);
+
+            bool hop = _hopAuthenticated != null && _hopAuthenticated.value;
+            ServerIdentityResult substituted = ServerIdentityVerifier.Evaluate(
+                _transcript, attackerPublic, attackerSignature, hop, required: false);
+
+            // Checked AND NOT Verified is the signature doing its job while the hop does not do
+            // its own. Verified here would mean the attacker had authenticated themselves.
+            bool stopped = !substituted.Verified;
+
+            _identityNote = substituted.Verified
+                ? "a substituted identity key was reported VERIFIED — that is a defect"
+                : hop
+                    ? "a substituted identity key could not have been delivered: this hop is authenticated"
+                    : "a substituted identity key CHECKED OUT (it is a real signature) but is not " +
+                      "reported as verified, because this hop is plaintext -- turn the toggle on";
+
+            RecordAttack(
+                "substituted the server's identity key and re-signed with it",
+                stopped, stopped ? SealedOpenResult.Rejected : SealedOpenResult.Ok);
+            Render();
+        }
+
         private void RecordAttack(string what, bool refused, SealedOpenResult result)
         {
             _attacksRun++;
@@ -336,6 +597,16 @@ namespace Cuvara.Netcode.Samples.SealedSessionProbe
 
             _keysLine.text = $"c2s {Short(_c2sKeyHex)}   s2c {Short(_s2cKeyHex)}   " +
                              "— two keys, which is what makes the counter nonce safe";
+
+            if (_identityLine != null)
+            {
+                _identityLine.text =
+                    $"identity key {Short(Hex(_identityPublic))}   signature {Short(Hex(_identitySignature))}   " +
+                    $"({_identitySignature.Length} B over {_transcript.Length} B of transcript + the key itself)";
+
+                _identityVerdict.text = _identity.ToString() +
+                    (_identityNote.Length == 0 ? "" : "  —  " + _identityNote);
+            }
 
             _plainLine.text = _lastPlain.Length == 0 ? "(nothing sent yet)" : _lastPlain;
             _cipherLine.text = _lastFrame.Length == 0 ? "(nothing sent yet)" : Wrap(Hex(_lastFrame));

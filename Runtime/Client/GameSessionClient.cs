@@ -178,7 +178,7 @@ namespace Cuvara.Netcode.Client
 
                 if (_settings.RequireSealedSession)
                 {
-                    await RunSealedHandshakeAsync(connection, assignment.JoinToken, cancellationToken);
+                    await RunSealedHandshakeAsync(connection, assignment, cancellationToken);
                 }
             }
 
@@ -211,10 +211,10 @@ namespace Cuvara.Netcode.Client
         /// </para>
         /// </remarks>
         private async UniTask RunSealedHandshakeAsync(
-            WireConnection connection, string joinToken, CancellationToken cancellationToken)
+            WireConnection connection, MapAssignment assignment, CancellationToken cancellationToken)
         {
             string jti;
-            if (!JoinTokenClaims.TryReadJti(joinToken, out jti))
+            if (!JoinTokenClaims.TryReadJti(assignment.JoinToken, out jti))
             {
                 // The jti is the handshake's salt. Without it the client would derive keys
                 // the server cannot match, and the failure would surface as an unexplained
@@ -230,7 +230,15 @@ namespace Cuvara.Netcode.Client
 
                 try
                 {
-                    result = await SealedHandshakeClient.RunAsync(connection, jti, null, timeout.Token);
+                    // The identity key and the flag saying what its hop was worth come from
+                    // the assignment together, because the gateway hop is where both are known
+                    // and neither means anything without the other.
+                    result = await SealedHandshakeClient.RunAsync(
+                        connection, jti, null,
+                        assignment.ServerIdentityKey,
+                        assignment.IdentityKeyHopAuthenticated,
+                        _settings.RequireServerIdentity,
+                        timeout.Token);
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
@@ -251,19 +259,42 @@ namespace Cuvara.Netcode.Client
                     $"sealed handshake failed ({result.Outcome}): {result.Error}");
             }
 
-            if (!result.BindingVerified)
+            // What the session is actually worth is now decided by the ADR-25 identity
+            // signature, not by the binding: no shipped client can verify the binding, and
+            // none ever will, because doing so would require the key that mints join tokens.
+            // The three branches below are the three states a real deployment can be in.
+            if (result.Identity.Verified)
             {
-                // Not a warning about a defect — it is the shipped state, and it is logged so
-                // that "the session is encrypted" is never read as "the server is
-                // authenticated".
                 _log.Info(
-                    "sealed session established; the server's binding was NOT verified, so this " +
-                    "session is confidential against a passive eavesdropper and offers no " +
-                    "man-in-the-middle protection (ADR-22, pending the pinned gateway identity key)");
+                    "sealed session established and the server's identity VERIFIED: its Ed25519 " +
+                    "signature checked out and its key arrived over an authenticated gateway hop " +
+                    "(ADR-25)");
+            }
+            else if (result.Identity.Checked)
+            {
+                // The interesting state, and the one a reader is most likely to misread as
+                // success. The signature is genuine under the key we were handed -- but the key
+                // was handed over plaintext, so an active attacker supplies both halves and this
+                // branch is exactly what their session looks like too.
+                _log.Warn(
+                    "sealed session established and the server's identity signature checked out, " +
+                    "but its key arrived over an UNAUTHENTICATED gateway hop, so the signature " +
+                    "proves nothing against an active attacker -- who would substitute the key and " +
+                    "the signature together. Turn on NetworkSettings.GatewayUseTls (ADR-23) to make " +
+                    "this verification mean something");
             }
             else
             {
-                _log.Info("sealed session established and the server's binding verified");
+                // Covers both a pre-ADR-25 backend and a key with no signature. Info, not a
+                // warning: with RequireServerIdentity off this is the expected state, and a
+                // warning on every join trains the reader to ignore the one that matters.
+                _log.Info(
+                    "sealed session established; the server's identity was NOT verified" +
+                    (string.IsNullOrEmpty(result.Identity.Error) ? "" : " (" + result.Identity.Error + ")") +
+                    ". This session is confidential against a passive eavesdropper and offers no " +
+                    "man-in-the-middle protection. The server's binding is separately unverifiable " +
+                    "by design (ADR-22) and is not what closes this gap -- ADR-25 identity plus " +
+                    "gateway TLS is");
             }
         }
 
