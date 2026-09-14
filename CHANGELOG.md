@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+- **`GameSessionClient.SendAbilityInput`.** The ability fields reached `InputMessage` and both
+  codecs in 0.40.0 and never reached the public API, so **a real client could not cast
+  anything** — found by writing the first live test that tried. A separate overload rather than
+  four more optional parameters: the common call sends no ability, and defaults would make the
+  ability path look like something that happens by accident.
+- **`Tests/Runtime/GameplayV2LiveTests.cs`** — a PlayMode test driving a REAL Unity client
+  against a REAL game server. The Go integration test proves the server emits the fields; this
+  proves this package's transport, codec, resolver and merger deliver them to a consumer. Either
+  alone is the half that was green while the other half was missing.
+
+  It connects straight to the game server with a join token supplied out of band
+  (`CUVARA_LIVE_GS_ADDR`, `CUVARA_LIVE_JOIN_TOKEN`), skipping the gateway and Nakama, which are
+  covered elsewhere. Two details are load-bearing and were each got wrong first:
+
+  - **A join token is single-use.** Two tests sharing one fail the second with "Token already
+    used", for a reason that has nothing to do with what it tests. The harness takes one token
+    per test from a comma-separated list.
+  - **The victim is a second real client, not one of the server's mobs.** The first version hunted
+    the nearest mob; mobs carry server-side AI and the chase ended 20 units short, which surfaced
+    as "no damage event" — the same symptom as the channel being broken. Players do not move
+    unless told to and spawn together, so the result cannot be a positioning accident.
+
+  Verified against a live server: `damage amount=5`, `bolt amount=25`, `action_seq 2 -> 4`.
+
 ## [0.40.0]
 
 ### Added
