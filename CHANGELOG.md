@@ -3,6 +3,44 @@
 ## [Unreleased]
 
 ### Added
+- **Sample: Action Latch Probe.** No server, no network. One synthetic attacker written at
+  the server's CRITICAL rate and sampled at its WORLD rate, encoded as real Protobuf
+  snapshots and merged by the real resolver and world state -- **twice**, once with the
+  server's one-shot latch and once without it.
+
+  The second column is the server as it behaved before `action_seq` and the latch shipped,
+  and it is the reason the scene exists: `GameEventProbe` already shows that two attacks in
+  a row need a retrigger edge, but it says nothing about the attacks that never reach a
+  client at all. Only one base tick in four is sampled at 60/15, and the next tick of
+  movement overwrites `Attacking` before anyone can see it. Measured over a 120 s run:
+
+  | WorldEvery | latched, attacks lost | no latch | `(WorldEvery-1)/WorldEvery` |
+  |---|---|---|---|
+  | 1 | 0 % | 0 % | 0 % |
+  | 2 | 0 % | 53 % | 50 % |
+  | 4 | 0 % | **72 %** | 75 % |
+  | 8 | 0 % | 86 % | 88 % |
+
+  `WorldEvery = 1` reading 0 % on BOTH arms is the control that says the scene is measuring
+  the sampling gap and not something else: a single-rate server samples every tick, so there
+  is no gap for a latch to close. Byte counts are identical between the two arms at every
+  rate -- the counter is a varint on a message that was being sent anyway.
+
+  The attack tick is jittered by a fixed-seed LCG. A fixed cadence against a fixed world
+  period is not a coin flip but a fixed phase, so without jitter the control arm would read
+  0 % or 100 % depending on two numbers rather than on the defect.
+
+  **What is real:** the counter rule (`ActionStateLogic.Advance`, the same function the
+  server calls), the wire bytes (built the way the server builds them, from the generated
+  `RpgMmo.Wire.V1` types -- the client codec deliberately cannot *encode* a snapshot, since
+  a client never sends one), and the decode/resolve/merge path. **What is mirrored:** the
+  latch, which lives in the server's `ActionTransitions` and cannot be referenced from a
+  client, because a client has no tick schedule to apply it to. That is the scene's honest
+  limit and the README says so: if the mirror drifts, the scene keeps looking healthy, and
+  the backend's `ActionSeqTests` is what pins the real one.
+
+  The model is plain C# with no Unity dependency and was run headless before the scene
+  existed; the numbers in the table above come from that run, not from the Editor.
 - **`GameSessionClient.SendAbilityInput`.** The ability fields reached `InputMessage` and both
   codecs in 0.40.0 and never reached the public API, so **a real client could not cast
   anything** — found by writing the first live test that tried. A separate overload rather than

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <!-- The stylesheet has to be linked here. A UXML full of class names with no Style
+         element compiles, renders, and shows every element unstyled — the scene "works"
+         while looking broken, which is harder to diagnose than a hard failure. -->
+    <engine:Style src="ActionLatchProbeView.uss" />
+
+    <engine:VisualElement name="action-latch-probe" class="cuvara-probe" picking-mode="Ignore">
+
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Action latch and retrigger counter" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="No server, no network. One synthetic attacker written at the CRITICAL rate and sampled at the WORLD rate, encoded as real Protobuf snapshots and merged by the real resolver — twice, once with the server's one-shot latch and once without it. The right-hand column is the server before this change." />
+
+            <engine:Label text="Server schedule" class="cuvara-probe__section" />
+            <engine:SliderInt name="critical-hz" label="SIM_CRITICAL_HZ" low-value="15" high-value="120"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:SliderInt name="world-hz" label="SIM_WORLD_HZ" low-value="5" high-value="60"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Label name="schedule-hint" class="cuvara-probe__hint" text="—" />
+
+            <engine:Label text="Input" class="cuvara-probe__section" />
+            <engine:SliderInt name="attack-every" label="Attack every N base ticks" low-value="4" high-value="120"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="30 is the 500 ms attack cooldown at 60 Hz. The attack tick is jittered by a fixed-seed LCG: a fixed cadence against a fixed world period is not a coin flip but a fixed phase, so without jitter the control arm would read 0% or 100% depending on arithmetic rather than on the defect." />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="run" text="Pause" class="cuvara-probe__button" />
+                <engine:Button name="step" text="Step one attack" class="cuvara-probe__button" />
+                <engine:Button name="reset" text="Reset" class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:Label text="Latched — what the server does now" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__readout">
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="attacks issued" class="cuvara-probe__key" />
+                    <engine:Label name="a-issued" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="swings rendered" class="cuvara-probe__key" />
+                    <engine:Label name="a-rendered" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="never seen" class="cuvara-probe__key" />
+                    <engine:Label name="a-lost" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="action / action_seq" class="cuvara-probe__key" />
+                    <engine:Label name="a-state" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+            </engine:VisualElement>
+
+            <engine:Label text="No latch — the control, i.e. the server before this change" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__readout">
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="attacks issued" class="cuvara-probe__key" />
+                    <engine:Label name="b-issued" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="swings rendered" class="cuvara-probe__key" />
+                    <engine:Label name="b-rendered" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="never seen" class="cuvara-probe__key" />
+                    <engine:Label name="b-lost" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="action / action_seq" class="cuvara-probe__key" />
+                    <engine:Label name="b-state" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" text="—" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="Both arms receive the same number of snapshots and the same bytes: the counter is a varint on a message that was being sent anyway. What differs is how many of the attacks were in one." />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>
