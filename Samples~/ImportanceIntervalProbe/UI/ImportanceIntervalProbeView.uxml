@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <engine:Style src="ImportanceIntervalProbeView.uss" />
+
+    <engine:VisualElement name="importance-interval-probe" class="cuvara-probe" picking-mode="Ignore">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Importance replication intervals" class="cuvara-probe__title" />
+            <engine:Label class="cuvara-probe__subtitle"
+                          text="No server, no network. A synthetic population encoded twice into real Protobuf snapshots — once the way the server sends today, once with distance- and type-tiered send intervals — so the saving can be seen against the shape of world that produces it. The saving is not a property of the feature; it is a property of the population." />
+
+            <engine:Label text="Population" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="shape-cluster" text="Cluster" class="cuvara-probe__button" />
+                <engine:Button name="shape-spread" text="Spread" class="cuvara-probe__button" />
+                <engine:Button name="shape-realistic" text="Realistic" class="cuvara-probe__button" />
+            </engine:VisualElement>
+            <engine:Label name="shape-hint" class="cuvara-probe__hint" text="—" />
+
+            <engine:SliderInt name="players" label="Players" low-value="10" high-value="300"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:SliderInt name="mobs" label="Mobs (Realistic only)" low-value="0" high-value="1200"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Slider name="mob-moving" label="Fraction of mobs moving" low-value="0" high-value="1"
+                           show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="An idle entity is ALREADY free: the delta encoder omits anything whose visible state did not change. Drag this to 1 and the tiering has to earn its saving against a population that gives it nothing for free — which is the honest worst case for the feature." />
+
+            <engine:Label text="Server configuration" class="cuvara-probe__section" />
+            <engine:SliderInt name="aoi" label="AOI radius (GAMESERVER_AOI_RADIUS)" low-value="10" high-value="120"
+                              show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="The competing lever. Population inside a circle grows with the SQUARE of the radius, so 50 → 35 is already a 51% cut — with no scheduler, no new state, and no staleness. Move this before concluding the tiering is what you need." />
+
+            <engine:Label text="Tier thresholds (fraction of AOI radius)" class="cuvara-probe__section" />
+            <engine:Slider name="near" label="every tick within" low-value="0.05" high-value="1"
+                           show-input-field="true" class="cuvara-probe__slider" />
+            <engine:Slider name="mid" label="every 2nd tick within" low-value="0.05" high-value="1"
+                           show-input-field="true" class="cuvara-probe__slider" />
+
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="run" text="Pause" class="cuvara-probe__button" />
+                <engine:Button name="reset" text="Reset" class="cuvara-probe__button" />
+            </engine:VisualElement>
+
+            <engine:Label text="Measured, on real Protobuf bytes" class="cuvara-probe__section" />
+            <engine:VisualElement class="cuvara-probe__readout">
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="today" class="cuvara-probe__key" />
+                    <engine:Label name="bytes-a" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="tiered" class="cuvara-probe__key" />
+                    <engine:Label name="bytes-b" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="saving" class="cuvara-probe__key" />
+                    <engine:Label name="saving" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="staleness max / p99" class="cuvara-probe__key" />
+                    <engine:Label name="staleness" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="tier mix 1 / 2 / 4" class="cuvara-probe__key" />
+                    <engine:Label name="tiers" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+                <engine:VisualElement class="cuvara-probe__stat">
+                    <engine:Label text="world ticks" class="cuvara-probe__key" />
+                    <engine:Label name="ticks" text="—" class="cuvara-probe__value" />
+                </engine:VisualElement>
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" text="—" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="Staleness is in WORLD ticks — at 15Hz one tick is 66.7ms. It is the cost side of the saving and is shown next to it on purpose: halving the bytes by letting an entity go a second stale has not bought anything. This scene MIRRORS the server's encoder; GameServer.Tests/Bench/ImportanceIntervalBench.cs runs the real one and is the number of record." />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

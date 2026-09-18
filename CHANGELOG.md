@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Sample: Importance Interval Probe.** A synthetic population encoded twice into real
+  Protobuf snapshots -- once as the game server sends today, once with distance- and
+  type-tiered send intervals -- so the saving can be seen against the shape of world that
+  produces it.
+
+  **That is the whole point, and it is not a detail: the saving is a property of the
+  POPULATION, not of the feature.** Press *Cluster* -- 200 players standing on each other,
+  which is the shape the published 200-player ceiling was measured on -- and the answer is
+  `0.0%`. Every entity is a near player, every entity is tier 1, and no weighting demotes
+  any of them. Press *Realistic* and it is 44-46%, at a worst case of 200 ms staleness.
+  Both are true, and which one gets quoted decides whether the feature is worth building.
+
+  | shape | pop | today | tiered | saving | stale max | tier mix 1/2/4 |
+  |---|---|---|---|---|---|---|
+  | Cluster | 200 | 31.3 | 31.3 | **0.0 %** | 0-1 | 100/0/0 |
+  | Spread | 200 | 31.2 | 21.7 | **30.6 %** | 1 | 36/64/0 |
+  | Realistic | 360 | 14.5 | 8.1 | **44.1 %** | 3 | 14/30/56 |
+  | Realistic | 720 | 15.0 | 8.0 | **46.5 %** | 3 | 12/31/56 |
+
+  Bytes are real: built from the generated `RpgMmo.Wire.V1` types and measured with
+  `CalculateSize()`, the same call the server's own downlink budget uses, including handle
+  interning and the handle reset at every keyframe. The encoder's **selection** logic is
+  mirrored, because it lives in `SnapshotDeltaState` and cannot be referenced from a
+  client; `GameServer.Tests/Bench/ImportanceIntervalBench.cs` runs the real one and is the
+  number of record. This scene reproduces its four reference rows to within **2 % on bytes
+  and 0.4 points on savings**, with matching tier histograms -- which is the only reason to
+  trust it, and the README says so along with the one row where they disagree.
+
+  Two sliders exist to attack the headline figure rather than to decorate it. Dragging
+  *fraction of mobs moving* to 1 removes the free win: an idle entity is **already** free,
+  because the delta encoder omits anything unchanged, so much of the Realistic saving is
+  the tiering taking credit next to delta suppression. Dragging *AOI radius* moves the
+  competing lever, which already ships as `GAMESERVER_AOI_RADIUS` and is a square law --
+  50 to 35 is a 51 % cut with no scheduler, no per-connection state and no staleness at all.
+
+  Staleness is reported next to the saving, in world ticks, on purpose: halving the bytes
+  by letting an entity go a second stale has not bought anything.
+
+  The model is plain C# with no Unity dependency and was run headless against the bench
+  before the scene existed; the table above is from that run, not from the Editor.
+
 ---
 
 ## [0.39.1] — 2026-09-14
