@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.39.1",
+  "version": "0.40.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -104,6 +104,11 @@
       "displayName": "Gateway TLS Probe",
       "description": "The client half of ADR-23, run for real against listeners the scene starts itself. One case connects over TLS with a pinned certificate and round-trips a frame; the other four are REFUSALS, because a TLS switch that quietly yields a plaintext link -- or a validation callback that returns true -- reads exactly like a working one everywhere else: an unpinned connection to a self-signed certificate must be refused by the platform trust store, a TLS client against a plaintext gateway must not downgrade, a plaintext client against a TLS gateway must not get a usable frame, and the transport factory asked for TcpTls with no TlsOptions must throw rather than hand back cleartext. It does NOT prove your gateway is configured for TLS, and says nothing about Android.",
       "path": "Samples~/GatewayTlsProbe"
+    },
+    {
+      "displayName": "Importance Interval Probe",
+      "description": "No server, no network. A synthetic population encoded twice into real Protobuf snapshots -- once as the game server sends today, once with distance- and type-tiered send intervals -- so the saving can be seen against the shape of world that produces it. That is the point: the saving is a property of the POPULATION, not of the feature. Press Cluster, the shape the published 200-player ceiling was measured on, and the answer is 0.0% -- every entity is a near player, every entity is tier 1, and no weighting demotes any of them. Press Realistic and it is 44-46%, at a worst case of 200ms staleness. Both are true, and which one gets quoted decides whether the feature is worth building. Bytes are real (CalculateSize on the generated wire types, including handle interning and keyframe resets); the encoder's selection logic is MIRRORED, and GameServer.Tests/Bench/ImportanceIntervalBench.cs runs the real one and is the number of record -- this scene reproduces its four reference rows to within 2% on bytes and 0.4 points on savings. Two sliders are there to attack the headline figure: drag mob-moving to 1 (an idle entity is already free, so much of the saving is the tiering taking credit for delta suppression) and drag the AOI radius (the competing lever, already shipped, and a square law).",
+      "path": "Samples~/ImportanceIntervalProbe"
     }
   ],
   "testables": [
