@@ -159,6 +159,106 @@ namespace Cuvara.Netcode.Tests.Editor
                 "stopped, which is the freeze-then-jump a manufactured sample produces");
         }
 
+        /// <summary>
+        /// The sustained case, which is the one the server's 133ms band actually produces:
+        /// every second snapshot withholds the entity, for as long as it stays in that band.
+        /// </summary>
+        /// <remarks>
+        /// A single gap is covered by extrapolation and disappears. A repeating gap is a
+        /// different question, and the arithmetic says so: snapshots are 66.7ms apart, the
+        /// entity is carried on every second one, so the real gap is 133ms — against
+        /// <see cref="InterpolationConfig.MaxExtrapolation"/> of 50ms. If the render clock
+        /// sits far enough behind, the buffered pair still brackets it and nothing is
+        /// extrapolated at all; if it does not, the entity extrapolates for 50ms and then
+        /// holds. Which of those happens is not something to reason about — it is
+        /// <c>TargetDelay</c> against the gap, measured here.
+        ///
+        /// The assertion is on the WORST rendered interval, not the total: a run can travel
+        /// exactly as far as the control while doing it in visible lurches, and the total
+        /// is blind to precisely the thing a player sees.
+        /// </remarks>
+        [Test]
+        public void EverySecondSnapshotWithheld_StillRendersAtAnEvenSpeed()
+        {
+            var control = new Stream();
+            for (var k = 0; k < 12; k++)
+            {
+                var at = k * NominalIntervalMs;
+                control.FramesUntil(at);
+                control.Arrive(at, (k + 1) * 4, k);
+            }
+
+            control.FramesUntil(12 * NominalIntervalMs);
+
+            var alternating = new Stream();
+            for (var k = 0; k < 12; k++)
+            {
+                var at = k * NominalIntervalMs;
+                alternating.FramesUntil(at);
+                if (k % 2 == 0)
+                {
+                    alternating.Arrive(at, (k + 1) * 4, k);
+                }
+                else
+                {
+                    // On time, carrying nothing — the entity is in a slower band.
+                    alternating.ArriveWithheld(at, (k + 1) * 4);
+                }
+            }
+
+            alternating.FramesUntil(12 * NominalIntervalMs);
+
+            var controlWorst = WorstFrameStep(control.Rendered);
+            var controlTypical = TypicalFrameStep(control.Rendered);
+            var altWorst = WorstFrameStep(alternating.Rendered);
+            var altTypical = TypicalFrameStep(alternating.Rendered);
+
+            TestContext.WriteLine(
+                $"control: typical step {controlTypical:F5}, worst {controlWorst:F5}");
+            TestContext.WriteLine(
+                $"alternating: typical step {altTypical:F5}, worst {altWorst:F5}");
+
+            Assert.That(controlTypical, Is.GreaterThan(0.0),
+                "the control arm rendered no motion, so nothing below measures anything");
+
+            // The assertion is on the WORST step, and that direction is load-bearing. The
+            // first version of this test asserted the typical step was not too SMALL, and
+            // PASSED against the unfixed binder: manufactured samples do not mostly stall,
+            // they render half the frames at roughly double speed, so the median goes UP
+            // (0.10326 against the control's 0.07268) and a floor never fires. What a
+            // player sees is the lurch, and the lurch is the maximum.
+            Assert.That(altWorst, Is.LessThan(controlWorst * 1.25),
+                $"the alternating arm's worst frame step is {altWorst:F5} against the " +
+                $"control's {controlWorst:F5} — the entity is being rendered in lurches, " +
+                "which is what a manufactured sample produces once the gap repeats");
+        }
+
+        /// <summary>The largest single-frame displacement: the 'jump' of stall-then-jump.</summary>
+        private static double WorstFrameStep(IReadOnlyList<double> rendered)
+        {
+            var worst = 0.0;
+            for (var i = rendered.Count / 2; i < rendered.Count; i++)
+            {
+                var d = rendered[i] - rendered[i - 1];
+                if (d > worst) worst = d;
+            }
+
+            return worst;
+        }
+
+        /// <summary>The median single-frame displacement over the second half of the run.</summary>
+        private static double TypicalFrameStep(IReadOnlyList<double> rendered)
+        {
+            var steps = new List<double>();
+            for (var i = rendered.Count / 2; i < rendered.Count; i++)
+            {
+                steps.Add(rendered[i] - rendered[i - 1]);
+            }
+
+            steps.Sort();
+            return steps[steps.Count / 2];
+        }
+
         /// <summary>How far the entity travelled over the frames of the final interval.</summary>
         private static double Span(IReadOnlyList<double> rendered)
         {

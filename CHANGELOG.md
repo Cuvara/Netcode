@@ -30,6 +30,19 @@
     withheld snapshot becomes invisible rather than a stutter.
   - The control arm is not decoration: "the entity kept moving" is also true of a stream
     with no gap in it, so the uninterrupted run is what gives the withheld number a scale.
+  - **The sustained case, which is the one the 133ms band actually produces**, is covered
+    too: every second snapshot withholding the entity, for twelve intervals. After the fix
+    it renders **identically** to an uninterrupted stream — typical frame step 0.07268,
+    worst 0.07520, matching to five decimals. Real samples 133ms apart against a 100ms
+    render delay still bracket the render instant, so nothing is extrapolated at all and
+    the `MaxExtrapolation` budget is never reached. Measured rather than reasoned about,
+    because reasoning about it predicted the opposite.
+  - **The first version of that test passed against the unfixed binder.** It asserted the
+    typical frame step was not too SMALL, on the assumption that a manufactured sample
+    stalls the entity. It does not: it renders half the frames at roughly double speed, so
+    the median goes UP (0.10326 against 0.07268) and a floor never fires. The assertion is
+    now on the WORST step — 0.15039 unfixed against 0.07520 — which is the lurch a player
+    actually sees. Both tests were re-run against a reverted binder and both fail.
 
 ### Changed
 
