@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+---
+
+## [0.40.0] — 2026-09-18
+
 ### Added
 
 - **Sample: Importance Interval Probe.** A synthetic population encoded twice into real
