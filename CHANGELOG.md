@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Resynced `Runtime/Protocol/Generated/Wire.cs` with the backend.** `rpg-mmo-server`
+  #365 added `EntitySnapshot.action_seq` (field 12) to `wire.proto`, so the committed
+  generated file this package carries no longer matched the backend's — which reddens the
+  `Generated Wire.cs matches the backend` gate on **every** netcode PR until it is fixed,
+  regardless of what that PR touches.
+
+  Its own change, on purpose. A resync folded into a feature PR is a diff nobody reviews,
+  in the one file where a silent difference means two peers parse the same bytes and
+  disagree about what a field *means* — a stale copy does not fail loudly, it decodes
+  cleanly and reads the missing field as its type default.
+
+  Copied byte for byte from `develop` rather than regenerated locally: the gate is a `cmp`
+  against the backend's committed file, and regenerating here would need protoc and the C#
+  plugin pinned to the exact versions the backend used, producing diffs that are not drift.
+
+  This makes the type available; it does not make the package *use* it. Reading
+  `action_seq` through the codec, resolver, merger and view is on `feat/gameplay-v2`.
+
 ---
 
 ## [0.39.1] — 2026-09-14
