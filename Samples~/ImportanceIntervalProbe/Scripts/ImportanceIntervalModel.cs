@@ -46,9 +46,22 @@ namespace Cuvara.Netcode.Samples.ImportanceIntervalProbe
         public float MobMovingFraction = 0.34f;
         public float SpreadUnits = 260f;
         public float AoiRadius = 50f;
-        /// <summary>Tier boundaries as a fraction of the AOI radius.</summary>
-        public float NearFraction = 0.25f;
-        public float MidFraction = 0.55f;
+        /// <summary>
+        /// Retained so the scene's two threshold sliders keep binding; they now move the
+        /// SCORE bands rather than distance fractions, which is what the server actually
+        /// bands on.
+        /// </summary>
+        public float NearFraction
+        {
+            get => ScoreEveryTick;
+            set => ScoreEveryTick = value;
+        }
+
+        public float MidFraction
+        {
+            get => ScoreMidBand;
+            set => ScoreMidBand = value;
+        }
 
         // ── Results ──────────────────────────────────────────────────────────────
         public double BytesPerObservationToday { get; private set; }
@@ -175,14 +188,40 @@ namespace Cuvara.Netcode.Samples.ImportanceIntervalProbe
             if (ReferenceEquals(e, observer)) return 1;
             if (e.Action == EntityAction.Attacking || e.Action == EntityAction.Dead) return 1;
 
+            // The server's own shape: a weighted score, then bands. Mirrored rather than
+            // referenced, because ReplicationImportance lives in the game server.
+            //
+            // The numbers are GAMESERVER_IMPORTANCE=balanced and
+            // GAMESERVER_REPLICATION_SCHEDULE=tiered, and they matter: a merely-moving
+            // PLAYER scores distance + type = 5, UNDER the 8 that buys every-tick
+            // treatment, so players land in the middle band too. An earlier version of this
+            // scene gave near players interval 1 and therefore reported 0.0% on Cluster,
+            // while the real server measured -47.3% on the same population. See
+            // BENCHMARK.md Part XIV §42 -- a mirror that models a policy nobody runs
+            // answers a question nobody asked.
             float dx = e.X - observer.X, dy = e.Y - observer.Y;
             float d2 = (dx * dx) + (dy * dy);
-            float near = AoiRadius * NearFraction, mid = AoiRadius * MidFraction;
+            float r = AoiRadius > 0f ? AoiRadius : 1f;
 
-            if (d2 <= near * near) return 1;
-            if (d2 <= mid * mid) return e.IsPlayer ? 1 : 2;
-            return e.IsPlayer ? 2 : 4;
+            float score = (WeightDistance * (1f / (1f + (d2 / (r * r)))))
+                        + (e.IsPlayer ? WeightType : 0f);
+
+            if (score >= ScoreEveryTick) return 1;
+            if (score >= ScoreMidBand) return 2;
+            return 4;
         }
+
+        /// <summary>GAMESERVER_IMPORTANCE=balanced, distance weight.</summary>
+        public float WeightDistance = 2f;
+
+        /// <summary>GAMESERVER_IMPORTANCE=balanced, entity-type weight.</summary>
+        public float WeightType = 3f;
+
+        /// <summary>Top band of GAMESERVER_REPLICATION_SCHEDULE=tiered: every world tick.</summary>
+        public float ScoreEveryTick = 8f;
+
+        /// <summary>Middle band; below it an entity waits four world ticks.</summary>
+        public float ScoreMidBand = 3f;
 
         /// <summary>Advance one WORLD tick and accumulate both arms.</summary>
         public void Step()

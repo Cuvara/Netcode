@@ -27,6 +27,15 @@
 ## [0.40.0] — 2026-09-18
 
 ### Added
+- **The probe mirrored thresholds nobody runs, and therefore answered the wrong number.**
+  It gave a near player interval 1, so on `Cluster` — where every entity is a near player —
+  it demoted nothing and reported **0.0 %**, while the real server measured **−47.3 %** on
+  the same population (`BENCHMARK.md` Part XIV). The shipped policy scores a merely-moving
+  player at distance 2 + type 3 = **5**, under the 8 that buys every-tick treatment, so
+  players land in the middle band too. It now mirrors the shipped weights and bands
+  (`GAMESERVER_IMPORTANCE=balanced`, `GAMESERVER_REPLICATION_SCHEDULE=tiered`) and
+  reproduces the backend bench to within 0.4 points. The two threshold sliders now move the
+  **score** bands rather than distance fractions, because that is what the server bands on.
 
 - **Sample: Importance Interval Probe.** A synthetic population encoded twice into real
   Protobuf snapshots -- once as the game server sends today, once with distance- and

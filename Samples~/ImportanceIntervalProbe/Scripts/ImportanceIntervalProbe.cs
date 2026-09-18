@@ -20,8 +20,8 @@ namespace Cuvara.Netcode.Samples.ImportanceIntervalProbe
         [SerializeField] private float mobMovingFraction = 0.34f;
         [SerializeField] private float spreadUnits = 260f;
         [SerializeField] private float aoiRadius = 50f;
-        [SerializeField] private float nearFraction = 0.25f;
-        [SerializeField] private float midFraction = 0.55f;
+        [SerializeField] private float nearFraction = 8f;   // score >= 8 -> every tick
+        [SerializeField] private float midFraction = 3f;   // score >= 3 -> every 2nd tick
         [SerializeField] private int ticksToRun = 300;
 
         private readonly ImportanceIntervalModel _model = new ImportanceIntervalModel();
@@ -92,8 +92,10 @@ namespace Cuvara.Netcode.Samples.ImportanceIntervalProbe
             _model.AoiRadius = aoiRadius;
             // Kept ordered: a near boundary outside the mid one would silently make the
             // mid tier unreachable and the histogram would look like a policy nobody wrote.
-            _model.NearFraction = Mathf.Min(nearFraction, midFraction);
-            _model.MidFraction = Mathf.Max(nearFraction, midFraction);
+            // Top band must not sit below the middle one, or the middle band becomes
+            // unreachable and the histogram shows a policy nobody wrote.
+            _model.NearFraction = Mathf.Max(nearFraction, midFraction);
+            _model.MidFraction = Mathf.Min(nearFraction, midFraction);
             _model.Rebuild();
 
             _shapeHint.text = shape switch

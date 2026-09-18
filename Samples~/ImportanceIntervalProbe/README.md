@@ -7,16 +7,15 @@ that produces it.
 
 ## The one thing this scene is for
 
-**The saving is not a property of the feature. It is a property of the
-population.** Press *Cluster* and the answer is `0.0%`: 200 players standing on
-each other are all near players, all tier 1, and no weighting demotes any of them.
-That is the shape the published 200-player ceiling was measured on, so the
-headline bandwidth figure is the one number an interval policy cannot move.
+**The saving is a property of the population AND of the thresholds, and the second
+one is easy to get wrong.** Press *Cluster* — 200 players standing on each other,
+the shape the published 200-player ceiling was measured on — and the shipped
+policy still halves the wire, because a merely-moving player does not clear the
+every-tick threshold either. Press *Realistic* and it is 56–58%.
 
-Press *Realistic* and it is 44–46%.
-
-Both are true. Which one you quote decides whether the feature is worth building,
-and that is the decision this scene exists to inform.
+An earlier version of this scene answered `0.0%` to the first question, because it
+mirrored thresholds nobody runs. Two sliders are provided so the next reader can
+attack the number rather than inherit it.
 
 ## Measured, against the authority
 
@@ -26,10 +25,21 @@ reference rows:
 
 | shape | pop | B/ent/snap today | tiered | saving | stale max | tier mix 1/2/4 |
 |---|---|---|---|---|---|---|
-| Cluster | 200 | 31.3 | 31.3 | **0.0 %** | 0–1 | 100/0/0 |
-| Spread | 200 | 31.2 | 21.7 | **30.6 %** | 1 | 36/64/0 |
-| Realistic | 360 | 14.5 | 8.1 | **44.1 %** | 3 | 14/30/56 |
-| Realistic | 720 | 15.0 | 8.0 | **46.5 %** | 3 | 12/31/56 |
+| Cluster | 200 | 31.3 | 16.4 | **47.8 %** | 1 | 0/100/0 |
+| Spread | 200 | 31.2 | 17.1 | **45.4 %** | 1 | 5/95/0 |
+| Realistic | 360 | 14.5 | 6.4 | **55.9 %** | 3 | 3/16/82 |
+| Realistic | 720 | 15.0 | 6.3 | **58.2 %** | 3 | 1/17/82 |
+
+A live 200-player sweep on the real server measured **−47.3 %** on cluster and **−47.2 %**
+on spread (`BENCHMARK.md` Part XIV), so scene, bench and server agree to within two points.
+
+> **Cluster used to read 0.0 % here, and that was this scene's fault.** It mirrored a
+> hand-written policy that gave a near player interval 1. The shipped one scores a
+> merely-moving player at distance 2 + type 3 = **5**, under the 8 that buys every-tick
+> treatment, so players land in the middle band too. That is where most of the saving comes
+> from — and it means **player positions replicate at 7.5 Hz**. Drop the top threshold to 5
+> and watch the saving collapse; that slider is the honest way to see how much of the 47 %
+> is players rather than mobs.
 
 Bytes agree with the bench to within 2 %, savings to within 0.4 points, and the
 tier histograms match. The one visible disagreement is Cluster staleness — the

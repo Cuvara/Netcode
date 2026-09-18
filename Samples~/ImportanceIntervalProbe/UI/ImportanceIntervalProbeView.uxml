@@ -38,10 +38,12 @@
             <engine:Label class="cuvara-probe__hint"
                           text="The competing lever. Population inside a circle grows with the SQUARE of the radius, so 50 → 35 is already a 51% cut — with no scheduler, no new state, and no staleness. Move this before concluding the tiering is what you need." />
 
-            <engine:Label text="Tier thresholds (fraction of AOI radius)" class="cuvara-probe__section" />
-            <engine:Slider name="near" label="every tick within" low-value="0.05" high-value="1"
+            <engine:Label text="Tier thresholds (importance score)" class="cuvara-probe__section" />
+            <engine:Label class="cuvara-probe__hint"
+                          text="These are the shipped bands. GAMESERVER_IMPORTANCE=balanced scores a merely-moving PLAYER at distance 2 + type 3 = 5, which is UNDER the 8 that buys every-tick treatment — so players land in the middle band too. That is where most of the saving comes from, and it means player positions replicate at 7.5Hz. Drop the top threshold to 5 to put them back on every tick and watch the saving collapse." />
+            <engine:Slider name="near" label="every tick at score &gt;=" low-value="0" high-value="12"
                            show-input-field="true" class="cuvara-probe__slider" />
-            <engine:Slider name="mid" label="every 2nd tick within" low-value="0.05" high-value="1"
+            <engine:Slider name="mid" label="every 2nd tick at score &gt;=" low-value="0" high-value="12"
                            show-input-field="true" class="cuvara-probe__slider" />
 
             <engine:VisualElement class="cuvara-probe__row">

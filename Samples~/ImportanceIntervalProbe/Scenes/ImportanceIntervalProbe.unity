@@ -382,8 +382,8 @@ MonoBehaviour:
   mobMovingFraction: 0.34
   spreadUnits: 260
   aoiRadius: 50
-  nearFraction: 0.25
-  midFraction: 0.55
+  nearFraction: 8
+  midFraction: 3
   ticksToRun: 300
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
