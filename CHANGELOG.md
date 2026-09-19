@@ -65,7 +65,27 @@
 
   Verified against a live server: `damage amount=5`, `bolt amount=25`, `action_seq 2 -> 4`.
 
-## [0.40.0]
+### Changed
+
+- **Resynced `Runtime/Protocol/Generated/Wire.cs` with the backend.** `rpg-mmo-server`
+  #365 added `EntitySnapshot.action_seq` (field 12) to `wire.proto`, so the committed
+  generated file this package carries no longer matched the backend's — which reddens the
+  `Generated Wire.cs matches the backend` gate on **every** netcode PR until it is fixed,
+  regardless of what that PR touches.
+
+  Its own change, on purpose. A resync folded into a feature PR is a diff nobody reviews,
+  in the one file where a silent difference means two peers parse the same bytes and
+  disagree about what a field *means* — a stale copy does not fail loudly, it decodes
+  cleanly and reads the missing field as its type default.
+
+  Copied byte for byte from `develop` rather than regenerated locally: the gate is a `cmp`
+  against the backend's committed file, and regenerating here would need protoc and the C#
+  plugin pinned to the exact versions the backend used, producing diffs that are not drift.
+
+  This makes the type available; it does not make the package *use* it. Reading
+  `action_seq` through the codec, resolver, merger and view is on `feat/gameplay-v2`.
+
+## [0.41.0]
 
 ### Added
 - **Game events — `SnapshotMessage.events`, `GameEvent`, `GameEventType`,
@@ -109,6 +129,106 @@
 ### Requires
 - `com.rpgmmo.shared-gamelogic` **≥ sgl-v0.5.0**, for `EntitySnapshotData.ActionSeq` and the
   ability/event types. An older pin compiles against a struct that has no such field.
+
+---
+
+## [0.40.1] — 2026-09-18
+
+### Fixed
+
+- **A snapshot that does not mention an entity no longer renders it as having stopped.**
+  `WorldViewBinder` iterates every entity the client holds, not the entities the snapshot
+  carried — a delta names only what changed and the merged world keeps the rest at its last
+  value. It pushed an interpolation sample for all of them, so an entity the delta omitted
+  received a **manufactured** sample: new tick, old position. That is a positive assertion
+  that the entity was there at that tick, so the evaluator interpolated between two
+  identical points, rendered the entity frozen for the interval, and jumped when the real
+  update landed.
+
+  The ring push is now gated on the position having actually changed since the last sample.
+  A genuinely stationary entity has nothing to add either way; a withheld moving one keeps
+  its real samples, so the evaluator carries the motion across the gap.
+
+  - **Why it only started mattering.** While "absent from a delta" could only mean
+    "unchanged", a duplicate sample was true. `rpg-mmo-server`'s replication schedule
+    (ADR-27) made absence mean "unchanged **or** withheld", and nothing on this side was
+    told. Every test on both sides kept passing, because each side was self-consistent with
+    its own reading of the convention. Three people playing found it: mobs walked in
+    visible steps while players moved smoothly.
+  - **Measured.** `WithheldEntityDoesNotFreezeTests` runs two arms. A remote entity moving
+    one unit per 15Hz snapshot travels **0.8588** units over the final interval when the
+    stream is uninterrupted. Withhold one snapshot and the old binder rendered **0.2109** —
+    three quarters of the motion gone. With the gate it renders 0.8588, i.e. a single
+    withheld snapshot becomes invisible rather than a stutter.
+  - The control arm is not decoration: "the entity kept moving" is also true of a stream
+    with no gap in it, so the uninterrupted run is what gives the withheld number a scale.
+  - **The sustained case, which is the one the 133ms band actually produces**, is covered
+    too: every second snapshot withholding the entity, for twelve intervals. After the fix
+    it renders **identically** to an uninterrupted stream — typical frame step 0.07268,
+    worst 0.07520, matching to five decimals. Real samples 133ms apart against a 100ms
+    render delay still bracket the render instant, so nothing is extrapolated at all and
+    the `MaxExtrapolation` budget is never reached. Measured rather than reasoned about,
+    because reasoning about it predicted the opposite.
+  - **The first version of that test passed against the unfixed binder.** It asserted the
+    typical frame step was not too SMALL, on the assumption that a manufactured sample
+    stalls the entity. It does not: it renders half the frames at roughly double speed, so
+    the median goes UP (0.10326 against 0.07268) and a floor never fires. The assertion is
+    now on the WORST step — 0.15039 unfixed against 0.07520 — which is the lurch a player
+    actually sees. Both tests were re-run against a reverted binder and both fail.
+
+## [0.40.0] — 2026-09-18
+
+### Added
+- **The probe mirrored thresholds nobody runs, and therefore answered the wrong number.**
+  It gave a near player interval 1, so on `Cluster` — where every entity is a near player —
+  it demoted nothing and reported **0.0 %**, while the real server measured **−47.3 %** on
+  the same population (`BENCHMARK.md` Part XIV). The shipped policy scores a merely-moving
+  player at distance 2 + type 3 = **5**, under the 8 that buys every-tick treatment, so
+  players land in the middle band too. It now mirrors the shipped weights and bands
+  (`GAMESERVER_IMPORTANCE=balanced`, `GAMESERVER_REPLICATION_SCHEDULE=tiered`) and
+  reproduces the backend bench to within 0.4 points. The two threshold sliders now move the
+  **score** bands rather than distance fractions, because that is what the server bands on.
+
+- **Sample: Importance Interval Probe.** A synthetic population encoded twice into real
+  Protobuf snapshots -- once as the game server sends today, once with distance- and
+  type-tiered send intervals -- so the saving can be seen against the shape of world that
+  produces it.
+
+  **That is the whole point, and it is not a detail: the saving is a property of the
+  POPULATION, not of the feature.** Press *Cluster* -- 200 players standing on each other,
+  which is the shape the published 200-player ceiling was measured on -- and the answer is
+  `0.0%`. Every entity is a near player, every entity is tier 1, and no weighting demotes
+  any of them. Press *Realistic* and it is 44-46%, at a worst case of 200 ms staleness.
+  Both are true, and which one gets quoted decides whether the feature is worth building.
+
+  | shape | pop | today | tiered | saving | stale max | tier mix 1/2/4 |
+  |---|---|---|---|---|---|---|
+  | Cluster | 200 | 31.3 | 31.3 | **0.0 %** | 0-1 | 100/0/0 |
+  | Spread | 200 | 31.2 | 21.7 | **30.6 %** | 1 | 36/64/0 |
+  | Realistic | 360 | 14.5 | 8.1 | **44.1 %** | 3 | 14/30/56 |
+  | Realistic | 720 | 15.0 | 8.0 | **46.5 %** | 3 | 12/31/56 |
+
+  Bytes are real: built from the generated `RpgMmo.Wire.V1` types and measured with
+  `CalculateSize()`, the same call the server's own downlink budget uses, including handle
+  interning and the handle reset at every keyframe. The encoder's **selection** logic is
+  mirrored, because it lives in `SnapshotDeltaState` and cannot be referenced from a
+  client; `GameServer.Tests/Bench/ImportanceIntervalBench.cs` runs the real one and is the
+  number of record. This scene reproduces its four reference rows to within **2 % on bytes
+  and 0.4 points on savings**, with matching tier histograms -- which is the only reason to
+  trust it, and the README says so along with the one row where they disagree.
+
+  Two sliders exist to attack the headline figure rather than to decorate it. Dragging
+  *fraction of mobs moving* to 1 removes the free win: an idle entity is **already** free,
+  because the delta encoder omits anything unchanged, so much of the Realistic saving is
+  the tiering taking credit next to delta suppression. Dragging *AOI radius* moves the
+  competing lever, which already ships as `GAMESERVER_AOI_RADIUS` and is a square law --
+  50 to 35 is a 51 % cut with no scheduler, no per-connection state and no staleness at all.
+
+  Staleness is reported next to the saving, in world ticks, on purpose: halving the bytes
+  by letting an entity go a second stale has not bought anything.
+
+  The model is plain C# with no Unity dependency and was run headless against the bench
+  before the scene existed; the table above is from that run, not from the Editor.
 
 ---
 

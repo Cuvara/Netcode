@@ -1,0 +1,17 @@
+{
+    "name": "ImportanceIntervalProbe",
+    "rootNamespace": "Cuvara.Netcode.Samples.ImportanceIntervalProbe",
+    "references": [
+        "Cuvara.Netcode.Runtime",
+        "Shared.GameLogic"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
