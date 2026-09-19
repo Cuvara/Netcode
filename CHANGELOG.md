@@ -24,6 +24,50 @@
 
 ---
 
+## [0.40.1] — 2026-09-18
+
+### Fixed
+
+- **A snapshot that does not mention an entity no longer renders it as having stopped.**
+  `WorldViewBinder` iterates every entity the client holds, not the entities the snapshot
+  carried — a delta names only what changed and the merged world keeps the rest at its last
+  value. It pushed an interpolation sample for all of them, so an entity the delta omitted
+  received a **manufactured** sample: new tick, old position. That is a positive assertion
+  that the entity was there at that tick, so the evaluator interpolated between two
+  identical points, rendered the entity frozen for the interval, and jumped when the real
+  update landed.
+
+  The ring push is now gated on the position having actually changed since the last sample.
+  A genuinely stationary entity has nothing to add either way; a withheld moving one keeps
+  its real samples, so the evaluator carries the motion across the gap.
+
+  - **Why it only started mattering.** While "absent from a delta" could only mean
+    "unchanged", a duplicate sample was true. `rpg-mmo-server`'s replication schedule
+    (ADR-27) made absence mean "unchanged **or** withheld", and nothing on this side was
+    told. Every test on both sides kept passing, because each side was self-consistent with
+    its own reading of the convention. Three people playing found it: mobs walked in
+    visible steps while players moved smoothly.
+  - **Measured.** `WithheldEntityDoesNotFreezeTests` runs two arms. A remote entity moving
+    one unit per 15Hz snapshot travels **0.8588** units over the final interval when the
+    stream is uninterrupted. Withhold one snapshot and the old binder rendered **0.2109** —
+    three quarters of the motion gone. With the gate it renders 0.8588, i.e. a single
+    withheld snapshot becomes invisible rather than a stutter.
+  - The control arm is not decoration: "the entity kept moving" is also true of a stream
+    with no gap in it, so the uninterrupted run is what gives the withheld number a scale.
+  - **The sustained case, which is the one the 133ms band actually produces**, is covered
+    too: every second snapshot withholding the entity, for twelve intervals. After the fix
+    it renders **identically** to an uninterrupted stream — typical frame step 0.07268,
+    worst 0.07520, matching to five decimals. Real samples 133ms apart against a 100ms
+    render delay still bracket the render instant, so nothing is extrapolated at all and
+    the `MaxExtrapolation` budget is never reached. Measured rather than reasoned about,
+    because reasoning about it predicted the opposite.
+  - **The first version of that test passed against the unfixed binder.** It asserted the
+    typical frame step was not too SMALL, on the assumption that a manufactured sample
+    stalls the entity. It does not: it renders half the frames at roughly double speed, so
+    the median goes UP (0.10326 against 0.07268) and a floor never fires. The assertion is
+    now on the WORST step — 0.15039 unfixed against 0.07520 — which is the lurch a player
+    actually sees. Both tests were re-run against a reverted binder and both fail.
+
 ## [0.40.0] — 2026-09-18
 
 ### Added
