@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+### Added
+- **Sample: Action Latch Probe.** No server, no network. One synthetic attacker written at
+  the server's CRITICAL rate and sampled at its WORLD rate, encoded as real Protobuf
+  snapshots and merged by the real resolver and world state -- **twice**, once with the
+  server's one-shot latch and once without it.
+
+  The second column is the server as it behaved before `action_seq` and the latch shipped,
+  and it is the reason the scene exists: `GameEventProbe` already shows that two attacks in
+  a row need a retrigger edge, but it says nothing about the attacks that never reach a
+  client at all. Only one base tick in four is sampled at 60/15, and the next tick of
+  movement overwrites `Attacking` before anyone can see it. Measured over a 120 s run:
+
+  | WorldEvery | latched, attacks lost | no latch | `(WorldEvery-1)/WorldEvery` |
+  |---|---|---|---|
+  | 1 | 0 % | 0 % | 0 % |
+  | 2 | 0 % | 53 % | 50 % |
+  | 4 | 0 % | **72 %** | 75 % |
+  | 8 | 0 % | 86 % | 88 % |
+
+  `WorldEvery = 1` reading 0 % on BOTH arms is the control that says the scene is measuring
+  the sampling gap and not something else: a single-rate server samples every tick, so there
+  is no gap for a latch to close. Byte counts are identical between the two arms at every
+  rate -- the counter is a varint on a message that was being sent anyway.
+
+  The attack tick is jittered by a fixed-seed LCG. A fixed cadence against a fixed world
+  period is not a coin flip but a fixed phase, so without jitter the control arm would read
+  0 % or 100 % depending on two numbers rather than on the defect.
+
+  **What is real:** the counter rule (`ActionStateLogic.Advance`, the same function the
+  server calls), the wire bytes (built the way the server builds them, from the generated
+  `RpgMmo.Wire.V1` types -- the client codec deliberately cannot *encode* a snapshot, since
+  a client never sends one), and the decode/resolve/merge path. **What is mirrored:** the
+  latch, which lives in the server's `ActionTransitions` and cannot be referenced from a
+  client, because a client has no tick schedule to apply it to. That is the scene's honest
+  limit and the README says so: if the mirror drifts, the scene keeps looking healthy, and
+  the backend's `ActionSeqTests` is what pins the real one.
+
+  The model is plain C# with no Unity dependency and was run headless before the scene
+  existed; the numbers in the table above come from that run, not from the Editor.
+- **`GameSessionClient.SendAbilityInput`.** The ability fields reached `InputMessage` and both
+  codecs in 0.40.0 and never reached the public API, so **a real client could not cast
+  anything** — found by writing the first live test that tried. A separate overload rather than
+  four more optional parameters: the common call sends no ability, and defaults would make the
+  ability path look like something that happens by accident.
+- **`Tests/Runtime/GameplayV2LiveTests.cs`** — a PlayMode test driving a REAL Unity client
+  against a REAL game server. The Go integration test proves the server emits the fields; this
+  proves this package's transport, codec, resolver and merger deliver them to a consumer. Either
+  alone is the half that was green while the other half was missing.
+
+  It connects straight to the game server with a join token supplied out of band
+  (`CUVARA_LIVE_GS_ADDR`, `CUVARA_LIVE_JOIN_TOKEN`), skipping the gateway and Nakama, which are
+  covered elsewhere. Two details are load-bearing and were each got wrong first:
+
+  - **A join token is single-use.** Two tests sharing one fail the second with "Token already
+    used", for a reason that has nothing to do with what it tests. The harness takes one token
+    per test from a comma-separated list.
+  - **The victim is a second real client, not one of the server's mobs.** The first version hunted
+    the nearest mob; mobs carry server-side AI and the chase ended 20 units short, which surfaced
+    as "no damage event" — the same symptom as the channel being broken. Players do not move
+    unless told to and spawn together, so the result cannot be a positioning accident.
+
+  Verified against a live server: `damage amount=5`, `bolt amount=25`, `action_seq 2 -> 4`.
+
 ### Changed
 
 - **Resynced `Runtime/Protocol/Generated/Wire.cs` with the backend.** `rpg-mmo-server`
@@ -21,6 +84,51 @@
 
   This makes the type available; it does not make the package *use* it. Reading
   `action_seq` through the codec, resolver, merger and view is on `feat/gameplay-v2`.
+
+## [0.41.0]
+
+### Added
+- **Game events — `SnapshotMessage.events`, `GameEvent`, `GameEventType`,
+  `ResolvedGameEvent`.** The edge-triggered channel. Everything the server sent until now was
+  level-triggered state, which is the right shape for state and the wrong shape for an
+  occurrence: "took 12 damage" is not recoverable from two HP values a tick apart, because a
+  heal and a hit in the same tick net out, a delta may omit the entity entirely, and an
+  entity leaving the AOI simply stops reporting. Events arrive on the existing
+  `SnapshotReceived` callback as `ResolvedSnapshot.Events`; **no second channel was added**,
+  deliberately, because two ways to reach the same events is two ways to consume them twice.
+- **Ability input — `InputMessage.AbilityId` / `AbilityTargetId` / `AimX` / `AimY`.** Encoded
+  by both codecs. Not predicted: an ability outcome depends on cooldowns, content and other
+  entities' state, so a mispredicted cast plays and then un-happens. Do not drive a cooldown
+  bar off the input — drive it off the `AbilityCast` event.
+- **`EntitySnapshot.ActionSeq` / `ResolvedEntity.ActionSeq`** — the retrigger counter.
+  `Action` is level-triggered, so two attacks in a row are identical bytes and an animator
+  driven from it plays the swing once. Retrigger on **inequality**, never on increase: the
+  counter wraps at 2³² and resets on restart or respawn, so a greater-than test stops
+  retriggering for four billion actions after a single wrap.
+- **`SnapshotResolver.UnresolvedEventParticipants`** — counted, never escalated. An
+  unresolvable EVENT participant is reported as an empty id and the snapshot still resolves,
+  unlike an unresolvable ENTITY handle which aborts it. A wrong entity state is a wrong
+  world; a missing damage number is a missing damage number, and escalating it would spend a
+  keyframe's bandwidth for every observer precisely when the link is already struggling.
+- **`Samples~/GameEventProbe`** — offline scene. Two buttons carry the argument: turning
+  events off leaves HP falling with no damage numbers, and turning `action_seq` off leaves
+  the attacker attacking with the swing flash fired exactly once.
+
+### Changed
+- **`Runtime/Protocol/Generated/Wire.cs` regenerated** from the backend's `wire.proto` and
+  verified byte-identical to the backend's committed copy. **The CI sync gate will be red
+  until the backend change is on `develop`** — the gate fetches from that branch by design,
+  so a schema change landing there turning this red is the drift it exists to catch.
+- **`WorldState.Apply` carries `ActionSeq` into the merge.** Worth its own line because it
+  was missing when the field was first wired through: the codec decoded it, the resolver
+  carried it, every test passed, and the value was dropped converting `ResolvedEntity` to
+  `EntitySnapshotData` — so no view ever saw it. The symptom would have been an entity that
+  renders perfectly, carries the right action, and never animates a second swing.
+  `ActionSeqSurvivesTheMergeIntoWorldState` is the guard.
+
+### Requires
+- `com.rpgmmo.shared-gamelogic` **≥ sgl-v0.5.0**, for `EntitySnapshotData.ActionSeq` and the
+  ability/event types. An older pin compiles against a struct that has no such field.
 
 ---
 

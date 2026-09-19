@@ -135,6 +135,23 @@ namespace Cuvara.Netcode.Codec
                         b.String("attack_target_id", m.AttackTargetId);
                     }
 
+                    // Written only when set, mirroring how proto3 elides a zero and an empty
+                    // string. The two encodings must reach the same InputData on the server;
+                    // writing an explicit 0 would decode the same but put bytes on the wire
+                    // the encoding this mirrors does not.
+                    if (m.AbilityId != 0)
+                    {
+                        b.Number("ability_id", m.AbilityId);
+                    }
+
+                    if (!string.IsNullOrEmpty(m.AbilityTargetId))
+                    {
+                        b.String("ability_target_id", m.AbilityTargetId);
+                    }
+
+                    if (m.AimX != 0f) b.Number("aim_x", m.AimX);
+                    if (m.AimY != 0f) b.Number("aim_y", m.AimY);
+
                     b.EndObject();
                     return b.ToString();
 
@@ -266,7 +283,13 @@ namespace Cuvara.Netcode.Codec
                     // one place JSON does NOT write a zero the way it does for speed:
                     // zero is a reserved value for these, not a legitimate reading.
                     FacingBrad = item.GetUInt("facing_brad"),
-                    Action = (Shared.GameLogic.Components.EntityAction)item.GetInt("action")
+                    Action = (Shared.GameLogic.Components.EntityAction)item.GetInt("action"),
+
+                    // Read here for the reason the whole field exists: a JSON client drives
+                    // the same animator from the same level-triggered action field and hits
+                    // the same repeated-attack problem. Leaving it out of one encoding would
+                    // make retriggering work on Protobuf and silently not on JSON.
+                    ActionSeq = item.GetUInt("action_seq")
                 });
             }
 
@@ -277,6 +300,26 @@ namespace Cuvara.Netcode.Codec
                 {
                     snapshot.Removed.Add(id);
                 }
+            }
+
+            foreach (var item in payload.GetArray("events"))
+            {
+                snapshot.Events.Add(new GameEvent
+                {
+                    Type = (GameEventType)item.GetInt("type"),
+                    // A JSON connection never interns, so the server fills the ids and
+                    // leaves the handles at zero. Both are read regardless: a server that
+                    // started interning on this encoding would then be handled by the same
+                    // resolution path rather than silently dropping to id-only, exactly as
+                    // the entity `handle` member already is above.
+                    Source = item.GetUInt("source"),
+                    Target = item.GetUInt("target"),
+                    SourceId = item.GetString("source_id"),
+                    TargetId = item.GetString("target_id"),
+                    Amount = item.GetInt("amount"),
+                    AbilityId = item.GetUInt("ability_id"),
+                    Flags = (GameEventFlags)item.GetUInt("flags"),
+                });
             }
 
             return snapshot;

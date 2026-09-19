@@ -33,5 +33,16 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// on a keyframe. Always plain ids, never handles.
         /// </summary>
         public List<string> Removed { get; } = new List<string>();
+
+        /// <summary>
+        /// Edge-triggered occurrences produced by this tick, in the order the simulation
+        /// produced them. Empty on most snapshots.
+        /// </summary>
+        /// <remarks>
+        /// Present on deltas AND keyframes alike, and never re-sent — see
+        /// <see cref="GameEvent"/> for why a keyframe does not replay history, and for why
+        /// these ride the snapshot rather than arriving as a message of their own.
+        /// </remarks>
+        public List<GameEvent> Events { get; } = new List<GameEvent>();
     }
 }

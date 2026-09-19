@@ -137,6 +137,14 @@ namespace Cuvara.Netcode.Codec
                         MoveX = m.MoveX,
                         MoveY = m.MoveY,
                         AttackTargetId = m.AttackTargetId ?? string.Empty,
+                        AbilityId = m.AbilityId,
+                        AbilityTargetId = m.AbilityTargetId ?? string.Empty,
+                        // Written unconditionally rather than only when AbilityId is set.
+                        // The aim is meaningless without an ability and the server says so;
+                        // gating it here would be a second place that has to agree about
+                        // which field gates which, and proto3 elides a zero float anyway.
+                        AimX = m.AimX,
+                        AimY = m.AimY,
                     }.ToByteArray();
 
                 case Msg.DisconnectMessage m:
@@ -292,6 +300,11 @@ namespace Cuvara.Netcode.Codec
                     // sent at all.
                     FacingBrad = e.FacingBrad,
                     Action = (Shared.GameLogic.Components.EntityAction)e.Action,
+                    // Carried raw for the same reason: the "changes means retrigger, zero
+                    // means not sent" contract belongs to the consumer that drives an
+                    // animator, not to this layer. Normalising it here would erase the
+                    // difference between "no counter" and "counter at its initial value".
+                    ActionSeq = e.ActionSeq,
                 });
             }
 
@@ -299,6 +312,28 @@ namespace Cuvara.Netcode.Codec
             {
                 // Entity IDs, never handles — do not route these through the handle table.
                 snapshot.Removed.Add(id);
+            }
+
+            foreach (var ev in m.Events)
+            {
+                snapshot.Events.Add(new Msg.GameEvent
+                {
+                    // An unrecognised type is carried through rather than dropped here: this
+                    // layer decodes, it does not decide. The consumer ignores what it does
+                    // not know, which keeps "the server sent something new" visible in a
+                    // debug overlay instead of vanishing inside the codec.
+                    Type = (Msg.GameEventType)ev.Type,
+                    Source = ev.Source,
+                    Target = ev.Target,
+                    // Empty on Protobuf by construction — the server fills these only for a
+                    // connection that is not interning. Copied anyway so one decoded shape
+                    // serves both encodings and consumers need no per-encoding branch.
+                    SourceId = ev.SourceId,
+                    TargetId = ev.TargetId,
+                    Amount = ev.Amount,
+                    AbilityId = ev.AbilityId,
+                    Flags = (Msg.GameEventFlags)ev.Flags,
+                });
             }
 
             return snapshot;

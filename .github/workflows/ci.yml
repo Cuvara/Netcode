@@ -137,7 +137,7 @@ jobs:
               "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
-              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1",
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.5.0",
               "com.cuvara.dots": "https://github.com/Cuvara/UnityDots.git#v0.29.0",
               "com.cysharp.messagepipe": "1.8.1",
               "com.cysharp.messagepipe.vcontainer": "1.8.1",
@@ -235,7 +235,7 @@ jobs:
               "com.cuvara.netcode": "file:../package",
               "com.cysharp.unitask": "2.5.10",
               "jp.hadashikick.vcontainer": "1.16.8",
-              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1"
+              "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.5.0"
             },
             "scopedRegistries": [
               {
@@ -416,7 +416,7 @@ jobs:
 
           SGL=""
           if [ "${{ matrix.probe.sharedGameLogic }}" = "true" ]; then
-            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1",'
+            SGL='"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.5.0",'
           fi
 
           cat > Packages/manifest.json << JSON

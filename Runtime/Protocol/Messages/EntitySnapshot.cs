@@ -76,5 +76,33 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// animator rather than a missing field.
         /// </remarks>
         public Shared.GameLogic.Components.EntityAction Action { get; set; }
+
+        /// <summary>
+        /// Retrigger counter for <see cref="Action"/>. Changes every time the entity ENTERS
+        /// an action, including re-entering the one it is already in.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a renderer needs it.</b> <see cref="Action"/> is level-triggered: it says
+        /// what state an entity is in, not that a state was entered. Two attacks in a row
+        /// are identical bytes, so an animator driven from <see cref="Action"/> alone plays
+        /// the swing once and then holds. No client-side edge detection recovers that,
+        /// because the edge is genuinely not in the data — only the server knows.
+        /// </para>
+        /// <para>
+        /// <b>Retrigger on INEQUALITY, never on increase.</b> The counter wraps at 2^32 and
+        /// resets when the server restarts or the entity respawns, so a
+        /// <c>greater-than</c> test stops retriggering for four billion actions after a
+        /// single wrap — with nothing reporting an error. The server skips zero on wrap, so
+        /// a live counter is never 0.
+        /// </para>
+        /// <para>
+        /// <b>Zero means "not sent".</b> A server predating this field sends nothing here;
+        /// keep the pre-existing behaviour (drive from <see cref="Action"/> alone, accept
+        /// that repeats do not retrigger) rather than treating 0 as an edge, which would
+        /// retrigger every animation on every snapshot.
+        /// </para>
+        /// </remarks>
+        public uint ActionSeq { get; set; }
     }
 }
