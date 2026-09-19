@@ -24,6 +24,38 @@
 
 ---
 
+## [0.40.2] — 2026-09-19
+
+### Added
+
+- **`RenderMotionProbe` — measures how evenly replicated entities are actually DRAWN**,
+  separately for the local player, remote players and enemies. Off unless the player is
+  launched with `-cuvara-motion-probe`.
+
+  The existing `[DOTSNet/health]` line reports `lastCorrection`, `snaps` and `reconciles`,
+  and all three come from `LocalMovePredictor` — they describe the avatar this client
+  predicts and say nothing about a mob. "Is the enemy smooth?" was being answered with a
+  number about the player, which is a different object that happens to be nearby.
+
+  What it reports, per 5s window: median, p99 and worst per-frame displacement, the
+  worst/median ratio, the share of frames that rendered no movement at all, and fps.
+  Stutter is not a low average — an entity rendered in lurches travels exactly as far as
+  one rendered smoothly — so the spread is the verdict, not the total.
+
+  - **It separates parked entities from stuttering ones, and that took a second attempt.**
+    The DOTS sample's server stops an enemy once it reaches the centre, and a stopped
+    entity renders zero movement every frame — correct, and indistinguishable from the
+    stutter the probe exists to find. The first version pooled both and reported 21.9%
+    "frozen" frames for enemies without being able to say how much was mobs standing
+    still. Entities are now classified per window: anything travelling less than
+    `ParkedTravel` is counted as `parked` and excluded.
+  - **First findings** against `rpg-mmo-server@0cc3b16`, three clients, ~360k frames per
+    arm: local and remote players render **0.0%** frozen frames with the replication
+    schedule both off and on. Enemies render **3.9%** with it off and **5.9%** with it on
+    (p90 6.3% → 11.1%, worst/median 4.64 → 7.74). Two separate facts: tiering makes
+    enemies measurably worse, and enemies are choppier than remote players even with
+    tiering off — the second has no diagnosis yet.
+
 ## [0.40.1] — 2026-09-18
 
 ### Fixed
