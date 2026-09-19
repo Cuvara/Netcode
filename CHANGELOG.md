@@ -24,6 +24,35 @@
 
 ---
 
+## [0.40.3] — 2026-09-19
+
+### Changed
+
+- **`RenderMotionProbe` now splits each class's frozen frames by entity lifetime** —
+  `fresh` (within 0.25s of an entity first being seen) versus `steady` (after). A newly
+  spawned entity has one interpolation sample, and one sample cannot be interpolated: the
+  view holds it still until the second snapshot arrives and the buffer fills. Those held
+  frames are real chop, but they are the chop of *arriving*, not of steady replication.
+
+  This is the measurement `rpg-mmo-server`
+  [#371](https://github.com/Cuvara/rpg-mmo-server/issues/371) asks for. The probe reports
+  enemies at 3.9% frozen frames against remote players' 0.0% with the replication schedule
+  `off`, where both are replicated identically every tick. The suspected cause is churn:
+  an enemy walks from the spawn ring to the centre and is reaped in ≈4.2s, so it pays the
+  spawn warm-up every few seconds, while a persistent remote player pays it once and
+  amortises it away. Pooling the two lifetimes made a churning class read as a stuttering
+  one. If the split confirms it, enemy chop concentrates in `fresh` and `steady` sits near
+  the remote player's ~0%.
+
+- **The probe now prunes despawned entities from its `_last` / `_seenAt` maps each frame.**
+  Both grew unbounded under enemy churn before, and an unpruned `_last` would also let a
+  reused entity slot inherit a stale age. The prune reuses a `HashSet` and a scratch list,
+  so it adds no per-frame allocation.
+
+  Sample-only; no runtime change. Package bumped to **0.40.3**.
+
+---
+
 ## [0.40.2] — 2026-09-19
 
 ### Added
