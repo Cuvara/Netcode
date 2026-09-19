@@ -39,6 +39,23 @@ namespace DOTSSample
         /// <summary>Below this, a step is float noise rather than motion.</summary>
         private const float NoiseUnits = 1e-5f;
 
+        /// <summary>
+        /// Frames rendered within this many seconds of an entity FIRST being seen are
+        /// counted as "fresh" and reported apart from steady-state ones.
+        /// </summary>
+        /// <remarks>
+        /// A freshly spawned entity starts with a single interpolation sample, and one
+        /// sample cannot be interpolated — the view holds the entity still until the second
+        /// snapshot arrives, one send interval later, and the buffer fills to its 2–3 sample
+        /// depth. Those held frames are real chop, but they are the chop of ARRIVING, not of
+        /// steady replication. An entity that churns — spawn, cross the map, get reaped,
+        /// respawn — pays that hold every few seconds; a persistent one pays it once and
+        /// amortises it to nothing over a long run. Pooling the two makes a high-churn class
+        /// (enemies) look like it stutters in steady state when it does not. 0.25s covers the
+        /// buffer warm-up at the sample's 15Hz send rate (≈3 intervals) with slack.
+        /// </remarks>
+        private const float WarmupSeconds = 0.25f;
+
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Install()
         {
@@ -61,22 +78,37 @@ namespace DOTSSample
         private sealed class Bucket
         {
             public readonly List<float> Steps = new List<float>();
-            public int Frozen;    // frames where a MOVING entity rendered no movement
-            public int Parked;    // entities that did not move at all this window
-            public int Moving;    // entities that did
+            public int Frozen;         // frames where a MOVING entity rendered no movement
+            public int FrozenFresh;    // ...of those, within WarmupSeconds of the entity's first sighting
+            public int FrozenSteady;   // ...of those, after it
+            public int NFresh;         // moving frames classified fresh
+            public int NSteady;        // moving frames classified steady-state
+            public int Parked;         // entities that did not move at all this window
+            public int Moving;         // entities that did
         }
 
         /// <summary>One entity's frames within the current report window.</summary>
         private sealed class Track
         {
             public readonly List<float> Steps = new List<float>();
+            // Parallel to Steps: was this frame within WarmupSeconds of the entity's first
+            // sighting. A List<bool> rather than an age list because that is all Report needs.
+            public readonly List<bool> Fresh = new List<bool>();
             public string Class;
             public float Travel;
         }
 
         private readonly Dictionary<Entity, float3> _last = new Dictionary<Entity, float3>();
+        // First time each live entity was seen, in realtimeSinceStartup. Persists across
+        // report windows (an entity's lifetime spans them) and is pruned when the entity
+        // despawns, so a reused entity slot is correctly treated as freshly born.
+        private readonly Dictionary<Entity, float> _seenAt = new Dictionary<Entity, float>();
         private readonly Dictionary<Entity, Track> _tracks = new Dictionary<Entity, Track>();
         private readonly Dictionary<string, Bucket> _buckets = new Dictionary<string, Bucket>();
+        // Reused across frames to prune despawned entities from _last / _seenAt without
+        // allocating. Without the prune both dictionaries grow unbounded under enemy churn.
+        private readonly HashSet<Entity> _live = new HashSet<Entity>();
+        private readonly List<Entity> _stale = new List<Entity>();
         private EntityQuery _query;
         private EntityManager _em;
         private float _nextReport;
@@ -105,10 +137,14 @@ namespace DOTSSample
             _frames++;
             _fpsAccum += Time.unscaledDeltaTime;
 
+            var now = Time.realtimeSinceStartup;
+            _live.Clear();
+
             var entities = _query.ToEntityArray(Unity.Collections.Allocator.Temp);
             for (var i = 0; i < entities.Length; i++)
             {
                 var e = entities[i];
+                _live.Add(e);
                 var pos = _em.GetComponentData<LocalTransform>(e).Position;
 
                 if (_last.TryGetValue(e, out var prev))
@@ -118,6 +154,12 @@ namespace DOTSSample
                     var name = tag.IsLocal ? "local-player"
                         : _em.HasComponent<EnemyTag>(e) ? "enemy"
                         : "remote-player";
+
+                    // Age from first sighting. An entity already present when the probe
+                    // started reads as fresh for its first WarmupSeconds — we cannot know
+                    // its real age, and over a long run the one warm-up per persistent
+                    // entity is negligible against a churning one's many.
+                    var fresh = !_seenAt.TryGetValue(e, out var seen) || now - seen < WarmupSeconds;
 
                     // Per ENTITY, not straight into the class bucket. An enemy that has
                     // reached the centre is stopped by EnemyMoveSystem on the server
@@ -134,13 +176,32 @@ namespace DOTSSample
 
                     t.Class = name;
                     t.Steps.Add(step);
+                    t.Fresh.Add(fresh);
                     t.Travel += step;
+                }
+                else
+                {
+                    // First sighting: stamp its birth so later frames can age against it.
+                    _seenAt[e] = now;
                 }
 
                 _last[e] = pos;
             }
 
             entities.Dispose();
+
+            // Prune despawned entities so _last / _seenAt do not grow unbounded under
+            // churn, and so a reused entity slot starts fresh rather than inheriting an age.
+            _stale.Clear();
+            foreach (var kv in _last)
+            {
+                if (!_live.Contains(kv.Key)) _stale.Add(kv.Key);
+            }
+            for (var i = 0; i < _stale.Count; i++)
+            {
+                _last.Remove(_stale[i]);
+                _seenAt.Remove(_stale[i]);
+            }
 
             if (Time.realtimeSinceStartup < _nextReport) return;
             _nextReport = Time.realtimeSinceStartup + ReportSeconds;
@@ -179,7 +240,13 @@ namespace DOTSSample
                 for (var i = 0; i < t.Steps.Count; i++)
                 {
                     b.Steps.Add(t.Steps[i]);
-                    if (t.Steps[i] < NoiseUnits) b.Frozen++;
+                    var fresh = t.Fresh[i];
+                    if (fresh) b.NFresh++; else b.NSteady++;
+                    if (t.Steps[i] < NoiseUnits)
+                    {
+                        b.Frozen++;
+                        if (fresh) b.FrozenFresh++; else b.FrozenSteady++;
+                    }
                 }
             }
 
@@ -201,14 +268,28 @@ namespace DOTSSample
                 var ratio = median > NoiseUnits ? worst / median : -1f;
                 var frozenPct = 100f * kv.Value.Frozen / steps.Count;
 
+                // Split the frozen share by lifetime. If a class's chop is the spawn
+                // warm-up, frozenFresh dominates and frozenSteady is near zero; if it is
+                // genuine steady-state stutter, the reverse. This is the line that tells a
+                // churning class (enemies) apart from a stuttering one.
+                var fresh = kv.Value.NFresh;
+                var steady = kv.Value.NSteady;
+                var frozenFreshPct = fresh > 0 ? 100f * kv.Value.FrozenFresh / fresh : 0f;
+                var frozenSteadyPct = steady > 0 ? 100f * kv.Value.FrozenSteady / steady : 0f;
+
                 Debug.Log(
                     $"[motion-probe] {kv.Key,-14} moving={kv.Value.Moving,2} parked={kv.Value.Parked,2} " +
                     $"n={steps.Count,5} fps={fps,6:F1} " +
                     $"median={median:F5} p99={p99:F5} worst={worst:F5} " +
-                    $"worst/median={ratio,6:F2} frozenFrames={frozenPct,5:F1}%");
+                    $"worst/median={ratio,6:F2} frozenFrames={frozenPct,5:F1}% " +
+                    $"(fresh={frozenFreshPct,5:F1}% n={fresh,5} | steady={frozenSteadyPct,5:F1}% n={steady,5})");
 
                 steps.Clear();
                 kv.Value.Frozen = 0;
+                kv.Value.FrozenFresh = 0;
+                kv.Value.FrozenSteady = 0;
+                kv.Value.NFresh = 0;
+                kv.Value.NSteady = 0;
                 kv.Value.Parked = 0;
                 kv.Value.Moving = 0;
             }
