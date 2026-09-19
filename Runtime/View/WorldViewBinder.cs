@@ -977,13 +977,41 @@ namespace Cuvara.Netcode.View
                     // Rejected for a tick that is not strictly newer, which the
                     // evaluator's bracketing must never see. Nothing is lost: a
                     // superseded state is not worth rendering.
-                    fresh.Ring.TryPush(new InterpolationSample
+                    //
+                    // ONLY when the position actually moved. This loop runs over every
+                    // entity the client holds, not over the entities this snapshot
+                    // carried — a delta names only what changed, and the merged world
+                    // keeps the rest at its last value. Pushing unconditionally therefore
+                    // MANUFACTURES a sample for every entity the snapshot did not mention:
+                    // new tick, old position, i.e. a positive assertion that the entity
+                    // was still there at that tick. The evaluator then interpolates
+                    // between two identical points, renders the entity frozen for the
+                    // interval, and jumps when the real update lands.
+                    //
+                    // That was harmless while "absent from a delta" could only mean
+                    // "unchanged". The server's replication schedule (rpg-mmo-server
+                    // ADR-27) made it mean "unchanged OR withheld", and nothing on this
+                    // side was told: three people playing saw mobs walk in visible steps
+                    // while players moved smoothly. Comparing against the last SAMPLE
+                    // rather than asking the wire settles both readings at once — a
+                    // genuinely stationary entity has nothing to add either way, and a
+                    // withheld moving one keeps its real samples, so the evaluator carries
+                    // the motion across the gap instead of being told it stopped.
+                    var ring = fresh.Ring;
+                    bool moved = ring.Length == 0
+                                 || ring[ring.Length - 1].X != e.X
+                                 || ring[ring.Length - 1].Y != e.Y;
+
+                    if (moved)
                     {
-                        Tick = world.Tick,
-                        ReceiveTime = nowSeconds,
-                        X = e.X,
-                        Y = e.Y
-                    });
+                        ring.TryPush(new InterpolationSample
+                        {
+                            Tick = world.Tick,
+                            ReceiveTime = nowSeconds,
+                            X = e.X,
+                            Y = e.Y
+                        });
+                    }
 
                     // HP is snapped, never interpolated. A half-applied hit is not a
                     // state the server ever occupied. Facing and action get the same
