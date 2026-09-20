@@ -3,6 +3,34 @@
 ## [Unreleased]
 
 ### Fixed
+
+- **`ActionSeq` was silently landing in the field-delta mask instead of the retrigger
+  counter.** `WorldState.Apply` built `EntitySnapshotData` with ten positional arguments
+  whose last was a `uint`. Shared.GameLogic 0.5.0 added a ten-argument overload whose tenth
+  parameter is `uint changedFields`, so overload resolution bound that one: the counter went
+  into the mask and `actionSeq` was forced to `0`.
+
+  Two consequences, and the second is the dangerous one:
+
+  1. `ActionSeq` arrived as 0, so no view would ever see a repeated action — an entity
+     renders correctly, carries the right action, and simply never animates a second swing.
+  2. `ChangedFields` held the counter's value. A counter of 12 is a mask asserting
+     `Hp|MaxHp` are the only fields present, so the next merge would have reconstructed the
+     entity from a lie. Nothing checks a mask for plausibility.
+
+  It compiled clean. The only thing that objected was `GameEventAndActionSeqTests` —
+  *"decoded and resolved but dropped at the merge"*, expected 12, got 0.
+
+  Fixed by passing `actionSeq:` and `changedFields:` **by name**. Verified both ways: with
+  named arguments the fixture is 17/17; reverted to the positional form against
+  Shared.GameLogic at `sgl-v0.5.0` it is 15/17, failing with exactly `Expected: 12, But was:
+  0` and `Expected: 5, But was: 0`.
+
+  `changedFields: 0u` is deliberate — `ResolvedEntity` does not carry the mask yet and `0`
+  is specified to mean "every field present". Wiring the real mask through is #158.
+
+
+### Fixed
 - **`Runtime/Protocol/Generated/Wire.cs` had drifted from the backend: it was missing
   `EntitySnapshot.changed_fields` (proto field 13, `uint32`).** The field-level delta
   encoding landed in `rpg-mmo-server` separately from gameplay-v2, so this branch carried
