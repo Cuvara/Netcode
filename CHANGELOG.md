@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Wire protocol version 2: field-level delta.** `EntitySnapshot.changed_fields` (wire
+  field 13) is now decoded, carried through `ResolvedEntity` and handed to
+  `SnapshotMerger`, so a delta can suppress individual unchanged fields instead of only
+  whole entities. The backend measured 43.4% of a delta's payload as `hp`, `max_hp`,
+  `speed` and `type` re-sent identical on every movement tick.
+
+  **Zero means "every field present"** — a keyframe, a pre-v2 sender and any complete
+  entity all send it, and proto3 elides it, so the default is also the safe reading.
+  Non-zero means the entry is a partial update and every field whose bit is clear keeps
+  its last known value.
+
+### Changed
+
+- **`WireProtocolVersion.Current` 1 → 2, and this was not optional.** The game server
+  refuses any peer whose version is not an exact match — *"a peer one version AHEAD is
+  refused just as firmly as one behind"*, as its own `CheckProtocolVersion` puts it — and
+  the backend moved to 2 when field-delta landed. A client still announcing 1 was being
+  **refused at the handshake**, not quietly served the old wire. The bandwidth saving is
+  why the field exists; connecting at all is why this constant had to follow.
+
+- `ResolvedEntity` gains `ChangedFields` and an eleven-argument constructor. The mask is
+  the **eleventh** parameter deliberately: adding it as a tenth would have captured every
+  existing ten-argument call, since both trailing parameters are `uint` and overload
+  resolution cannot tell them apart. That is not hypothetical — Shared.GameLogic 0.5.0 added
+  exactly such a ten-argument overload and `WorldState.Apply` silently bound `actionSeq`
+  into `changedFields` (#159).
+
+  Verified: `FieldDeltaMergeTests` runs two arms against the **same delta bytes**. With
+  `X|Y` flagged, Hp/MaxHp/Speed/Type/Facing/Action/ActionSeq keep their seeded values; with
+  the mask at 0 every field takes the wire value including the zeros. Dropping the mask on
+  the way through makes the first arm fail with `Hp ... Expected: 100, But was: 0` — the
+  exact collapse-to-defaults this pair exists to catch.
+
+
 ### Fixed
 
 - **`ActionSeq` was silently landing in the field-delta mask instead of the retrigger

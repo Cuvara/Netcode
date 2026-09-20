@@ -104,5 +104,19 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// </para>
         /// </remarks>
         public uint ActionSeq { get; set; }
+
+        /// <summary>
+        /// Field-level delta mask (wire field 13). <b>Zero means "every field present"</b>,
+        /// which is what a keyframe, a pre-v2 server, and any full entity all send — so the
+        /// default is also the safe reading. Non-zero means this entry is a PARTIAL update
+        /// and every field whose bit is clear must keep its last known value rather than
+        /// being reset to the proto3 default.
+        /// </summary>
+        /// <remarks>
+        /// Carried raw, like <see cref="ActionSeq"/> and <see cref="FacingBrad"/>: the bit
+        /// meanings live in <c>Shared.GameLogic.Systems.SnapshotFieldBits</c>, shared with
+        /// the server so a disagreement is a compile error rather than a wire bug.
+        /// </remarks>
+        public uint ChangedFields { get; set; }
     }
 }

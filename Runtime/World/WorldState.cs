@@ -118,14 +118,12 @@ namespace Cuvara.Netcode.World
                     // held 12, a mask asserting Hp|MaxHp were the only fields present, so the
                     // next merge would have reconstructed the entity from a lie.
                     //
-                    // changedFields is 0 deliberately: ResolvedEntity does not carry the mask
-                    // yet, and 0 is specified to mean "every field present", which is exactly
-                    // what this adapter produces. Wiring the real mask through is
-                    // Cuvara/Netcode#158, with the protocol version bump that makes the server
-                    // send partial updates at all.
+                    // changedFields now rides through from the wire (#158). Zero still means
+                    // "every field present", so a keyframe, a pre-v2 server and any full
+                    // entity all keep the behaviour they had before this line existed.
                     converted[i] = new EntitySnapshotData(
                         e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
-                        actionSeq: e.ActionSeq, changedFields: 0u);
+                        actionSeq: e.ActionSeq, changedFields: e.ChangedFields);
                 }
             }
 

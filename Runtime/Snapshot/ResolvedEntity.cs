@@ -39,6 +39,25 @@ namespace Cuvara.Netcode.Snapshot
         public ResolvedEntity(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, Shared.GameLogic.Components.EntityAction action, uint actionSeq)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, actionSeq, 0u)
+        {
+        }
+
+        /// <summary>
+        /// Full constructor, including the field-level delta mask.
+        /// </summary>
+        /// <remarks>
+        /// The mask is the ELEVENTH parameter deliberately. Adding it as a tenth would have
+        /// captured every existing ten-argument call — both trailing parameters are
+        /// <c>uint</c>, so overload resolution cannot tell them apart and the compiler would
+        /// not complain. That is not hypothetical: Shared.GameLogic 0.5.0 added exactly such
+        /// a ten-argument overload and `WorldState.Apply` silently bound `actionSeq` into
+        /// `changedFields` (Cuvara/Netcode#159).
+        /// </remarks>
+        public ResolvedEntity(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, Shared.GameLogic.Components.EntityAction action, uint actionSeq,
+            uint changedFields)
         {
             Id = id;
             Type = type;
@@ -50,7 +69,14 @@ namespace Cuvara.Netcode.Snapshot
             FacingBrad = facingBrad;
             Action = action;
             ActionSeq = actionSeq;
+            ChangedFields = changedFields;
         }
+
+        /// <summary>
+        /// Field-level delta mask. Zero means every field is present — see
+        /// <c>Shared.GameLogic.Systems.SnapshotFieldBits</c> for the bit meanings.
+        /// </summary>
+        public uint ChangedFields { get; }
 
         public string Id { get; }
 
