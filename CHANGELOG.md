@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`Runtime/Protocol/Generated/Wire.cs` had drifted from the backend: it was missing
+  `EntitySnapshot.changed_fields` (proto field 13, `uint32`).** The field-level delta
+  encoding landed in `rpg-mmo-server` separately from gameplay-v2, so this branch carried
+  every gameplay-v2 message but not the delta mask, and the
+  `Generated Wire.cs matches the backend` gate is byte-exact against the backend's committed
+  copy on `develop`. A stale binding is the failure this gate exists to catch: the missing
+  field decodes cleanly as zero, so a partial-update snapshot would read as "all fields
+  present" and the client would silently overwrite live state with defaults, with no
+  exception and every test on both sides still green.
+
+  Resynchronised by copying the backend's generated artefact verbatim — not hand-merged.
+  The change is purely additive: a public-API diff of the old and new file shows
+  `ChangedFields` and `ChangedFieldsFieldNumber` added and **nothing removed**, the rest of
+  the diff being the embedded descriptor's base64 re-wrapping. `Wire.cs` is now byte-identical
+  to the backend (md5 `95f9e2d71ce6efbc596b7a25748abfc0`).
+
+  Note this only makes the *binding* current. `WireProtocolVersion.Current` is still `1`
+  while the backend announces `2`, and nothing in this package reads `ChangedFields` yet —
+  both tracked in #158 and deliberately out of scope here.
+
+
 ### Added
 - **Sample: Action Latch Probe.** No server, no network. One synthetic attacker written at
   the server's CRITICAL rate and sampled at its WORLD rate, encoded as real Protobuf

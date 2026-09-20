@@ -40,54 +40,54 @@ namespace RpgMmo.Wire.V1 {
             "AQoMSW5wdXRNZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgC",
             "Eg4KBm1vdmVfeRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJEhIK",
             "CmFiaWxpdHlfaWQYBSABKA0SGQoRYWJpbGl0eV90YXJnZXRfaWQYBiABKAkS",
-            "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAIigQIKDkVudGl0eVNuYXBz",
+            "DQoFYWltX3gYByABKAISDQoFYWltX3kYCCABKAIimQIKDkVudGl0eVNuYXBz",
             "aG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEoCRIJCgF4GAMgASgC",
             "EgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hwGAYgASgFEigKBHR5",
             "cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlUeXBlEg4KBmhhbmRs",
             "ZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdfYnJhZBgKIAEoDRIs",
             "CgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5FbnRpdHlBY3Rpb24S",
-            "EgoKYWN0aW9uX3NlcRgMIAEoDSKxAQoJR2FtZUV2ZW50EisKBHR5cGUYASAB",
-            "KA4yHS5ycGdtbW8ud2lyZS52MS5HYW1lRXZlbnRUeXBlEg4KBnNvdXJjZRgC",
-            "IAEoDRIOCgZ0YXJnZXQYAyABKA0SDgoGYW1vdW50GAQgASgREhIKCmFiaWxp",
-            "dHlfaWQYBSABKA0SDQoFZmxhZ3MYBiABKA0SEQoJc291cmNlX2lkGAcgASgJ",
-            "EhEKCXRhcmdldF9pZBgIIAEoCSKtAQoPU25hcHNob3RNZXNzYWdlEgwKBHRp",
-            "Y2sYASABKAQSEAoIYWNrX3RpY2sYAiABKAQSDAoEZnVsbBgDIAEoCBIwCghl",
-            "bnRpdGllcxgEIAMoCzIeLnJwZ21tby53aXJlLnYxLkVudGl0eVNuYXBzaG90",
-            "Eg8KB3JlbW92ZWQYBSADKAkSKQoGZXZlbnRzGAYgAygLMhkucnBnbW1vLndp",
-            "cmUudjEuR2FtZUV2ZW50IiMKEURpc2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNv",
-            "bhgBIAEoCSIPCg1SZXN5bmNSZXF1ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVz",
-            "dBIOCgZtYXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25zZRIKCgJv",
-            "axgBIAEoCBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1l",
-            "c3RhbXAYASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgD",
-            "EhMKC3NlcnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4KBnJlYXNv",
-            "bhgBIAEoCSInChFTZWFsZWRDbGllbnRIZWxsbxISCgpwdWJsaWNfa2V5GAEg",
-            "ASgMImEKEVNlYWxlZFNlcnZlckhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwS",
-            "DwoHYmluZGluZxgCIAEoDBINCgVlcnJvchgDIAEoCRIYChBzZXJ2ZXJfc2ln",
-            "bmF0dXJlGAQgASgMKs8DCgdNc2dUeXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lG",
-            "SUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FVVEhfUkVT",
-            "UBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5U",
-            "RVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4QBRIcChhN",
-            "U0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9JTlBVVBAH",
-            "EhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElTQ09OTkVD",
-            "VBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RSQU5TRkVS",
-            "X01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4SEQoNTVNH",
-            "X1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9L",
-            "SUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1T",
-            "R19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoKRW50aXR5VHlwZRIb",
-            "ChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BM",
-            "QVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05Q",
-            "QxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9K",
-            "RUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJVFlfQUNUSU9OX1VO",
-            "U1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExFEAESGAoURU5USVRZ",
-            "X0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9OX0FUVEFDS0lORxAD",
-            "EhYKEkVOVElUWV9BQ1RJT05fREVBRBAEKt4BCg1HYW1lRXZlbnRUeXBlEh8K",
-            "G0dBTUVfRVZFTlRfVFlQRV9VTlNQRUNJRklFRBAAEhoKFkdBTUVfRVZFTlRf",
-            "VFlQRV9EQU1BR0UQARIYChRHQU1FX0VWRU5UX1RZUEVfSEVBTBACEhkKFUdB",
-            "TUVfRVZFTlRfVFlQRV9ERUFUSBADEiAKHEdBTUVfRVZFTlRfVFlQRV9BQklM",
-            "SVRZX0NBU1QQBBIbChdHQU1FX0VWRU5UX1RZUEVfWFBfR0FJThAFEhwKGEdB",
-            "TUVfRVZFTlRfVFlQRV9MRVZFTF9VUBAGQkZaM2dpdGh1Yi5jb20vZHV5Y3Vv",
-            "bmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5X",
-            "aXJlLlYxYgZwcm90bzM="));
+            "EgoKYWN0aW9uX3NlcRgMIAEoDRIWCg5jaGFuZ2VkX2ZpZWxkcxgNIAEoDSKx",
+            "AQoJR2FtZUV2ZW50EisKBHR5cGUYASABKA4yHS5ycGdtbW8ud2lyZS52MS5H",
+            "YW1lRXZlbnRUeXBlEg4KBnNvdXJjZRgCIAEoDRIOCgZ0YXJnZXQYAyABKA0S",
+            "DgoGYW1vdW50GAQgASgREhIKCmFiaWxpdHlfaWQYBSABKA0SDQoFZmxhZ3MY",
+            "BiABKA0SEQoJc291cmNlX2lkGAcgASgJEhEKCXRhcmdldF9pZBgIIAEoCSKt",
+            "AQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sY",
+            "AiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21t",
+            "by53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkSKQoG",
+            "ZXZlbnRzGAYgAygLMhkucnBnbW1vLndpcmUudjEuR2FtZUV2ZW50IiMKEURp",
+            "c2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSIPCg1SZXN5bmNSZXF1",
+            "ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZtYXBfaWQYASABKAkiMAoT",
+            "VHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEo",
+            "CSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMiNQoLUG9uZ01l",
+            "c3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3NlcnZlcl90aW1lGAIgASgD",
+            "Ih0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEoCSInChFTZWFsZWRDbGll",
+            "bnRIZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEKEVNlYWxlZFNlcnZlckhl",
+            "bGxvEhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmluZGluZxgCIAEoDBINCgVl",
+            "cnJvchgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJlGAQgASgMKs8DCgdNc2dU",
+            "eXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVU",
+            "SBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVS",
+            "X1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01T",
+            "R19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JF",
+            "U1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9U",
+            "EAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lO",
+            "QxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RS",
+            "QU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19U",
+            "WVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VB",
+            "TEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJf",
+            "SEVMTE8QESqdAQoKRW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJ",
+            "RklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBF",
+            "X01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lU",
+            "RU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFj",
+            "dGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZ",
+            "X0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdF",
+            "TlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVB",
+            "RBAEKt4BCg1HYW1lRXZlbnRUeXBlEh8KG0dBTUVfRVZFTlRfVFlQRV9VTlNQ",
+            "RUNJRklFRBAAEhoKFkdBTUVfRVZFTlRfVFlQRV9EQU1BR0UQARIYChRHQU1F",
+            "X0VWRU5UX1RZUEVfSEVBTBACEhkKFUdBTUVfRVZFTlRfVFlQRV9ERUFUSBAD",
+            "EiAKHEdBTUVfRVZFTlRfVFlQRV9BQklMSVRZX0NBU1QQBBIbChdHQU1FX0VW",
+            "RU5UX1RZUEVfWFBfR0FJThAFEhwKGEdBTUVfRVZFTlRfVFlQRV9MRVZFTF9V",
+            "UBAGQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJv",
+            "dG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), typeof(global::RpgMmo.Wire.V1.GameEventType), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -99,7 +99,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId", "AbilityId", "AbilityTargetId", "AimX", "AimY" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.GameEvent), global::RpgMmo.Wire.V1.GameEvent.Parser, new[]{ "Type", "Source", "Target", "Amount", "AbilityId", "Flags", "SourceId", "TargetId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed", "Events" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
@@ -2960,6 +2960,7 @@ namespace RpgMmo.Wire.V1 {
       facingBrad_ = other.facingBrad_;
       action_ = other.action_;
       actionSeq_ = other.actionSeq_;
+      changedFields_ = other.changedFields_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -3254,6 +3255,57 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "changed_fields" field.</summary>
+    public const int ChangedFieldsFieldNumber = 13;
+    private uint changedFields_;
+    /// <summary>
+    /// Field-level delta mask. Non-zero on a DELTA (full=false) snapshot means this
+    /// entity entry is a PARTIAL UPDATE: only the fields whose bit is set are
+    /// present, and the receiver MUST keep its last-known value for every unset
+    /// field rather than resetting it to the proto3 default (zero).
+    ///
+    /// Bit assignments:
+    ///   0x0001 → x          (field 3)
+    ///   0x0002 → y          (field 4)
+    ///   0x0004 → hp         (field 5)
+    ///   0x0008 → max_hp     (field 6)
+    ///   0x0010 → type / type_name (fields 7 / 2)
+    ///   0x0020 → speed      (field 9)
+    ///   0x0040 → facing_brad (field 10)
+    ///   0x0080 → action     (field 11)
+    ///   0x0100 → action_seq (field 12)
+    ///
+    /// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
+    /// delta never sets this field; a receiver that sees 0 MUST apply the same rule
+    /// as on a keyframe — every field takes its wire value (including proto3 defaults
+    /// of zero). That is the safe, backwards-compatible direction: an old sender
+    /// never sets the field, the new receiver treats zero as "all present", and
+    /// behaviour is unchanged. An old receiver ignores the field (proto3 unknown
+    /// fields) and zeros every unset field, which is wrong — that failure is why
+    /// this field is gated behind a protocol version bump (version 2).
+    ///
+    /// NEVER SET ON KEYFRAMES (full=true). A keyframe always carries complete state
+    /// for every entity; the receiver re-establishes its view from scratch on a
+    /// keyframe and field masking would be meaningless.
+    ///
+    /// NEVER SET ON A FIRST INTRODUCTION. When `id` is present (first mention of an
+    /// entity to this connection), the server MUST send all fields so the client can
+    /// construct a complete initial state. A receiver that sees a non-zero mask with
+    /// `id` non-empty is receiving a server-side bug; it SHOULD treat it as a full
+    /// update (mask = 0) rather than attempting to merge against an entity it never
+    /// received.
+    ///
+    /// Introduced in protocol version 2.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ChangedFields {
+      get { return changedFields_; }
+      set {
+        changedFields_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -3281,6 +3333,7 @@ namespace RpgMmo.Wire.V1 {
       if (FacingBrad != other.FacingBrad) return false;
       if (Action != other.Action) return false;
       if (ActionSeq != other.ActionSeq) return false;
+      if (ChangedFields != other.ChangedFields) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -3300,6 +3353,7 @@ namespace RpgMmo.Wire.V1 {
       if (FacingBrad != 0) hash ^= FacingBrad.GetHashCode();
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
       if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
+      if (ChangedFields != 0) hash ^= ChangedFields.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -3366,6 +3420,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(96);
         output.WriteUInt32(ActionSeq);
       }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -3424,6 +3482,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(96);
         output.WriteUInt32(ActionSeq);
       }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3469,6 +3531,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (ActionSeq != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ActionSeq);
+      }
+      if (ChangedFields != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ChangedFields);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -3517,6 +3582,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.ActionSeq != 0) {
         ActionSeq = other.ActionSeq;
+      }
+      if (other.ChangedFields != 0) {
+        ChangedFields = other.ChangedFields;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -3585,6 +3653,10 @@ namespace RpgMmo.Wire.V1 {
             ActionSeq = input.ReadUInt32();
             break;
           }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -3650,6 +3722,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 96: {
             ActionSeq = input.ReadUInt32();
+            break;
+          }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
             break;
           }
         }
