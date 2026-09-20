@@ -101,8 +101,31 @@ namespace Cuvara.Netcode.World
                     // reason speed does: whether an absent value should hold the last
                     // known one or derive a new one is a presentation decision, and this
                     // adapter is not where presentation decisions belong.
+                    // ActionSeq rides through for the same reason, and the consequence of
+                    // dropping it here is the most invisible of the three: the entity would
+                    // render correctly, carry the right action, and simply never animate a
+                    // second swing — with the codec, the resolver and every test still green.
+                    // actionSeq is passed BY NAME, and that is load-bearing rather than
+                    // stylistic. Shared.GameLogic 0.5.0 added a ten-argument overload whose
+                    // tenth parameter is `uint changedFields`, so this call written with ten
+                    // positional arguments and a `uint` last bound to THAT overload: the
+                    // retrigger counter landed in the field-delta mask and actionSeq was
+                    // forced to 0. It compiled clean. The only thing that objected was
+                    // GameEventAndActionSeqTests -- "decoded and resolved but dropped at the
+                    // merge", expected 12, got 0.
+                    //
+                    // The second consequence was worse than the first: ChangedFields then
+                    // held 12, a mask asserting Hp|MaxHp were the only fields present, so the
+                    // next merge would have reconstructed the entity from a lie.
+                    //
+                    // changedFields is 0 deliberately: ResolvedEntity does not carry the mask
+                    // yet, and 0 is specified to mean "every field present", which is exactly
+                    // what this adapter produces. Wiring the real mask through is
+                    // Cuvara/Netcode#158, with the protocol version bump that makes the server
+                    // send partial updates at all.
                     converted[i] = new EntitySnapshotData(
-                        e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
+                        e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
+                        actionSeq: e.ActionSeq, changedFields: 0u);
                 }
             }
 

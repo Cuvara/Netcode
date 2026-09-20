@@ -1,6 +1,6 @@
 {
   "name": "com.cuvara.netcode",
-  "version": "0.40.3",
+  "version": "0.41.0",
   "displayName": "Cuvara Netcode",
   "description": "Client wire transport, codec, two-hop handshake (gateway → game server), snapshot resolution and world state management for the RPG MMO.",
   "unity": "6000.3",
@@ -27,7 +27,7 @@
     "jp.hadashikick.vcontainer": "1.16.8 — enables Cuvara.Netcode.DI and Cuvara.Netcode.Bootstrap; absent, those assemblies are excluded and the rest of the package is unaffected"
   },
   "x-manualDependencies": {
-    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.4.1"
+    "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.5.0"
   },
   "samples": [
     {
@@ -86,6 +86,11 @@
       "path": "Samples~/KcpProbe"
     },
     {
+      "displayName": "Game Event Probe",
+      "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder while an attacker swings at a victim. Two buttons are the whole scene. 'Stop sending events': HP keeps falling because HP is state, and the floating damage numbers stop because a number is an occurrence -- press 'Heal the victim' at the same time and a hit and a heal net out inside one tick, so there is no HP delta a damage number could have been derived from. 'Stop sending action_seq': the attacker keeps attacking and the SWING flash fires once and then stops, while action reads Attacking on every snapshot -- the repeated-attack problem reproduced on demand, and the reason the retrigger edge has to be manufactured by the server. A third button sends an event naming an entity this client was never told about: the resolver counts the unresolved participant, still renders the number with no source, and does NOT abort the snapshot, which is the deliberate asymmetry with an unresolvable entity handle.",
+      "path": "Samples~/GameEventProbe"
+    },
+    {
       "displayName": "Facing and Protocol Version",
       "description": "No server, no network. A synthetic snapshot stream drives the real codec, resolver, merger and view binder: three capsules orbit a ring and point along their direction of travel, and that direction arrives only in facing_brad — nothing in the scene derives it from movement. Press 'Stop sending facing' and they keep moving and stop turning, holding the last heading instead of snapping to east, which is the 'zero means not sent' rule made visible and the reason facing is a biased integer rather than a float. Three buttons also run a real JoinTokenResponse through the client's version rule: a matching server is admitted, a skewed one is refused with the named reason protocol_version_mismatch and marked permanent, and one that advertises nothing is admitted on trust and says so.",
       "path": "Samples~/FacingAndVersion"
@@ -104,6 +109,11 @@
       "displayName": "Gateway TLS Probe",
       "description": "The client half of ADR-23, run for real against listeners the scene starts itself. One case connects over TLS with a pinned certificate and round-trips a frame; the other four are REFUSALS, because a TLS switch that quietly yields a plaintext link -- or a validation callback that returns true -- reads exactly like a working one everywhere else: an unpinned connection to a self-signed certificate must be refused by the platform trust store, a TLS client against a plaintext gateway must not downgrade, a plaintext client against a TLS gateway must not get a usable frame, and the transport factory asked for TcpTls with no TlsOptions must throw rather than hand back cleartext. It does NOT prove your gateway is configured for TLS, and says nothing about Android.",
       "path": "Samples~/GatewayTlsProbe"
+    },
+    {
+      "displayName": "Action Latch Probe",
+      "description": "No server, no network. One synthetic attacker written at the server's CRITICAL rate and sampled at its WORLD rate, encoded as real Protobuf snapshots and merged by the real resolver -- twice, once with the server's one-shot latch and once without it. The second column is the server as it behaved before the latch shipped: roughly three quarters of attacks never reach a client at all, because only one base tick in four is ever sampled and the next tick of movement overwrites Attacking before anyone can see it. Both arms receive the same snapshots and the same bytes -- action_seq is a varint on a message that was being sent anyway -- and what differs is how many attacks were in one. The counter rule is the real shared one (ActionStateLogic.Advance) and the bytes are built the way the server builds them; the LATCH is mirrored rather than imported, because a client has no tick schedule to apply it to, and that is the scene's honest limit.",
+      "path": "Samples~/ActionLatchProbe"
     },
     {
       "displayName": "Importance Interval Probe",

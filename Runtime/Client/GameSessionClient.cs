@@ -321,6 +321,56 @@ namespace Cuvara.Netcode.Client
         }
 
         /// <summary>
+        /// Sends one input frame carrying an ability.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A separate overload rather than four more optional parameters on
+        /// <see cref="SendInput(long, float, float, string)"/>: the common call sends no
+        /// ability, and defaulted parameters make the ability path look like something that
+        /// happens by accident rather than something a caller opted into.
+        /// </para>
+        /// <para>
+        /// <b>This is a request, and the ability is NOT predicted.</b> Prediction covers
+        /// movement only — movement is a pure function of input the client already has, while
+        /// an ability outcome depends on cooldowns, content and other entities' state. The
+        /// only report a client gets is what comes back in the snapshot: a
+        /// <see cref="Protocol.Messages.GameEventType.AbilityCast"/> event if it resolved,
+        /// nothing if it did not. Drive a cast animation and a cooldown sweep off that event,
+        /// never off this call.
+        /// </para>
+        /// <para>
+        /// <paramref name="abilityTargetId"/> is a server-side entity id, in the same space as
+        /// <paramref name="attackTargetId"/> — never an interned handle, which the server
+        /// allocates for its own outbound snapshots and would not recognise coming back.
+        /// <paramref name="aimX"/>/<paramref name="aimY"/> are a world-space POINT for a
+        /// ground-targeted ability, unlike the move vector which is a direction.
+        /// </para>
+        /// </remarks>
+        public void SendAbilityInput(
+            long tick,
+            float moveX,
+            float moveY,
+            uint abilityId,
+            string abilityTargetId = "",
+            float aimX = 0f,
+            float aimY = 0f,
+            string attackTargetId = "")
+        {
+            _connection?.Send(MsgType.Input, new InputMessage
+            {
+                Tick = tick,
+                MoveX = moveX,
+                MoveY = moveY,
+                AttackTargetId = attackTargetId ?? string.Empty,
+                AbilityId = abilityId,
+                AbilityTargetId = abilityTargetId ?? string.Empty,
+                AimX = aimX,
+                AimY = aimY
+            });
+        }
+
+        /// <summary>
         /// Asks the server to make the next snapshot a keyframe. Repeated calls
         /// while one is already outstanding are dropped: a resync costs a full AOI
         /// snapshot, and one is enough to repair any disagreement.

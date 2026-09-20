@@ -221,7 +221,7 @@ namespace Cuvara.Netcode.Tests.Editor
             public void Despawn(string id) { }
             public void SetState(string id, float x, float y, int hp, int maxHp) => SetStateCalls++;
 
-            public void SetPose(string id, uint facingBrad, SimAction action)
+            public void SetPose(string id, uint facingBrad, SimAction action, uint actionSeq)
             {
                 LastFacingBrad = facingBrad;
                 LastAction = action;

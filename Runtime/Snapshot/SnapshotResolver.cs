@@ -30,11 +30,26 @@ namespace Cuvara.Netcode.Snapshot
         /// <summary>Number of snapshots that could not be resolved and forced a resync.</summary>
         public int UnresolvedCount { get; private set; }
 
+        /// <summary>
+        /// Event participants whose handle had no binding. Counted, never escalated: see
+        /// <see cref="ResolvedGameEvent"/> for why an event does not force a resync the way
+        /// an entity does.
+        /// </summary>
+        /// <remarks>
+        /// A steadily climbing value here means the server is referring to entities it
+        /// believes this client knows about and it does not — which is the same class of
+        /// disagreement <see cref="UnresolvedCount"/> reports, seen from a channel that
+        /// cannot afford to act on it. Worth an eye in a diagnostics overlay; not worth a
+        /// keyframe.
+        /// </remarks>
+        public int UnresolvedEventParticipants { get; private set; }
+
         /// <summary>Forgets every binding, for a fresh connection or after a map transfer.</summary>
         public void Reset()
         {
             _handles.Clear();
             UnresolvedCount = 0;
+            UnresolvedEventParticipants = 0;
         }
 
         /// <summary>
@@ -106,7 +121,7 @@ namespace Cuvara.Netcode.Snapshot
                 }
 
                 entities.Add(new ResolvedEntity(
-                id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action));
+                id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action, e.ActionSeq));
             }
 
             // Every entity resolved, so state may now be mutated. The clear happens
@@ -127,14 +142,80 @@ namespace Cuvara.Netcode.Snapshot
                 }
             }
 
+            // Resolved AFTER the bindings above have landed, which is load-bearing rather
+            // than incidental: an event routinely names an entity introduced by THIS
+            // snapshot (the thing that just spawned and immediately took damage), and
+            // resolving events first would miss exactly those bindings and report them
+            // unresolved. On a keyframe it matters twice over, because the table was cleared
+            // a few lines up.
+            IReadOnlyList<ResolvedGameEvent> events = ResolveEvents(snapshot);
+
             resolved = new ResolvedSnapshot(
                 snapshot.Tick,
                 snapshot.AckTick,
                 snapshot.Full,
                 entities,
-                snapshot.Removed);
+                snapshot.Removed,
+                events);
 
             return true;
+        }
+
+        private static readonly ResolvedGameEvent[] NoEvents = new ResolvedGameEvent[0];
+
+        private IReadOnlyList<ResolvedGameEvent> ResolveEvents(SnapshotMessage snapshot)
+        {
+            // The overwhelmingly common case is a tick in which nothing happened. Returning
+            // a shared empty array keeps that path free of an allocation per snapshot per
+            // tick, which at 15 Hz is the difference between zero garbage and a steady drip.
+            if (snapshot.Events.Count == 0)
+            {
+                return NoEvents;
+            }
+
+            var events = new List<ResolvedGameEvent>(snapshot.Events.Count);
+
+            foreach (var e in snapshot.Events)
+            {
+                events.Add(new ResolvedGameEvent(
+                    e.Type,
+                    ResolveParticipant(e.Source, e.SourceId),
+                    ResolveParticipant(e.Target, e.TargetId),
+                    e.Amount,
+                    e.AbilityId,
+                    e.Flags));
+            }
+
+            return events;
+        }
+
+        /// <summary>
+        /// Turns one event participant into an entity id: handle first, explicit id as the
+        /// fallback, empty when neither identifies anything.
+        /// </summary>
+        /// <remarks>
+        /// The precedence matches <see cref="EntitySnapshot"/>'s own id/handle rule. A zero
+        /// handle with an empty id is not a failure — it is how the server says "no such
+        /// participant, or not one you can see" — so it is NOT counted as unresolved. Only a
+        /// non-zero handle with no binding is.
+        /// </remarks>
+        private string ResolveParticipant(uint handle, string explicitId)
+        {
+            if (handle != 0)
+            {
+                if (_handles.TryResolve(handle, out var id))
+                {
+                    return id;
+                }
+
+                // A handle the table does not know. Reported as absent rather than guessed,
+                // and counted so the disagreement is visible.
+                UnresolvedEventParticipants++;
+                return string.Empty;
+            }
+
+            // JSON, which never interns and names participants outright.
+            return explicitId ?? string.Empty;
         }
     }
 }
