@@ -121,7 +121,8 @@ namespace Cuvara.Netcode.Snapshot
                 }
 
                 entities.Add(new ResolvedEntity(
-                id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action, e.ActionSeq));
+                    id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
+                    actionSeq: e.ActionSeq, changedFields: e.ChangedFields));
             }
 
             // Every entity resolved, so state may now be mutated. The clear happens

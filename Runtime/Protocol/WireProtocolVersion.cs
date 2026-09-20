@@ -35,7 +35,23 @@ namespace Cuvara.Netcode.Protocol
     public static class WireProtocolVersion
     {
         /// <summary>The version this build speaks. Sent on both handshake hops.</summary>
-        public const uint Current = 1;
+        /// <remarks>
+        /// <para>
+        /// <b>2 since #158</b>, matching <c>WireProtocol.ProtocolVersion</c> on the game
+        /// server. Version 2 is field-level delta: <c>EntitySnapshot.changed_fields</c>
+        /// (wire field 13), where a non-zero mask means the entry is a PARTIAL update and
+        /// every field whose bit is clear keeps its last known value.
+        /// </para>
+        /// <para>
+        /// <b>This bump was not optional.</b> The server refuses any peer whose version is
+        /// not an exact match — "a peer one version AHEAD is refused just as firmly as one
+        /// behind", as its own <c>CheckProtocolVersion</c> puts it — so once the backend
+        /// moved to 2, a client still announcing 1 was refused at the handshake, not
+        /// quietly served the old wire. The saving is the reason the field exists; being
+        /// able to connect at all is the reason this constant had to follow.
+        /// </para>
+        /// </remarks>
+        public const uint Current = 2;
 
         /// <summary>
         /// The wire value meaning "this peer does not advertise a version" — a peer

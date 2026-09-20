@@ -305,6 +305,11 @@ namespace Cuvara.Netcode.Codec
                     // animator, not to this layer. Normalising it here would erase the
                     // difference between "no counter" and "counter at its initial value".
                     ActionSeq = e.ActionSeq,
+                    // Zero here is not "absent", it is "every field present" — see
+                    // EntitySnapshot.ChangedFields. proto3 elides a zero, so a server that
+                    // does not implement field-delta produces exactly the value that makes
+                    // the receiver apply every field, which is why this needs no fallback.
+                    ChangedFields = e.ChangedFields,
                 });
             }
 
