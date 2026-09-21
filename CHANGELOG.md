@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-09-21
+
 ### Added
 
 - **The transport's read path is now tested outside the Editor** (Cuvara/IndieRPGMMOAdventure#50):
