@@ -1038,6 +1038,20 @@ namespace DOTSSample
                 $"skipExpired={_predictor.SkipExpired} coalesced={_predictor.CoalescedInputs} " +
                 $"clientTick={_predictor.BaseTick} serverTick={_binder.LastServerTick} " +
                 $"lead={_predictor.BaseTick - _binder.LastServerTick}t " +
+                // ENTITIES, not frames. Every other counter on this line measures frames,
+                // so a snapshot carrying one entity and one carrying eight read identically
+                // and a client rendering 1 of 8 looks perfectly healthy (#161).
+                //   entities  = what is currently visible (WorldState.Count)
+                //   snapEnts  = what the last snapshot carried; on a DELTA this is the
+                //               number that CHANGED and is normally far below `entities`,
+                //               which is why kf= is printed beside it -- on a keyframe the
+                //               two should agree, and that is the comparison worth making.
+                //   entsTotal = running total, for the same reason rxTotal is here: a rate
+                //               is a difference of counters and a total is not.
+                $"entities={_client.World.Count} snapEnts={_client.World.LastAppliedEntityCount} " +
+                $"kf={(_client.World.LastAppliedWasKeyframe ? 1 : 0)} " +
+                $"snapRemoved={_client.World.LastAppliedRemovedCount} " +
+                $"entsTotal={_client.World.EntitiesApplied} " +
                 $"fps={fps:F0} snapshotsApplied={appliedPerSec:F1}/s " +
                 $"clamped={_predictor.ClampedFrames} discarded={_predictor.DiscardedCatchUpSeconds:F2}s " +
                 $"framesRx={framesPerSec:F1}/s rtt={_client.Session?.RoundTripMs ?? 0}ms " +
