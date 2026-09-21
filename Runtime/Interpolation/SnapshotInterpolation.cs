@@ -47,6 +47,40 @@ namespace Cuvara.Netcode.Interpolation
         /// <param name="config">Tuning.</param>
         /// <param name="x">Rendered X.</param>
         /// <param name="y">Rendered Y.</param>
+        /// <summary>
+        /// As <see cref="EvaluateAt{TBuffer}(in TBuffer, double, double, in InterpolationConfig, out float, out float)"/>,
+        /// and additionally reports whether the answer is a <b>hold</b> rather than a
+        /// position the entity was actually at.
+        /// </summary>
+        /// <param name="holding">
+        /// True when the buffer cannot bracket the render instant — a single sample, or a
+        /// render clock still behind the oldest one. The position returned is the oldest
+        /// known state repeated, which is correct to render only if there is no better
+        /// option; a caller that can defer showing the entity should prefer that, because a
+        /// newly seen entity holds for <c>TargetDelay</c> before the render clock reaches
+        /// its first sample, and a frozen body that then starts moving is the most visible
+        /// artefact the jitter buffer produces.
+        /// </param>
+        public static bool EvaluateAt<TBuffer>(in TBuffer buffer, double renderTick, double secondsPerTick,
+                                               in InterpolationConfig config, out float x, out float y,
+                                               out bool holding)
+            where TBuffer : struct, ISampleBuffer
+        {
+            int n = buffer.Length;
+            holding = n > 0 && (n == 1 || renderTick <= buffer[0].Tick);
+            return EvaluateAt(buffer, renderTick, secondsPerTick, config, out x, out y);
+        }
+
+        /// <summary>
+        /// As <see cref="Evaluate{TBuffer}(in TBuffer, in InterpolationClock, in InterpolationConfig, out float, out float)"/>,
+        /// reporting whether the answer is a hold. See the other overload's remarks.
+        /// </summary>
+        public static bool Evaluate<TBuffer>(in TBuffer buffer, in InterpolationClock clock,
+                                             in InterpolationConfig config,
+                                             out float x, out float y, out bool holding)
+            where TBuffer : struct, ISampleBuffer
+            => EvaluateAt(buffer, clock.RenderTick, clock.SecondsPerTick, config, out x, out y, out holding);
+
         public static bool EvaluateAt<TBuffer>(in TBuffer buffer, double renderTick, double secondsPerTick,
                                                in InterpolationConfig config, out float x, out float y)
             where TBuffer : struct, ISampleBuffer

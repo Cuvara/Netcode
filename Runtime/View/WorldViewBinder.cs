@@ -122,6 +122,13 @@ namespace Cuvara.Netcode.View
             public int Hp, MaxHp;
 
             /// <summary>
+            /// When this entity's FIRST sample arrived, in the same seconds base as
+            /// <c>_clock.NowMs / 1000</c>. Bounds how long rendering may be deferred while
+            /// the buffer fills — see <c>HoldDeferBudget</c>.
+            /// </summary>
+            public double FirstSampleTime;
+
+            /// <summary>
             /// Facing (biased wire form) and action, as of the newest snapshot.
             /// </summary>
             /// <remarks>
@@ -156,6 +163,28 @@ namespace Cuvara.Netcode.View
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
         private readonly List<string> _gone = new List<string>();
+
+        /// <summary>
+        /// How long a remote entity may be withheld from the view while its buffer is too
+        /// thin to bracket the render instant.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A newly seen entity holds at its single sample until the render clock — which
+        /// runs <c>TargetDelay</c> behind — reaches it. Rendering during that window shows
+        /// a frozen body that then visibly starts moving; deferring shows nothing and then
+        /// a body already in motion, one render delay later.
+        /// </para>
+        /// <para>
+        /// The budget exists so the deferral cannot become a disappearance. An entity sent
+        /// once and never again — stationary, or leaving the area of interest on the next
+        /// tick — never acquires a second sample, so the hold condition never clears on its
+        /// own. After this long it renders held, which is exactly the behaviour that
+        /// preceded the deferral. 0.15s is TargetDelay plus one 15Hz interval, i.e. the
+        /// longest a legitimately-filling buffer should need.
+        /// </para>
+        /// </remarks>
+        private const double HoldDeferBudget = 0.15;
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
 
@@ -782,7 +811,17 @@ namespace Cuvara.Netcode.View
                 var e = kv.Value;
                 bool isLocal = id == localId;
 
-                if (_live.Add(id))
+                // Spawn is deferred for a remote entity whose buffer cannot yet bracket the
+                // render instant — see SpawnWhenRenderable below. Showing it earlier means
+                // showing it FROZEN: the render clock runs TargetDelay behind, so a newly
+                // seen entity holds at its first sample for that long before interpolation
+                // has anything to work with. Measured on the DOTS sample: 38.2% of the
+                // frames in an entity's first 0.25s rendered zero displacement, against
+                // 0.42% once established (rpg-mmo-server BENCHMARK Part XIX §56).
+                //
+                // The local entity is exempt: it is predicted, never interpolated, and has
+                // a position from frame one.
+                if ((isLocal || !_interpConfig.DeferUntilBracketed) && _live.Add(id))
                 {
                     // Type is carried on every snapshot the entity appears in, keyframe
                     // and delta alike, so it is already correct on the pass that first
@@ -971,7 +1010,7 @@ namespace Cuvara.Netcode.View
                 {
                     if (!_interp.TryGetValue(id, out var fresh))
                     {
-                        fresh = new InterpEntry { Ring = RentRing() };
+                        fresh = new InterpEntry { Ring = RentRing(), FirstSampleTime = nowSeconds };
                     }
 
                     // Rejected for a tick that is not strictly newer, which the
@@ -1041,13 +1080,36 @@ namespace Cuvara.Netcode.View
                         ix = newest.X;
                         iy = newest.Y;
                     }
-                    else if (!SnapshotInterpolation.Evaluate(
-                                 new EntitySampleBuffer(entry.Ring), _interpClock, _interpConfig,
-                                 out ix, out iy))
+                    else
                     {
-                        var newest = entry.Ring[entry.Ring.Length - 1];
-                        ix = newest.X;
-                        iy = newest.Y;
+                        if (!SnapshotInterpolation.Evaluate(
+                                new EntitySampleBuffer(entry.Ring), _interpClock, _interpConfig,
+                                out ix, out iy, out bool holding))
+                        {
+                            var newest = entry.Ring[entry.Ring.Length - 1];
+                            ix = newest.X;
+                            iy = newest.Y;
+                        }
+                        else if (_interpConfig.DeferUntilBracketed && holding &&
+                                 nowSeconds - entry.FirstSampleTime < HoldDeferBudget)
+                        {
+                            // Still filling. Do not show it yet: rendering now means
+                            // rendering a still body that will visibly start moving once
+                            // the clock reaches its first sample. Appearing one render
+                            // delay later, already in motion, is the lesser artefact.
+                            //
+                            // Bounded, and the bound is load-bearing: an entity that is
+                            // sent once and never again — stationary, or leaving the area
+                            // of interest immediately — would otherwise never appear at
+                            // all. After the budget it renders held, which is exactly the
+                            // old behaviour.
+                            continue;
+                        }
+                    }
+
+                    if (_live.Add(id))
+                    {
+                        _view.Spawn(id, isLocal, e.Type ?? string.Empty);
                     }
 
                     _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
@@ -1055,6 +1117,11 @@ namespace Cuvara.Netcode.View
                 }
                 else
                 {
+                    if (_live.Add(id))
+                    {
+                        _view.Spawn(id, isLocal, e.Type ?? string.Empty);
+                    }
+
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
                     _poseView?.SetPose(id, e.FacingBrad, e.Action, e.ActionSeq);
                 }

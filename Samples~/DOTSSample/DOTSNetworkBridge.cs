@@ -536,7 +536,18 @@ namespace DOTSSample
                 advertised, fallbackTickRate: GameConstants.DefaultTickRate, playerSpeed, MapBounds.Default);
 
             _predictor = new LocalMovePredictor(settings);
-            _binder = new WorldViewBinder(_view, _predictor);
+
+            // Deferred spawn is a RUNTIME switch rather than a build-time one on purpose.
+            // Its effect is a percentage of frozen frames in an entity's first quarter
+            // second, and a percentage is only readable against the same scene, the same
+            // spawner and the same observer position. Two builds cannot give that: the
+            // measured difference would carry every other difference between them too,
+            // which is exactly how a -73% figure for field delta turned out to be a
+            // cross-build artefact. One binary, one flag, two runs.
+            var interpolation = InterpolationConfig.Default;
+            interpolation.DeferUntilBracketed = HasArg("-cuvara-defer-spawn");
+            _binder = new WorldViewBinder(_view, _predictor, null, interpolation);
+            Debug.Log($"[DOTSNet] deferUntilBracketed={interpolation.DeferUntilBracketed}");
 
             // The protocol permits a fallback only if it is OBSERVABLE. A silent one is
             // behaviourally the code that predated the field.
@@ -1921,5 +1932,18 @@ namespace DOTSSample
 
             GUI.color = Color.white;
         }
+
+        /// <summary>True when <paramref name="flag"/> was passed on the command line.</summary>
+        private static bool HasArg(string flag)
+        {
+            var args = System.Environment.GetCommandLineArgs();
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (args[i] == flag) return true;
+            }
+
+            return false;
+        }
+
     }
 }

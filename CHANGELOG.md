@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`InterpolationConfig.DeferUntilBracketed` — hold a newly seen remote entity out of the
+  view until its buffer can bracket the render instant, instead of drawing it frozen.**
+  Opt-in, default `false`; with it off this release is behaviourally identical to the last.
+
+  The render clock deliberately runs `TargetDelay` (100ms) behind the newest snapshot so
+  that two samples normally straddle the instant being drawn. An entity seen for the *first*
+  time has only one, and `SnapshotInterpolation.EvaluateAt` correctly holds it at that
+  sample rather than extrapolating backwards from nothing. So a new entity is drawn
+  motionless for as long as it takes the render clock to reach it, and then starts moving.
+
+  Measured live in the DOTS sample: **38.2%** of the frames in an entity's first 0.25s
+  rendered zero displacement, against **0.42%** for the same entities once established and
+  0.56% for a remote player. The hold itself measured 95-120ms, which is `TargetDelay` plus
+  a send interval, as predicted. Enemies show it constantly only because the sample's
+  scaffolding spawner churns mobs every ~4.2s; a persistent entity pays it once.
+
+  **Why opt-in rather than simply fixed.** Spawn-on-first-sight is a contract, not an
+  accident: nine tests in this repo encode it, and a view that renders health bars, selection
+  or aggro state may legitimately want an entity present the moment the server says it
+  exists. Deferring the *spawn* is a visible change of semantics for those consumers, and the
+  evidence for it comes from a sample scene whose churn rate is scaffolding rather than
+  content. The flag lets a view that renders position choose smoothness without imposing it
+  on a view that renders existence.
+
+  `HoldDeferBudget` (0.15s) bounds it. An entity sent once and never again never acquires a
+  second sample, so the hold condition cannot clear on its own; past the budget the entity is
+  rendered regardless. Without that bound the deferral would be a permanent disappearance in
+  exactly the case that looks most like a network fault.
+
+  `Evaluate` / `EvaluateAt` gained `out bool holding` overloads reporting whether a result
+  was interpolated or held. Existing signatures are untouched.
+
 ### Changed
 
 - **`RenderMotionProbe` now reports the observer's distance from the world origin on every
