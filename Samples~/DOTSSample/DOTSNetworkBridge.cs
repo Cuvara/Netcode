@@ -6,6 +6,7 @@ using Cuvara.Netcode.Auth;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Diagnostics;
+using Cuvara.Netcode.Interpolation;
 using Cuvara.Netcode.Prediction;
 using Cuvara.Netcode.Transport;
 using Cuvara.Netcode.View;
