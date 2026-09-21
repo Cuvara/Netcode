@@ -111,6 +111,34 @@ namespace Cuvara.Netcode.Interpolation
         /// </remarks>
         public int RingCapacity;
 
+        /// <summary>
+        /// Withhold a remote entity from the view until its buffer can bracket the render
+        /// instant, instead of rendering it frozen at its first sample. <b>Off by default.</b>
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The render clock runs <see cref="TargetDelay"/> behind, so a newly seen entity
+        /// holds at its single sample for that long before interpolation has two samples
+        /// spanning the render instant. It is drawn motionless and then visibly starts
+        /// moving. Measured on the DOTS sample against a live backend: <b>38.2% of the
+        /// frames in an entity's first 0.25s rendered zero displacement, against 0.42% once
+        /// established</b> (rpg-mmo-server BENCHMARK Part XIX §56).
+        /// </para>
+        /// <para>
+        /// With this on, the entity is not shown at all during that window and appears
+        /// already in motion, one render delay later. That trade is not free and not always
+        /// right: it delays the first sight of an entity by up to
+        /// <see cref="TargetDelay"/> plus an interval, which for a mob walking in from the
+        /// map edge is invisible and for a player appearing beside you in combat may not
+        /// be. Hence opt-in.
+        /// </para>
+        /// <para>
+        /// The local entity is never affected: it is predicted rather than interpolated and
+        /// has a position from the first frame.
+        /// </para>
+        /// </remarks>
+        public bool DeferUntilBracketed;
+
         /// <summary>The defaults every field above documents.</summary>
         public static InterpolationConfig Default => new InterpolationConfig
         {
@@ -122,7 +150,10 @@ namespace Cuvara.Netcode.Interpolation
             MaxInterval = 0.500,
             DefaultInterval = 1.0 / 15.0,
             IntervalSmoothing = 0.3,
-            RingCapacity = 8
+            RingCapacity = 8,
+            // Explicit rather than left to the zero value: this one changes WHEN an entity
+            // becomes visible, and a reader of Default should see that it is off.
+            DeferUntilBracketed = false
         };
 
         /// <summary>

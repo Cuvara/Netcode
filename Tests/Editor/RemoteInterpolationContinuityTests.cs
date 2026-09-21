@@ -194,10 +194,20 @@ namespace Cuvara.Netcode.Tests.Editor
 
             private void Record(double atMs, bool carriedASnapshot)
             {
+                // A remote entity is withheld from the view until its buffer can bracket
+                // the render instant — see WorldViewBinder.HoldDeferBudget. Before that
+                // there is no rendered position to record, and recording a placeholder
+                // would inject a discontinuity these tests exist to detect. Frames before
+                // the first appearance are simply not samples.
+                if (!_view.Positions.TryGetValue(RemoteId, out var pos))
+                {
+                    return;
+                }
+
                 _samples.Add(new Sample
                 {
                     TimeMs = atMs,
-                    X = _view.Positions[RemoteId][0],
+                    X = pos[0],
                     CarriedASnapshot = carriedASnapshot
                 });
             }
