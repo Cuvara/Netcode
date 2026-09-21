@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`RenderMotionProbe` now reports the observer's distance from the world origin on every
+  line.** A frozen-frame figure without it is not reproducible, and the reason is specific
+  rather than general.
+
+  The DOTS sample's server anchors enemy spawning to the **world origin** — a ring of radius
+  13 about (0,0) — while the area of interest is a radius of 50 about the **player**. An
+  observer beyond roughly 63 units therefore sees zero enemies, permanently and correctly,
+  with every counter on both sides clean. The probe then prints **no enemy rows at all**,
+  which reads as an instrument fault rather than as an empty AOI.
+
+  That cost a day (Cuvara/IndieRPGMMOAdventure#126, closed as not a defect): a client was
+  investigated for losing entities while it was faithfully rendering what was in interest,
+  215 units from the only populated region of the map. Player position is **persisted**, so
+  a device id replayed across sessions drifts out of that region and never returns —
+  `SpawnPoint = Vec2.Zero` applies only to a player the store has never seen.
+
+  Measured both sides of the threshold, same build, minutes apart: observer at 215.0 saw 0
+  enemies; a fresh device id at 5.9 saw all 6 immediately, with spawn counts climbing
+  7 → 13 → 19 → 25 as mobs were reaped and replaced.
+
+  So the measurement protocol for anything enemy-related is: **a fresh device id per run**,
+  which is the only way to get a known anchor, and this number logged beside the counts.
+
+
 ### Added
 
 - **Wire protocol version 2: field-level delta.** `EntitySnapshot.changed_fields` (wire

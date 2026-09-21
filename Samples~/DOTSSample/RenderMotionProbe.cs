@@ -220,6 +220,32 @@ namespace DOTSSample
             _frames = 0;
             _fpsAccum = 0f;
 
+            // The observer's own distance from the world origin, reported on every line.
+            //
+            // Not decoration. The sample's server anchors enemy spawning to the WORLD
+            // ORIGIN — a ring of radius 13 about (0,0) — while the area of interest is a
+            // radius of 50 about the PLAYER. An observer beyond roughly 63 units therefore
+            // sees zero enemies, permanently and correctly, with every counter on both
+            // sides clean. The probe then prints no enemy rows at all, which reads as an
+            // instrument fault rather than as an empty AOI.
+            //
+            // That cost a day: a client was investigated for losing entities while it was
+            // faithfully rendering what was in interest, 215 units from the only populated
+            // region of the map. Player position is persisted, so a device id replayed
+            // across sessions drifts out of that region and never returns — which is why a
+            // measurement run wants a fresh device id as well as this number.
+            //
+            // A frozen-frame figure without the observer's distance beside it is not
+            // reproducible.
+            float observerDist = -1f;
+            foreach (var kv in _tracks)
+            {
+                if (kv.Value.Class != "local-player") continue;
+                if (!_last.TryGetValue(kv.Key, out var lp)) continue;
+                observerDist = math.length(new float2(lp.x, lp.z));
+                break;
+            }
+
             foreach (var kv in _tracks)
             {
                 var t = kv.Value;
@@ -282,7 +308,8 @@ namespace DOTSSample
                     $"n={steps.Count,5} fps={fps,6:F1} " +
                     $"median={median:F5} p99={p99:F5} worst={worst:F5} " +
                     $"worst/median={ratio,6:F2} frozenFrames={frozenPct,5:F1}% " +
-                    $"(fresh={frozenFreshPct,5:F1}% n={fresh,5} | steady={frozenSteadyPct,5:F1}% n={steady,5})");
+                    $"(fresh={frozenFreshPct,5:F1}% n={fresh,5} | steady={frozenSteadyPct,5:F1}% n={steady,5}) " +
+                    $"observerDist={observerDist,6:F1}");
 
                 steps.Clear();
                 kv.Value.Frozen = 0;
