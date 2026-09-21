@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-21
+
 ### Added
 
 - **Entity counters on `WorldState`, and on the DOTS sample's health line** (#161):
