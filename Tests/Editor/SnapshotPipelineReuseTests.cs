@@ -157,23 +157,28 @@ namespace Cuvara.Netcode.Tests.Editor
         }.ToByteArray();
 
         [Test]
-        public void ProtobufWireCodec_ExposesExactlyOneParameterlessPublicConstructor()
+        public void ProtobufWireCodec_HasExactlyOneParameterlessConstructor()
         {
             // Guards the DI contract from outside Unity. `RegisterNetworking` registers this
-            // type with VContainer, which picks a constructor by reflection and takes the
-            // GREEDIEST one, then tries to resolve its parameters out of the container. A
-            // second public constructor therefore breaks RegisterNetworking at resolve time
-            // while every codec test here still passes — which is exactly what happened when
-            // the pool was first added as `ProtobufWireCodec(bool)`: 691/692 in CI, failing
-            // inside VContainer's ReflectionInjector, green in every pure-C# run. Hence
-            // CreatePooled() as a static factory rather than an overload.
+            // type with VContainer, whose TypeAnalyzer picks a constructor by reflection and
+            // takes the GREEDIEST one, then tries to resolve its parameters out of the
+            // container. Adding `ProtobufWireCodec(bool)` broke RegisterNetworking at
+            // resolve time while every codec test here stayed green: 691/692 in CI.
+            //
+            // NonPublic is in the mask deliberately, and it is the whole point of this
+            // assertion. The first attempt at a fix only made that constructor private,
+            // which looked sufficient and was not — VContainer reflects with NonPublic
+            // included, so the identical failure came back on the next run. A test checking
+            // only public constructors passed both times and proved nothing.
             var ctors = typeof(ProtobufWireCodec).GetConstructors(
-                BindingFlags.Public | BindingFlags.Instance);
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
             Assert.That(ctors.Length, Is.EqualTo(1),
-                "VContainer resolves this type by reflection; a second public constructor " +
-                "makes it try to inject that constructor's parameters");
+                "VContainer reflects over NON-PUBLIC constructors too and takes the " +
+                "greediest, so a second constructor of any accessibility makes it try to " +
+                "inject that constructor's parameters");
             Assert.That(ctors[0].GetParameters(), Is.Empty);
+            Assert.That(ctors[0].IsPublic, Is.True);
         }
 
         // ── WorldState's conversion buffers ──────────────────────────────────────

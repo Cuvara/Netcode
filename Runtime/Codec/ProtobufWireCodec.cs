@@ -29,7 +29,8 @@ namespace Cuvara.Netcode.Codec
     /// </remarks>
     public sealed class ProtobufWireCodec : IWireCodec
     {
-        private readonly bool _reuseDecodedSnapshot;
+        // Not readonly, and not a constructor parameter: see CreatePooled.
+        private bool _reuseDecodedSnapshot;
 
         private Msg.SnapshotMessage _pooledSnapshot;
         private List<Msg.EntitySnapshot> _entityPool;
@@ -40,16 +41,26 @@ namespace Cuvara.Netcode.Codec
         /// <see cref="DecodeBody"/>.
         /// </summary>
         /// <remarks>
-        /// <b>This must stay the only public constructor.</b> The type is registered with
-        /// VContainer as <c>builder.Register&lt;ProtobufWireCodec&gt;(Lifetime.Singleton)</c>,
-        /// which selects a constructor by reflection and takes the greediest one. A second
-        /// public constructor therefore makes the container try to resolve that
-        /// constructor's parameters out of the container — a <c>bool</c> it has no
-        /// registration for — and <c>RegisterNetworking</c> throws at resolve time. It
-        /// compiles, every codec test passes, and only the DI test catches it. The pooling
-        /// variant is <see cref="CreatePooled"/> for exactly this reason.
+        /// <b>This must stay the only constructor, public or not.</b> The type is
+        /// registered with VContainer as
+        /// <c>builder.Register&lt;ProtobufWireCodec&gt;(Lifetime.Singleton)</c>, and
+        /// VContainer's <c>TypeAnalyzer</c> selects a constructor by reflection, takes the
+        /// greediest one, and does so with <c>BindingFlags.NonPublic</c> included — so
+        /// making an extra constructor private does <b>not</b> hide it. Any second
+        /// constructor therefore makes the container try to resolve that constructor's
+        /// parameters, and <c>RegisterNetworking</c> throws
+        /// <c>"Failed to resolve ProtobufWireCodec : No such registration of type:
+        /// System.Boolean"</c> at resolve time. It compiles, every codec test passes, and
+        /// only the DI test catches it. That is why <see cref="CreatePooled"/> sets a field
+        /// on an already-constructed instance instead of taking a constructor argument, and
+        /// why <c>_reuseDecodedSnapshot</c> is not <c>readonly</c>.
+        /// <para>
+        /// Marking this one <c>[Inject]</c> would also fix it and is the wrong fix: it would
+        /// make the Codec assembly depend on VContainer, which is an optional dependency
+        /// here — the <c>no-vcontainer</c> install probe exists to keep it optional.
+        /// </para>
         /// </remarks>
-        public ProtobufWireCodec() : this(false)
+        public ProtobufWireCodec()
         {
         }
 
@@ -83,12 +94,8 @@ namespace Cuvara.Netcode.Codec
         /// buy nothing and cost a real aliasing hazard.
         /// </para>
         /// </remarks>
-        public static ProtobufWireCodec CreatePooled() => new ProtobufWireCodec(true);
-
-        private ProtobufWireCodec(bool reuseDecodedSnapshot)
-        {
-            _reuseDecodedSnapshot = reuseDecodedSnapshot;
-        }
+        public static ProtobufWireCodec CreatePooled() =>
+            new ProtobufWireCodec { _reuseDecodedSnapshot = true };
 
         public WireEncoding Encoding => WireEncoding.Protobuf;
 

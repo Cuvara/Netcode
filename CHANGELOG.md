@@ -85,14 +85,21 @@
   which is only sound where the frame is consumed before the next one arrives, so it is
   opted into rather than inherited.
 
-  A static factory rather than a constructor overload, and not for style. `RegisterNetworking`
-  registers the type as `builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and
-  VContainer selects a constructor by reflection, takes the greediest one, and resolves its
-  parameters out of the container. Adding a `ProtobufWireCodec(bool)` overload therefore
-  broke `RegisterNetworking` at resolve time inside VContainer's `ReflectionInjector` — it
-  compiled, and 691 of 692 EditMode tests still passed. `ProtobufWireCodec` must keep
-  exactly one public constructor and it must be parameterless; a reflection test now
-  asserts that outside Unity, where the pure-C# suites can catch it.
+  A static factory that sets a field, rather than a constructor overload, and not for style.
+  `RegisterNetworking` registers the type as
+  `builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer's `TypeAnalyzer`
+  selects a constructor by reflection, takes the greediest one, and resolves its parameters
+  out of the container. Adding a `ProtobufWireCodec(bool)` overload therefore broke
+  `RegisterNetworking` at resolve time with *"Failed to resolve ProtobufWireCodec : No such
+  registration of type: System.Boolean"* — it compiled, and 691 of 692 EditMode tests still
+  passed.
+
+  **Making that constructor private does not help**, which cost a second red run: VContainer
+  reflects with `BindingFlags.NonPublic` included, so the private overload was still
+  selected and the identical failure came back. `ProtobufWireCodec` must therefore have
+  exactly **one constructor of any accessibility**, and it must be parameterless — hence a
+  settable private field rather than a constructor argument. A reflection test asserts this
+  outside Unity, with `NonPublic` in the mask, so the pure-C# suites catch it.
 
   `WireConnection` builds its own inbound codec even when the outbound codec is already
   Protobuf, instead of aliasing it as before. That is a correctness fix riding along: the

@@ -658,14 +658,26 @@ from it. `new ProtobufWireCodec()` keeps the old behaviour, and that is the one 
 use anywhere two decoded snapshots are held at once — a test comparing a keyframe
 against a delta, for instance.
 
-It is a static factory rather than a constructor overload, and that is load-bearing:
-`RegisterNetworking` registers the type as
-`builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer picks a
-constructor by reflection, takes the **greediest** one, and resolves its parameters
-out of the container. A second public constructor therefore breaks
-`RegisterNetworking` at resolve time — it compiles, and every codec test still
-passes. **`ProtobufWireCodec` must keep exactly one public constructor, and it must
-be parameterless.** `SnapshotPipelineReuseTests` asserts that by reflection.
+It is a static factory that sets a field, rather than a constructor overload, and
+that is load-bearing. `RegisterNetworking` registers the type as
+`builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer's
+`TypeAnalyzer` picks a constructor by reflection, takes the **greediest** one, and
+resolves its parameters out of the container. A `ProtobufWireCodec(bool)` overload
+therefore breaks `RegisterNetworking` at resolve time with
+
+```
+VContainerException : Failed to resolve Cuvara.Netcode.Codec.ProtobufWireCodec
+  : No such registration of type: System.Boolean
+```
+
+**Making that constructor `private` does not help** — VContainer reflects with
+`BindingFlags.NonPublic` included, so a private overload is still selected, and the
+identical failure comes back. So: **`ProtobufWireCodec` must have exactly one
+constructor, of any accessibility, and it must be parameterless.**
+`SnapshotPipelineReuseTests` asserts that by reflection, with `NonPublic` in the
+mask. Marking the constructor `[Inject]` would also fix it and is the wrong fix: it
+would make the Codec assembly depend on VContainer, which is optional here — the
+`no-vcontainer` install probe exists to keep it that way.
 
 Note that `WireConnection` builds its own inbound Protobuf codec even when the
 outbound codec is already Protobuf, rather than aliasing it. The outbound codec is
