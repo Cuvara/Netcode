@@ -33,6 +33,14 @@
   rendered regardless. Without that bound the deferral would be a permanent disappearance in
   exactly the case that looks most like a network fault.
 
+  **Measured with the flag on, one binary and both arms** (the sample selects the arm from
+  `-cuvara-defer-spawn` at runtime, because a frozen-frame percentage only compares against
+  the same scene, spawner and observer position): enemy `fresh` frozen frames went from
+  **53.0-56.7%** on the control to **0.0%** on every treatment window, with `steady` at 0.0%
+  on both and the `worst/median` spread unchanged. The fresh *sample count* stayed in the same
+  700-1600 band on both arms — the check that matters, since a deferral that had merely
+  stopped classifying frames as fresh would also read 0.0% over an empty bucket.
+
   `Evaluate` / `EvaluateAt` gained `out bool holding` overloads reporting whether a result
   was interpolated or held. Existing signatures are untouched.
 
