@@ -546,7 +546,15 @@ namespace DOTSSample
             // which is exactly how a -73% figure for field delta turned out to be a
             // cross-build artefact. One binary, one flag, two runs.
             var interpolation = InterpolationConfig.Default;
-            interpolation.DeferUntilBracketed = HasArg("-cuvara-defer-spawn");
+            // ON by default in the SAMPLE, while the library default stays off. The two
+            // defaults answer different questions. The library serves views that may render
+            // existence rather than motion -- a health bar or a selection ring wants the
+            // entity the moment the server says it exists -- so it must not change what
+            // Spawn means underneath them. This sample renders position and nothing else,
+            // and here the deferral measured 53-57% of an entity's first-quarter-second
+            // frames frozen down to 0.0%. Opt out with -cuvara-no-defer-spawn to see the
+            // artefact, which is also how the control arm of that measurement was taken.
+            interpolation.DeferUntilBracketed = !HasArg("-cuvara-no-defer-spawn");
             _binder = new WorldViewBinder(_view, _predictor, null, interpolation);
             Debug.Log($"[DOTSNet] deferUntilBracketed={interpolation.DeferUntilBracketed}");
 

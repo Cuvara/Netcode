@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The DOTS sample now defers unbracketed spawns by default**, opting out with
+  `-cuvara-no-defer-spawn` rather than opting in with `-cuvara-defer-spawn`. The library
+  default is unchanged and still `false`.
+
+  The two defaults answer different questions. `InterpolationConfig` serves views that may
+  render *existence* — a health bar, a selection ring, an aggro marker wants the entity the
+  moment the server says it exists — so the library must not change what `Spawn` means
+  underneath them. This sample renders position and nothing else, and there the deferral took
+  an entity's first-quarter-second frozen frames from **53-57% to 0.0%**. A sample that
+  demonstrates the netcode should demonstrate it at its best and let a caller ask for the
+  artefact, not the other way round.
+
+  The opt-out flag is also the control arm: the measurement above was taken from one binary
+  with the flag selecting the arm at runtime.
+
 ### Added
 
 - **`InterpolationConfig.DeferUntilBracketed` — hold a newly seen remote entity out of the
