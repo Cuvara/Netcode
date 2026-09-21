@@ -1,0 +1,55 @@
+<!--
+  Headless test project for the parts of the netcode package that are plain C#.
+
+  Why this exists: every await in TcpTransport and WireConnection goes through
+  UniTask, which needs UnityEngine, so the whole read/write path used to be
+  reachable only from inside the Editor or a built player. That is why a
+  throughput ceiling in the read loop (Cuvara/IndieRPGMMOAdventure#50) was never
+  measured by anything automated — it was argued about instead.
+
+  What is compiled here is the SAME source Unity compiles. The test files are the
+  same files the EditMode suite runs; they are listed here, not copied. Adding a
+  Unity dependency to one of them breaks this project, which is the point.
+
+  Tests~/ ends in a tilde, so Unity does not import this directory and it needs no
+  .meta files.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Cuvara.Netcode.Tests.Headless</RootNamespace>
+    <AssemblyName>Cuvara.Netcode.Tests.Headless</AssemblyName>
+
+    <!-- Nothing is picked up implicitly: every file here is named on purpose, so a
+         new Unity-only file cannot wander into a headless build and fail it. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS1591</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Package sources under test. Unity-free by construction: if one of these ever
+       gains a `using UnityEngine`, this project stops compiling, which is the
+       earliest and cheapest place for that to be noticed. -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Transport/FrameBuffer.cs" />
+    <Compile Include="../../Runtime/Transport/WireFraming.cs" />
+    <Compile Include="../../Runtime/Transport/TransportException.cs" />
+  </ItemGroup>
+
+  <!-- The Editor test files themselves, shared rather than duplicated. -->
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/FrameBufferTests.cs" />
+    <Compile Include="../../Tests/Editor/TransportReadPumpTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+</Project>
