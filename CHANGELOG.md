@@ -75,6 +75,66 @@
   rule the Unity job already applies, for the same reason: that job ran green over zero tests
   for this repository's entire history.
 
+- **Snapshot receive path allocates roughly half of what it did** (Cuvara/IndieRPGMMOAdventure#61).
+  Decoding one snapshot built four copies of the entity list; two of them are now reused.
+
+  `ProtobufWireCodec` gained `new ProtobufWireCodec(reuseDecodedSnapshot: true)`, which
+  pools the decoded `SnapshotMessage` and its entity and event objects across calls, and
+  `WireConnection` now builds its inbound Protobuf decoder that way. **The default
+  constructor is unchanged and still returns a fresh message per decode** — the pool
+  invalidates the previous decode, which is only sound where the frame is consumed before
+  the next one arrives, so it is opted into rather than inherited.
+
+  `WireConnection` builds its own inbound codec even when the outbound codec is already
+  Protobuf, instead of aliasing it as before. That is a correctness fix riding along: the
+  outbound codec is a DI **singleton** shared by the gateway and game-session connections,
+  so a decode buffer on it would be shared between two read loops.
+
+  `WorldState.Apply` reuses its `EntitySnapshotData[]` and `string[]` conversion buffers,
+  but **only when the new length matches the previous one exactly**. The comment that used
+  to explain why the arrays were allocated fresh was right and still is: `SnapshotData`
+  carries an array and no count and `SnapshotMerger` iterates all of it, so a longer buffer
+  would replay its tail — entities resurrected at last tick's positions, after a despawn.
+  Clearing the tail is worse, not better: a zeroed `EntitySnapshotData` has a null id and
+  the merger would key its dictionary on it. So the win is conditional on the entity count
+  repeating, which a settled AOI does and a churning one does not.
+
+  `EncodeBody` wraps the encoded payload with `UnsafeByteOperations.UnsafeWrap` instead of
+  copying it with `ByteString.CopyFrom`. The buffer is allocated one line above, never
+  published and never written again, so the aliasing that call normally warns about cannot
+  arise.
+
+  Measured with `GC.GetAllocatedBytesForCurrentThread()` around 2,000 decode→resolve→apply
+  iterations, 50 entities per delta, Release, same machine, `origin/develop` and this branch
+  built into separate output directories:
+
+  | path | before | after | |
+  |---|---:|---:|---:|
+  | full pipeline, steady entity count | 18,208 B | 10,512 B | −42.3% |
+  | full pipeline, varying entity count | 10,025 B | 7,353 B | −26.7% |
+  | `DecodeBody` alone | 12,560 B | 7,688 B | −38.8% |
+  | `WorldState.Apply` alone, steady count | 2,824 B | 0 B | −100% |
+  | `EncodeBody(InputMessage)`, per input frame | 400 B | 360 B | −10.0% |
+
+  Two allocations named in the issue were left alone deliberately. The resolver's
+  `List<ResolvedEntity>` is published to `SnapshotReceived` subscribers outside this
+  package, and recycling a list handed to an unknown consumer is not a change that can be
+  made from inside it. `TcpTransport`'s per-frame `new byte[length]` is poolable in
+  principle — neither codec retains it, the Protobuf parser copies into its own
+  `ByteString`s and the JSON one goes through `Utf8.GetString` — but `ITransport` returns a
+  `byte[]` and no length, so pooling it means changing that signature and every
+  implementation and caller. That is a wider change than this one, and it is the smaller
+  win of the two.
+
+  A third claim in the issue was already false: `SnapshotResolver`'s `pending` list is
+  lazily allocated and has been since before the issue was filed. It is not allocated when
+  empty.
+
+  `SnapshotPipelineReuseTests` covers the reuse from the only side that can fail silently —
+  content, never allocation counts. Each test decodes or applies at least twice, with a
+  smaller and differently valued second frame, because a single-shot test passes against a
+  completely broken pool.
+
 ## [0.42.0] - 2026-09-21
 
 ### Added
@@ -188,7 +248,6 @@
   So the measurement protocol for anything enemy-related is: **a fresh device id per run**,
   which is the only way to get a known anchor, and this number logged beside the counts.
 
-
 ### Added
 
 - **Wire protocol version 2: field-level delta.** `EntitySnapshot.changed_fields` (wire
@@ -224,7 +283,6 @@
   the way through makes the first arm fail with `Hp ... Expected: 100, But was: 0` — the
   exact collapse-to-defaults this pair exists to catch.
 
-
 ### Fixed
 
 - **`ActionSeq` was silently landing in the field-delta mask instead of the retrigger
@@ -252,7 +310,6 @@
   `changedFields: 0u` is deliberate — `ResolvedEntity` does not carry the mask yet and `0`
   is specified to mean "every field present". Wiring the real mask through is #158.
 
-
 ### Fixed
 - **`Runtime/Protocol/Generated/Wire.cs` had drifted from the backend: it was missing
   `EntitySnapshot.changed_fields` (proto field 13, `uint32`).** The field-level delta
@@ -273,7 +330,6 @@
   Note this only makes the *binding* current. `WireProtocolVersion.Current` is still `1`
   while the backend announces `2`, and nothing in this package reads `ChangedFields` yet —
   both tracked in #158 and deliberately out of scope here.
-
 
 ### Added
 - **Sample: Action Latch Probe.** No server, no network. One synthetic attacker written at
@@ -741,7 +797,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Minimal and High stripping **predates these two types and does not cover them**; the file now
   says so, so nobody reads the old result as covering Ed25519.
 
-
 - **`Runtime/Protocol/Generated/Wire.cs` resynced to the backend's `develop`.** Byte-for-byte,
   which is what CI's "Generated Wire.cs matches the backend" job compares — md5
   `4f4fa16416c6bd80a6e8d730242df754`. Two fields arrive with it, both ADR-25 server identity:
@@ -898,8 +953,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Documentation~/NETCODE.md` gained **Transport security: three hops, three different
   answers** — Nakama, gateway and game server are protected by three different mechanisms,
   configured independently, and turning one on says nothing about the other two.
-
-
 
 ### Added
 
@@ -1247,7 +1300,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenUPM scope the probes already use is now documented in the README too, which had
   listed only `com.cysharp` and `jp.hadashikick`.
 
-
 - **CI: pinned `game-ci/unity-test-runner` by SHA, restoring every Unity-invoking job.**
   On 2026-09-09 `Unity Tests`, `Compile samples` and two `Install probe` rows went red on
   UNCHANGED code — develop and a whitespace-only control branch alike — with
@@ -1265,7 +1317,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   third-party action is frozen, as protoc, the Unity version and every package version
   already are. Adopting the new wrapper needs the CLI to find a git repository at its
   working directory, i.e. a deliberate change to the checkout layout, not a tag bump.
-
 
 - **The golden-vector runner now implements the `simultaneous_kill` combat kind.** Three
   vectors (`simkill_both_die_hp1`, `simkill_both_die_asymmetric`,
@@ -1295,7 +1346,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derive one is a presentation decision and belongs where the context is. In the view
   binder both are SNAPPED, never interpolated — action more strongly than facing, since a
   blend between two enum values is not a state the server ever occupied.
-
 
 - **Wire protocol version negotiation (`protocol_version`), client side.** The
   package sniffed the *encoding* from byte 0 and called that settled — `EncodingSniffer`
@@ -1584,7 +1634,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed; a refusal that appears after this change is the guard doing what it was written to do
   on evidence it should never have accepted.
 
-
 ## [0.35.0] - 2026-09-08
 
 > **The defect: a constant that was correct, used for something it does not describe.**
@@ -1717,7 +1766,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function**. What the run does *not* establish is the rate in normal operation: one deliberately
   induced occurrence says the mechanism works, not how often a real client meets it.
 
-
 - `Samples~/ClockSyncProbe` gains a send-cadence panel: a cadence slider, **a nominal-versus-achieved
   rate readout**, a live phase histogram over the same eight divisions
   `AckLatencyEstimator.SweepBuckets` counts, and the sweep verdict. The achieved rate is read from
@@ -1762,7 +1810,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client, which is the very arm where the ladder is still readable. Its tolerance is a quarter of
   the expected gap — wide enough that a wobbling estimate does not make this the gate people
   disable, narrow enough that a doubled or halved interval cannot pass.
-
 
 - **`LocalMovePredictor.Adoptions` — the third reconcile outcome now has a name and a
   counter.** A reconcile was documented and instrumented as having two outcomes: answered
@@ -1831,7 +1878,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string reads the base exception's message without its type name. Both are the stricter verdict;
   neither is a threshold.
 
-
 - **The acknowledgement floor that steers the lead is now bias-corrected:
   `quantile(0.10) − 0.10 × measured_slope`.** `AckLatencyEstimator` fits its observation ring as a
   ladder and subtracts the tenth percentile's own construction bias, using the slope this run
@@ -1858,7 +1904,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purpose — changing what a certification harness measures as a side effect of a cadence fix is not
   something to do quietly — and each now carries a comment saying so and pointing at `InputCadence`,
   so the disagreement with the default does not read as an oversight to be tidied away.
-
 
 - **The `replayed steps 0` remark is corrected rather than removed**, in both the report and
   `PREDICTION.md`. It claimed zero replayed steps was "the HEALTHY reading" outright; it is
@@ -1998,7 +2043,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimator's own measurement error — and **the test's own self-check caught that**, which is why
   the claim is now split into which rate is in use and whether the floor used it.
 
-
 - **The client no longer sends input at the snapshot rate, so the `uplink + snapshot age` term is
   measurable at all.** `AckLatencyEstimator` recovers that constant by timing an input to the
   first snapshot whose `ack_tick` reaches it — `uplink + wait-for-the-next-snapshot + age`, where
@@ -2097,7 +2141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a further 2 Hz. It now passes the constant directly — **the value is unchanged**, only the
   coupling is gone.
 
-
 - **The five remaining script-bearing samples gain an `.asmdef`, closing the double-import
   compile error named as a known list in 0.34.0.** `ContentPipeline`, `E2ECertification`,
   `InterpolationProbe`, `KcpProbe` and `WorldView` each get one, modelled on `ClockSyncProbe`.
@@ -2136,7 +2179,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everything down at once and points at neither copy.
 
 ### Limitations
-
 
 - **`AckLatencyEstimator._ackIntervalMin` reads the snapshot cadence about 25% low, measured; not
   fixed, and the reason is itself a measurement.** This defect was in no changelog — it existed
@@ -2467,7 +2509,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Open terms
 
-
 The two counter terms named here have been fixed; what remains is the one term below. Named
 rather than left to be rediscovered. **That term, `ConservativeFloorTicks`, IS closed in this
 release** — not on its own terms but as a consequence of the floor-statistic change above; its
@@ -2530,7 +2571,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
 
 ### Notes
 
-
 - **The recommendation was simulated against the real estimator before it was proposed, and the
   simulation refuted two claims that would otherwise have shipped.** The first — that 14 Hz would
   be marginal at the minimum sample count — was wrong, and finding out why surfaced the quantile
@@ -2590,7 +2630,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   = 15` base ticks = **250 ms**, and the 264 ms case it claims to cover is already 14 ms over. This
   is in the server repo, predates this change, and is logged here so it is on a known list rather
   than a future surprise.
-
 
 - **A limitation with no consequence for the action is not a limitation — and the caveats carried
   through this work were audited against that rather than the principle merely being stated.**
@@ -2916,7 +2955,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   `[TestCase(1.103)]` cases are kept and relabelled as synthetic, because the band still has to
   admit such a ratio.
 
-
 ### Added
 
 - **`AckLatencyEstimator` — the pipeline constant the staleness envelope absorbs.** The client
@@ -3047,7 +3085,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
 - **`InputToVisibleMovement_WithAndWithoutPrediction` is no longer `[Ignore]`d.** It was ignored
   on this one named open term. Every assertion stands where it was — the 1.5-step correction
   budget and the budget of 2 corrections above one step included; neither was widened.
-
 
 - **The measurement refuses a run it cannot measure, instead of reporting its numbers.** A run whose
   client does not observe the snapshot stream at the rate the server sends it has not measured
@@ -3311,7 +3348,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   markers the multi-client harness reads.
 - `NetworkClient.Generation` — read-only operation generation for diagnostics overlays (the
   demo shows it). Pinned by `NetworkClientGenerationTests`.
-
 
 ## [0.31.1] - 2026-09-07
 
@@ -3599,7 +3635,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   `verboseLogging` attack-counter diagnostics still cover the path when it is under
   investigation. Measured after: **~30 lines per minute**, all of them health lines.
 
-
 ## [0.24.0] - 2026-08-26
 
 ### Fixed
@@ -3629,7 +3664,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   (UXML/USS), per the sample-scene contract; readouts are the same counters
   `[DOTSNet/health]` prints, so numbers here compare directly with a live client.
 
-
 ### Added
 
 - **`WireConnectionDispatchTests` — the transport layer's first tests (#50).** Five cases
@@ -3654,7 +3688,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   #50 stays open for that half.
 
 - The test assembly now references `UniTask`, which the fake transport needs.
-
 
 ## [0.23.0] - 2026-08-26
 
@@ -3705,7 +3738,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   are what distinguished "the estimator is not being fed" from "the estimator is refusing what
   it is fed", which was the whole of the investigation above.
 
-
 ## [0.22.0] - 2026-08-26
 
 ### Fixed
@@ -3753,7 +3785,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   on the fit is closer to load-bearing than it looks**: one ordinary development machine eats
   8 % of it.
 
-
 ## [0.21.0] - 2026-08-25
 
 ### Changed (diagnostics)
@@ -3764,7 +3795,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   (`System.Diagnostics.Stopwatch`, which is what the netcode itself reads) settled it in one
   run: `clockRatio=1.0000` over five seconds against `framesRx=13.8/s` from a server proven to
   send 15.000/s. The seconds are real and the frames are genuinely missing — see #49.
-
 
 ### Changed (sample)
 
@@ -3787,7 +3817,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
   is the shape that hides a real change — see #48, where a token expiring at T+60 s was
   invisible inside exactly that noise. Per-poll response and body logs move behind
   `verboseLogging`. The on-screen error panels are untouched.
-
 
 ## [0.20.0] - 2026-08-25
 
@@ -3837,7 +3866,6 @@ entry is kept in place, with its arithmetic, because the shape it demonstrates o
     fixed, extended or reused: improving it would destroy the only thing it is for.
   - UI is UXML and USS, like every scene in this package — no IMGUI and no uGUI canvas —
     and every asset in the sample carries its committed `.meta`.
-
 
 ### Added — the snapshot's age is measured, and it steers the prediction clock
 
@@ -6556,7 +6584,6 @@ position, and the DOTS sample stops labelling two entities `★ YOU` after a rej
   the *live* `IsLocal` on every frame, which is why an entity could render a stale star in
   a colour that correctly said "remote". The cache now stores the locality its text was
   built from and rebuilds when the two disagree.
-
 
 - **The DOTS sample's two RTT readouts disagreed in the same frame — the top-right one
   had been frozen since the first frame of the session.** Observed live at `996ms` in the
