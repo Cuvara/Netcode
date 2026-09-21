@@ -36,6 +36,11 @@ namespace Cuvara.Netcode.World
 
         private readonly SnapshotMerger _merger = new SnapshotMerger();
 
+        // Last snapshot's conversion buffers, reused only on an EXACT length match. See
+        // Apply for why "exact" rather than "at least".
+        private EntitySnapshotData[] _entityBuffer;
+        private string[] _removedBuffer;
+
         /// <summary>Server tick of the newest snapshot merged. Never moves backwards.</summary>
         public long Tick => (long)_merger.Tick;
 
@@ -121,10 +126,29 @@ namespace Cuvara.Netcode.World
         /// Merge one resolved snapshot into world state.
         /// </summary>
         /// <remarks>
-        /// Allocates one array per snapshot rather than reusing a buffer:
-        /// <see cref="SnapshotData"/> stores the array it is handed and the merger
-        /// iterates all of it, so a longer shared buffer would replay stale entries.
-        /// At the default 15 Hz this is a handful of short-lived arrays per second.
+        /// <para>
+        /// The conversion buffers are reused across snapshots, but <b>only when the new
+        /// length matches the old one exactly</b>. That restriction is the whole of the
+        /// original objection to reuse and it still stands: <see cref="SnapshotData"/>
+        /// carries an array and no count, and the merger iterates every element of it, so
+        /// handing it a buffer longer than the snapshot would replay the tail — real
+        /// entities, at last tick's positions, resurrected after a despawn. Growing a
+        /// buffer and clearing the tail is no better: a zeroed
+        /// <see cref="EntitySnapshotData"/> has a null id and the merger would key its
+        /// dictionary on it.
+        /// </para>
+        /// <para>
+        /// So the win is conditional on the entity count repeating, which on a settled AOI
+        /// it usually does and on a churning one it does not. When it does not, this costs
+        /// one extra reference store over always allocating.
+        /// </para>
+        /// <para>
+        /// The buffers never escape: the merger copies each struct into its own dictionary
+        /// inside <c>Apply</c> and retains no reference to the array, and nothing else in
+        /// this class hands them out. That is what makes reuse safe here and not in
+        /// <c>SnapshotResolver</c>, whose list is published to <c>SnapshotReceived</c>
+        /// subscribers this package does not control.
+        /// </para>
         /// </remarks>
         public void Apply(in ResolvedSnapshot snapshot)
         {
@@ -136,7 +160,16 @@ namespace Cuvara.Netcode.World
             }
             else
             {
-                converted = new EntitySnapshotData[entities.Count];
+                if (_entityBuffer != null && _entityBuffer.Length == entities.Count)
+                {
+                    converted = _entityBuffer;
+                }
+                else
+                {
+                    converted = new EntitySnapshotData[entities.Count];
+                    _entityBuffer = converted;
+                }
+
                 for (var i = 0; i < entities.Count; i++)
                 {
                     var e = entities[i];
@@ -182,7 +215,16 @@ namespace Cuvara.Netcode.World
             var removals = snapshot.Removed;
             if (removals != null && removals.Count > 0)
             {
-                removed = new string[removals.Count];
+                if (_removedBuffer != null && _removedBuffer.Length == removals.Count)
+                {
+                    removed = _removedBuffer;
+                }
+                else
+                {
+                    removed = new string[removals.Count];
+                    _removedBuffer = removed;
+                }
+
                 for (var i = 0; i < removals.Count; i++)
                 {
                     removed[i] = removals[i];

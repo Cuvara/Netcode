@@ -639,6 +639,83 @@ is `Shared.GameLogic.Systems.SnapshotMerger`'s job — the same code the server 
 diffed against. A second copy in the client is the divergence ADR-10 exists to
 prevent.
 
+### Buffer reuse on the receive path
+
+Decoding one snapshot used to build four copies of the entity list: the Protobuf
+objects the parser produces, the hand-written `Msg.EntitySnapshot` objects the
+codec converts them into, the resolver's `List<ResolvedEntity>`, and
+`WorldState`'s `EntitySnapshotData[]`. Two of those four are now reused
+(Cuvara/IndieRPGMMOAdventure#61), which is worth knowing about because both come
+with a contract.
+
+**`ProtobufWireCodec` can pool the decoded snapshot, and does not by default.**
+`ProtobufWireCodec.CreatePooled()` makes every snapshot decode return the *same*
+`SnapshotMessage` instance, refilled — so the previous decode's result is
+invalidated by the next one. `WireConnection` builds its inbound decoder that way,
+because its read loop raises `FrameReceived` synchronously and the only snapshot
+consumer, `GameSessionClient.OnFrame`, resolves the message and retains nothing
+from it. `new ProtobufWireCodec()` keeps the old behaviour, and that is the one to
+use anywhere two decoded snapshots are held at once — a test comparing a keyframe
+against a delta, for instance.
+
+It is a static factory that sets a field, rather than a constructor overload, and
+that is load-bearing. `RegisterNetworking` registers the type as
+`builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer's
+`TypeAnalyzer` picks a constructor by reflection, takes the **greediest** one, and
+resolves its parameters out of the container. A `ProtobufWireCodec(bool)` overload
+therefore breaks `RegisterNetworking` at resolve time with
+
+```
+VContainerException : Failed to resolve Cuvara.Netcode.Codec.ProtobufWireCodec
+  : No such registration of type: System.Boolean
+```
+
+**Making that constructor `private` does not help** — VContainer reflects with
+`BindingFlags.NonPublic` included, so a private overload is still selected, and the
+identical failure comes back. So: **`ProtobufWireCodec` must have exactly one
+constructor, of any accessibility, and it must be parameterless.**
+`SnapshotPipelineReuseTests` asserts that by reflection, with `NonPublic` in the
+mask. Marking the constructor `[Inject]` would also fix it and is the wrong fix: it
+would make the Codec assembly depend on VContainer, which is optional here — the
+`no-vcontainer` install probe exists to keep it that way.
+
+Note that `WireConnection` builds its own inbound Protobuf codec even when the
+outbound codec is already Protobuf, rather than aliasing it. The outbound codec is
+registered as a DI **singleton** and is shared by the gateway and game-session
+connections, so a decode buffer living on it would be shared between two read
+loops.
+
+**`WorldState` reuses its conversion buffers only on an exact length match.**
+`SnapshotData` carries an array and no count, and `SnapshotMerger` iterates every
+element, so a buffer longer than the snapshot would replay its tail — real
+entities, at last tick's positions, resurrected after a despawn. Clearing the tail
+is no better, because a zeroed `EntitySnapshotData` has a null id and the merger
+would key its dictionary on it. So the reuse hits when the entity count repeats
+and not otherwise, which on a settled AOI is most ticks and on a churning one is
+few. The buffers never escape the class.
+
+Neither the resolver's entity list nor the transport's frame buffer is pooled.
+`ResolvedSnapshot` is published to `SnapshotReceived` subscribers this package
+does not control, and recycling a list handed to an unknown consumer is not a
+change that can be made from inside the package. The transport's per-frame
+`byte[]` (now `FrameBuffer.TryTakeFrame`) is poolable in principle — neither codec
+retains it — but `ITransport.ReadFrameAsync` returns a `byte[]` and no length, so
+pooling it means changing that signature and every implementation and caller.
+
+Measured on the decode→resolve→apply path, 50 entities per delta, allocations per
+snapshot: **18,208 B → 10,512 B** when the entity count is steady, and
+**10,025 B → 7,353 B** when it varies. `SnapshotPipelineReuseTests` guards the
+content, not the byte counts.
+
+Those tests are pure C# but they are **not** in `Tests~/Headless`, and cannot be
+until that project can resolve `Shared.GameLogic`. `WorldState`, `ResolvedEntity`
+and `Msg.EntitySnapshot` all name `Shared.GameLogic` types, and that assembly
+arrives as a UPM **git** dependency Unity resolves into `PackageCache` — there is
+nothing for `dotnet restore` to fetch. Adding them to the headless project fails
+to compile with `CS0246: The type or namespace name 'Shared' could not be found`.
+They run in the Editor suite, and in the scratch project below, which reaches the
+`PackageCache` copy.
+
 ## Remote entity interpolation
 
 Remote entities are not drawn where the newest snapshot put them. They are drawn where

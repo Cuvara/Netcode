@@ -98,9 +98,14 @@ namespace Cuvara.Netcode.Connection
                 ? outboundCodec
                 : new JsonWireCodec();
 
-            _protobufInbound = outboundCodec.Encoding == WireEncoding.Protobuf
-                ? outboundCodec
-                : new ProtobufWireCodec();
+            // Its own instance even when the outbound codec is already Protobuf, rather
+            // than aliasing it. Two reasons, and the first is a correctness one: the
+            // outbound codec is registered as a DI SINGLETON and is therefore shared by the
+            // gateway connection and the game-session connection, so a decode buffer living
+            // on it would be shared between two connections' read loops. The second is that
+            // the reuse below is only sound per connection, where frames are decoded and
+            // consumed one at a time on one read loop.
+            _protobufInbound = ProtobufWireCodec.CreatePooled();
 
             _lastPongMono = MonoMs();
         }
