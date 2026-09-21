@@ -67,6 +67,53 @@ namespace Cuvara.Netcode.World
         /// <summary>Number of entities currently visible.</summary>
         public int Count => _merger.Count;
 
+        /// <summary>
+        /// Entities carried by the most recently applied snapshot — <b>not</b> the number
+        /// currently visible, which is <see cref="Count"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Exists because every other client-side counter measures <i>frames</i>. A snapshot
+        /// carrying one entity and a snapshot carrying eight are otherwise indistinguishable:
+        /// arrival rate, frame counts, resyncs, rejects and drops all read identically, so a
+        /// client rendering one of eight replicated entities produces a perfectly healthy
+        /// health line (#161).
+        /// </para>
+        /// <para>
+        /// That cost a day on Cuvara/IndieRPGMMOAdventure#126, where "the wire is delivering
+        /// nine" felt like an observation and was an <b>inference</b> — nothing measured it,
+        /// and the investigation went down the client stack before the answer turned out to
+        /// be positional and upstream of all of it.
+        /// </para>
+        /// <para>
+        /// On a DELTA this is the number of entities that changed, which is normally far
+        /// below <see cref="Count"/> and is not a fault. Read it against
+        /// <see cref="LastAppliedWasKeyframe"/>: on a keyframe the two should agree.
+        /// </para>
+        /// </remarks>
+        public int LastAppliedEntityCount { get; private set; }
+
+        /// <summary>Despawns carried by the most recently applied snapshot.</summary>
+        public int LastAppliedRemovedCount { get; private set; }
+
+        /// <summary>
+        /// True when the most recently applied snapshot was a keyframe, which is the only
+        /// case in which <see cref="LastAppliedEntityCount"/> is comparable to
+        /// <see cref="Count"/>.
+        /// </summary>
+        public bool LastAppliedWasKeyframe { get; private set; }
+
+        /// <summary>
+        /// Total entity records merged since this world was created, across all snapshots.
+        /// </summary>
+        /// <remarks>
+        /// A total rather than only a rate, for the reason the health line already states
+        /// about frames: a per-window rate is a difference of two counters over a measured
+        /// interval and all three can be wrong, whereas a total divided by elapsed time
+        /// cannot. When the two disagree, the bookkeeping is the suspect.
+        /// </remarks>
+        public long EntitiesApplied { get; private set; }
+
         /// <summary>Look up one reconstructed entity.</summary>
         public bool TryGet(string id, out EntitySnapshotData entity) => _merger.TryGet(id, out entity);
 
@@ -127,6 +174,10 @@ namespace Cuvara.Netcode.World
                 }
             }
 
+            LastAppliedEntityCount = converted.Length;
+            LastAppliedWasKeyframe = snapshot.Full;
+            EntitiesApplied += converted.Length;
+
             string[] removed = null;
             var removals = snapshot.Removed;
             if (removals != null && removals.Count > 0)
@@ -137,6 +188,8 @@ namespace Cuvara.Netcode.World
                     removed[i] = removals[i];
                 }
             }
+
+            LastAppliedRemovedCount = removed?.Length ?? 0;
 
             _merger.Apply(new SnapshotData(
                 (ulong)snapshot.Tick,

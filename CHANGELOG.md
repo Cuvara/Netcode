@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Entity counters on `WorldState`, and on the DOTS sample's health line** (#161):
+  `LastAppliedEntityCount`, `LastAppliedRemovedCount`, `LastAppliedWasKeyframe` and the
+  running total `EntitiesApplied`.
+
+  Every client-side counter until now measured **frames**. A snapshot carrying one entity
+  and a snapshot carrying eight were therefore indistinguishable in every number the client
+  reported, so a client rendering 1 of 8 replicated entities produced a health line that
+  read perfectly: `snapshotsApplied=15.0/s framesRx=15.2/s resyncs=0 rejected=0 dropped=0`.
+
+  That cost a day on Cuvara/IndieRPGMMOAdventure#126. "The wire is delivering nine" felt
+  like an observation and was an **inference** — nothing measured it — so five instrumented
+  builds went down the client stack before the cause turned out to be positional and
+  upstream of all of it. *"Snapshots arriving at 15/s carrying two entities"* is a different
+  statement from *"snapshots arriving at 15/s"*, and only the first is actionable.
+
+  On a delta, `LastAppliedEntityCount` is the number of entities that **changed**, normally
+  far below `Count`, and that is not a fault — which is why `LastAppliedWasKeyframe` is
+  printed beside it. On a keyframe the two should agree, and that is the comparison worth
+  making. An empty snapshot reports zero rather than holding the previous value: a stale
+  count reads as "entities are arriving" during exactly the silence this exists to reveal.
+
+  In the health line as `entities=`, `snapEnts=`, `kf=`, `snapRemoved=` and `entsTotal=`.
+  Deliberately there rather than in a probe: a probe is opt-in and only present once someone
+  already suspects something, and the health line is what gets read when nobody does.
+
 ### Changed
 
 - **The DOTS sample now defers unbracketed spawns by default**, opting out with
