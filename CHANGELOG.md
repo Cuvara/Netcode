@@ -135,12 +135,20 @@
   Two allocations named in the issue were left alone deliberately. The resolver's
   `List<ResolvedEntity>` is published to `SnapshotReceived` subscribers outside this
   package, and recycling a list handed to an unknown consumer is not a change that can be
-  made from inside it. `TcpTransport`'s per-frame `new byte[length]` is poolable in
-  principle — neither codec retains it, the Protobuf parser copies into its own
-  `ByteString`s and the JSON one goes through `Utf8.GetString` — but `ITransport` returns a
-  `byte[]` and no length, so pooling it means changing that signature and every
-  implementation and caller. That is a wider change than this one, and it is the smaller
-  win of the two.
+  made from inside it. The per-frame `new byte[length]` on the receive path —
+  `TcpTransport`'s until #168 moved it into `FrameBuffer.TryTakeFrame` — is poolable in
+  principle, since neither codec retains it (the Protobuf parser copies into its own
+  `ByteString`s and the JSON one goes through `Utf8.GetString`). But
+  `ITransport.ReadFrameAsync` returns a `byte[]` and no length, so pooling it means changing
+  that signature and every implementation and caller. That is a wider change than this one,
+  and it is the smaller win of the two.
+
+  `SnapshotPipelineReuseTests` is **not** in `Tests~/Headless`, although it is pure C#.
+  `WorldState`, `ResolvedEntity` and `Msg.EntitySnapshot` all name `Shared.GameLogic` types,
+  and that assembly arrives as a UPM git dependency Unity resolves into `PackageCache`, so
+  `dotnet restore` has nothing to fetch — adding the file to that project fails with
+  `CS0246: The type or namespace name 'Shared' could not be found` (verified, not assumed).
+  Giving the headless gate access to `Shared.GameLogic` is its own piece of work.
 
   A third claim in the issue was already false: `SnapshotResolver`'s `pending` list is
   lazily allocated and has been since before the issue was filed. It is not allocated when
