@@ -232,6 +232,50 @@ actually happened rather than what was intended.
 negative one (the high bit set) or one above the cap is a protocol error, not
 something to allocate for.
 
+## Transport throughput: the ceiling is awaits per frame
+
+`TcpTransport` buffers. `ReadFrameAsync` parses frames out of a 16 KiB receive buffer
+and only touches the socket when the bytes it needs are not already in hand, so one
+`await` can yield many frames.
+
+That is not an optimisation, it is the throughput rule. Every `await` in the transport
+goes through `Task.AsUniTask()`, which schedules its continuation on Unity's
+`SynchronizationContext` — drained **once per player-loop frame**, from a snapshot taken
+at the start of the drain. An await therefore costs a whole player-loop frame even when
+the bytes are already sitting in the socket buffer, and the read loop's ceiling is:
+
+```
+framesPerSecond = playerLoopHz / awaitsPerFrame
+```
+
+A reader that reads exactly the header and then exactly the body pays **two** awaits per
+frame and caps at half the frame rate: 15.0/s at 30 fps, 13.05 at 26, 10.0 at 20, 5.0 at
+10, with the socket backlog growing without bound below the knee. It is a cliff, not a
+gradient — injected frame-time jitter costs nothing while the mean rate stays above it.
+Harmless on a desktop; squarely in the way on Android, where 30 fps is a normal target
+and 30 fps is the knee.
+
+`WireConnection`'s read loop adds no await of its own: it is one `ReadFrameAsync` per
+frame and a synchronous `HandleFrame`, so awaits-per-frame is decided entirely inside the
+transport.
+
+### Where that decision lives, and how it is tested
+
+The decision — *can a frame be produced from bytes already held?* — is
+`Runtime/Transport/FrameBuffer.cs`. It is plain C#: no `UniTask`, no `UnityEngine`, no
+socket. `TcpTransport` owns one and does nothing else to the receive path.
+
+This split exists so the ceiling is measurable. `Tests/Editor/TransportReadPumpTests.cs`
+drives the real `FrameBuffer` through a model of the player loop's drain semantics — *at
+most one socket read per tick, unlimited synchronous frame extraction per tick* — against
+a virtual server writing at 15/s, and asserts the reader holds 15.0/s down to 5 fps. Its
+control, `ExactReadStrategy`, is the two-await shape kept permanently in the fixture: it
+reproduces 10.0/s at 20 fps and 5.0/s at 10 fps, which is what proves the harness can see
+the ceiling at all. What is modelled is the *scheduler*; the framing under test is the
+shipping code.
+
+Both files run headlessly — see [Running the tests without Unity](#running-the-tests-without-unity).
+
 ## Encoding: sniffed, not negotiated (ADR-9)
 
 The body is either Protobuf or legacy JSON, and the receiver tells them apart
@@ -1322,9 +1366,42 @@ verifiable later. Do not infer behaviour from a pin diff in either direction: a 
 moved may change nothing, and a pin that did not move does not mean the server's input
 handling stood still.
 
-## Running the EditMode tests without Unity
+## Running the tests without Unity
 
-Most of `Tests/Editor/` is pure C# — the predictor, the estimators, the codec, the
+Part of this is now committed and runs in CI, and part of it is still scratch. They are
+different things and it matters which one you are looking at.
+
+### Committed: `Tests~/Headless` (runs on every PR)
+
+`Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj` is a `net10.0` test project that
+compiles a named list of package sources and **the same `Tests/Editor/` files the Editor
+suite runs** — listed, not copied, so there is one source of truth. `Tests~` ends in a
+tilde, so Unity never imports it and it needs no `.meta` files.
+
+```bash
+cd 'Tests~/Headless' && dotnet test
+```
+
+30 tests, under a second. The CI job `Headless tests (dotnet)` runs it on every PR and
+fails on a run that executed zero tests, because `dotnet test` exits 0 when it matched
+nothing.
+
+It currently covers the transport's framing and read-loop throughput: `FrameBuffer`,
+`WireFraming`, `TransportException`, exercised by `FrameBufferTests` and
+`TransportReadPumpTests`. Adding a file to it is a deliberate act — `EnableDefaultCompileItems`
+is off — and a source that gains a `using UnityEngine` breaks the build here first.
+
+**What still needs Unity, and why.** `TcpTransport` and `WireConnection` await through
+`UniTask`, and `UniTask` needs `UnityEngine`; so the awaiting itself, the TLS handshake,
+cancellation-by-socket-close, the player-loop scheduling and everything above it stay in
+the EditMode suite (`SealedTransportTests`, `GatewayTlsTests`, `WireConnectionDispatchTests`,
+`NetworkClientRecoveryTests`). That line is deliberate: the headless project does not stub
+`UniTask`, because a test against a stub measures the stub. What moved out is the one
+thing that governs throughput and never needed a scheduler to decide.
+
+### Scratch: a throwaway project over the whole suite
+
+Most of the rest of `Tests/Editor/` is pure C# — the predictor, the estimators, the codec, the
 interning — and runs under a throwaway `dotnet` project in a few seconds, which is worth
 having when the Editor is busy or unavailable. The project lives outside the package (it is
 scratch, not an artefact): a `net10.0` csproj with `EnableDefaultCompileItems` off, globbing

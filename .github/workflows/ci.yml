@@ -57,6 +57,91 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
+  # Headless tests: the parts of this package that are plain C#.
+  #
+  # The Unity job below is the only thing that has ever run a line of this
+  # package's tests, and it needs a licence, a bootstrapped project and ~15
+  # minutes. Most of these tests do not need any of that -- prediction,
+  # interpolation, world state, snapshot resolution and the transport's framing
+  # are ordinary C# -- and the ones that do not run here in under a second.
+  #
+  # The gap that motivated this job: `TcpTransport` and `WireConnection` await
+  # through UniTask, which needs UnityEngine, so the read path was reachable only
+  # from the Editor or a built player. A throughput ceiling in it
+  # (playerLoopHz / awaitsPerFrame, so half the frame rate) was therefore never
+  # measured by anything automated -- it was found by hand, against a live stack,
+  # for unrelated reasons, after hours of argument. `FrameBuffer` is that decision
+  # split out of the awaiting so it can be measured here; see
+  # Cuvara/IndieRPGMMOAdventure#50.
+  #
+  # This job does not replace the Unity job. It runs first because it is fast.
+  # ---------------------------------------------------------------------------
+  headless:
+    name: Headless tests (dotnet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run headless tests
+        id: run
+        working-directory: 'Tests~/Headless'
+        run: |
+          dotnet test \
+            --logger 'trx;LogFileName=results.trx' \
+            --results-directory "$GITHUB_WORKSPACE/headless-results"
+
+      # `dotnet test` exits 0 when it matched no tests at all -- an empty filter, a
+      # project that compiled to nothing, an adapter that failed to load. A gate that
+      # matches nothing must fail, not pass, so this reads the counters rather than
+      # trusting the exit code. It is the same rule the Unity job applies below, for
+      # the same reason: that job ran green over zero tests for the repository's
+      # entire history.
+      - name: Assert tests ran and passed
+        if: always()
+        run: |
+          python3 - << 'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          files = sorted(glob.glob('headless-results/**/*.trx', recursive=True))
+          if not files:
+              sys.exit('::error::No .trx was produced. The headless run reported nothing, '
+                       'so nothing was verified.')
+
+          total = executed = passed = failed = 0
+          for path in files:
+              try:
+                  root = ET.parse(path).getroot()
+              except ET.ParseError as exc:
+                  sys.exit(f'::error::{path} is not parseable XML: {exc}')
+              for counters in root.iter():
+                  if not counters.tag.endswith('Counters'):
+                      continue
+                  g = lambda k: int(counters.get(k) or 0)
+                  total += g('total'); executed += g('executed')
+                  passed += g('passed'); failed += g('failed') + g('error') + g('timeout')
+
+          print(f'total={total} executed={executed} passed={passed} failed={failed}')
+
+          if total == 0 or executed == 0:
+              sys.exit('::error::Zero headless tests were executed. A green run over an '
+                       'empty set is not a passing run -- check that the test project '
+                       'still compiles the sources it names.')
+          if failed:
+              sys.exit(f'::error::{failed} headless test(s) failed out of {total}.')
+          print(f'::notice::{passed}/{total} headless tests passed.')
+          PY
+
+      - name: Upload headless results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: headless-test-results
+          path: headless-results/
+  # ---------------------------------------------------------------------------
   # Compile the samples.
   #
   # Samples~/ is excluded from Unity's import by design, so NOTHING else in this

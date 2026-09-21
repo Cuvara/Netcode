@@ -2,6 +2,79 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The transport's read path is now tested outside the Editor** (Cuvara/IndieRPGMMOAdventure#50):
+  `Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj`, a `net10.0` project that compiles
+  package sources directly and runs 30 tests in under a second, plus a `Headless tests (dotnet)`
+  CI job that runs it on every PR.
+
+  `TcpTransport` and `WireConnection` await through `UniTask`, which needs `UnityEngine`, so
+  the whole read/write path was reachable only from inside the Editor or a built player. The
+  rest of the package is not like this — prediction, interpolation, world state and snapshot
+  resolution are plain C# — and the transport was the one part with nothing.
+
+  What that cost is on the record. A client was measured decoding **13.7 snapshots/s from a
+  server sending 15.0/s**, and establishing what it meant took a socket-level probe written in
+  the server repo, a from-scratch reimplementation of Unity's `SynchronizationContext`
+  semantics in a standalone harness, three rebuild-and-run cycles against a live stack, and a
+  comparison of the Windows performance counter against the Linux monotonic clock. The answer
+  was the machine's clock. Every step of that was reasoning about a property a fifty-line test
+  measures directly: *given a socket delivering N frames per second, how many reach the
+  consumer?*
+
+  It also meant a real ceiling in that path went unnoticed until it was hunted for other
+  reasons. Every `await` there goes through `Task.AsUniTask()`, whose continuation is drained
+  once per player-loop frame, so an await costs a whole frame even when the bytes are already
+  in the socket buffer — and the read loop caps at `playerLoopHz / awaitsPerFrame`. Two awaits
+  per frame is **half the frame rate**: 10.0/s at 20 fps, 5.0/s at 10 fps, with the socket
+  backlog growing without bound below the knee. Harmless on a desktop, squarely in the way on
+  Android. The buffered read that removes it shipped **verified by nothing automated**, for
+  exactly this reason.
+
+- **`FrameBuffer`** (`Runtime/Transport/FrameBuffer.cs`): the receive-side framing state
+  machine — the growable buffer, the length-prefix parsing, the compaction and the growth rule
+  — split out of `TcpTransport` as plain C# with no `UniTask` and no socket.
+
+  This is not a tidy-up. The property that governs throughput is not in the awaiting, it is in
+  **how many awaits a frame costs**, and that is decided entirely by whether a frame can be
+  produced from bytes already in hand. Splitting the decision out of the awaiting is what puts
+  it under `dotnet test`. `TcpTransport.ReadFrameAsync` is now `TryTakeFrame` / `ReserveForRead`
+  / `Commit` around the same single socket read; behaviour is unchanged.
+
+  `ReserveForRead` also documents and tests a property the old inline code relied on silently:
+  it never hands out a zero-length region. A zero-length read comes back from the socket as a
+  clean EOF, so the failure mode there is a hang or a spurious disconnect rather than an error.
+
+- **`TransportReadPumpTests`**: the measurement itself. It drives the real `FrameBuffer`
+  through a model of the player loop's drain semantics — *at most one socket read per tick,
+  unlimited synchronous frame extraction per tick* — against a virtual server writing at 15/s,
+  and asserts the shipping reader holds the server's full rate down to **5 fps**, with a steady
+  socket backlog and frames in order.
+
+  The fixture keeps the defect permanently, as a control. `ExactReadStrategy` is the
+  two-exact-reads-per-frame shape, and it reproduces the live numbers with no socket and no
+  Unity: 15.00/s at 60 and 30 fps, 10.00 at 20, 5.00 at 10, 2.50 at 5, and a backlog that grows
+  without bound at 20 fps. Without it a green run here would be indistinguishable from a
+  measurement that cannot fail.
+
+  Proven by mutation rather than by assertion: reintroducing the constraint in `FrameBuffer`
+  itself (hand out only the bytes needed to finish the current header-or-body) turned 15 of the
+  30 tests red, reporting 12.95/s at 26 fps, 9.95 at 20 and 4.95 at 10 — against 13.05, 10.00
+  and 5.00 measured by hand against the live stack. Restoring it returned 30/30.
+
+- **`FrameBufferTests`**: framing coverage that never existed — split frames, split headers, a
+  partial tail across a compaction, growth for a body larger than the buffer, and rejection of
+  zero, negative and over-cap length prefixes.
+
+### Changed
+
+- **CI fails a headless run that executed zero tests.** `dotnet test` exits 0 when it matched
+  no tests at all — an empty filter, a project that compiled to nothing, an adapter that failed
+  to load — so the new job reads the `.trx` counters instead of the exit code. This is the same
+  rule the Unity job already applies, for the same reason: that job ran green over zero tests
+  for this repository's entire history.
+
 ## [0.42.0] - 2026-09-21
 
 ### Added
