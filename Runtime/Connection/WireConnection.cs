@@ -105,7 +105,7 @@ namespace Cuvara.Netcode.Connection
             // on it would be shared between two connections' read loops. The second is that
             // the reuse below is only sound per connection, where frames are decoded and
             // consumed one at a time on one read loop.
-            _protobufInbound = new ProtobufWireCodec(reuseDecodedSnapshot: true);
+            _protobufInbound = ProtobufWireCodec.CreatePooled();
 
             _lastPongMono = MonoMs();
         }

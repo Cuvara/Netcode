@@ -649,14 +649,23 @@ codec converts them into, the resolver's `List<ResolvedEntity>`, and
 with a contract.
 
 **`ProtobufWireCodec` can pool the decoded snapshot, and does not by default.**
-`new ProtobufWireCodec(reuseDecodedSnapshot: true)` makes every snapshot decode
-return the *same* `SnapshotMessage` instance, refilled — so the previous decode's
-result is invalidated by the next one. `WireConnection` constructs its inbound
-decoder that way, because its read loop raises `FrameReceived` synchronously and
-the only snapshot consumer, `GameSessionClient.OnFrame`, resolves the message and
-retains nothing from it. The parameterless constructor keeps the old behaviour,
-and that is the one to use anywhere two decoded snapshots are held at once — a
-test comparing a keyframe against a delta, for instance.
+`ProtobufWireCodec.CreatePooled()` makes every snapshot decode return the *same*
+`SnapshotMessage` instance, refilled — so the previous decode's result is
+invalidated by the next one. `WireConnection` builds its inbound decoder that way,
+because its read loop raises `FrameReceived` synchronously and the only snapshot
+consumer, `GameSessionClient.OnFrame`, resolves the message and retains nothing
+from it. `new ProtobufWireCodec()` keeps the old behaviour, and that is the one to
+use anywhere two decoded snapshots are held at once — a test comparing a keyframe
+against a delta, for instance.
+
+It is a static factory rather than a constructor overload, and that is load-bearing:
+`RegisterNetworking` registers the type as
+`builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer picks a
+constructor by reflection, takes the **greediest** one, and resolves its parameters
+out of the container. A second public constructor therefore breaks
+`RegisterNetworking` at resolve time — it compiles, and every codec test still
+passes. **`ProtobufWireCodec` must keep exactly one public constructor, and it must
+be parameterless.** `SnapshotPipelineReuseTests` asserts that by reflection.
 
 Note that `WireConnection` builds its own inbound Protobuf codec even when the
 outbound codec is already Protobuf, rather than aliasing it. The outbound codec is

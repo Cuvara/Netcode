@@ -39,27 +39,37 @@ namespace Cuvara.Netcode.Codec
         /// Creates a codec that returns a freshly allocated message from every
         /// <see cref="DecodeBody"/>.
         /// </summary>
+        /// <remarks>
+        /// <b>This must stay the only public constructor.</b> The type is registered with
+        /// VContainer as <c>builder.Register&lt;ProtobufWireCodec&gt;(Lifetime.Singleton)</c>,
+        /// which selects a constructor by reflection and takes the greediest one. A second
+        /// public constructor therefore makes the container try to resolve that
+        /// constructor's parameters out of the container — a <c>bool</c> it has no
+        /// registration for — and <c>RegisterNetworking</c> throws at resolve time. It
+        /// compiles, every codec test passes, and only the DI test catches it. The pooling
+        /// variant is <see cref="CreatePooled"/> for exactly this reason.
+        /// </remarks>
         public ProtobufWireCodec() : this(false)
         {
         }
 
         /// <summary>
-        /// Creates a codec, optionally reusing the decoded snapshot message and its entity
-        /// and event objects across calls.
+        /// Creates a codec that reuses the decoded snapshot message and its entity and
+        /// event objects across calls.
         /// </summary>
-        /// <param name="reuseDecodedSnapshot">
-        /// When true, every <see cref="MsgType.Snapshot"/> decode returns the <b>same</b>
+        /// <returns>
+        /// A codec whose every <see cref="MsgType.Snapshot"/> decode returns the <b>same</b>
         /// <see cref="Msg.SnapshotMessage"/> instance, refilled — so the previous decode's
         /// result is invalidated by the next one.
-        /// </param>
+        /// </returns>
         /// <remarks>
         /// <para>
-        /// Off by default, and that default is the safe one rather than the tidy one: the
-        /// reuse is only sound where the frame is fully consumed before the next decode, and
-        /// a caller that holds two decoded snapshots at once (every test that decodes a
-        /// keyframe and a delta from one codec, for instance) would silently see one object
-        /// twice. The saving is real but it is not free of contract, so it is asked for
-        /// explicitly.
+        /// A separate factory rather than the default, and that is the safe choice rather
+        /// than the tidy one: the reuse is only sound where the frame is fully consumed
+        /// before the next decode, and a caller that holds two decoded snapshots at once
+        /// (every test that decodes a keyframe and a delta from one codec, for instance)
+        /// would silently see one object twice. The saving is real but it is not free of
+        /// contract, so it is asked for by name.
         /// </para>
         /// <para>
         /// <c>WireConnection</c> turns it on because its read loop raises
@@ -73,7 +83,9 @@ namespace Cuvara.Netcode.Codec
         /// buy nothing and cost a real aliasing hazard.
         /// </para>
         /// </remarks>
-        public ProtobufWireCodec(bool reuseDecodedSnapshot)
+        public static ProtobufWireCodec CreatePooled() => new ProtobufWireCodec(true);
+
+        private ProtobufWireCodec(bool reuseDecodedSnapshot)
         {
             _reuseDecodedSnapshot = reuseDecodedSnapshot;
         }

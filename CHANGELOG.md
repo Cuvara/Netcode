@@ -78,12 +78,21 @@
 - **Snapshot receive path allocates roughly half of what it did** (Cuvara/IndieRPGMMOAdventure#61).
   Decoding one snapshot built four copies of the entity list; two of them are now reused.
 
-  `ProtobufWireCodec` gained `new ProtobufWireCodec(reuseDecodedSnapshot: true)`, which
-  pools the decoded `SnapshotMessage` and its entity and event objects across calls, and
-  `WireConnection` now builds its inbound Protobuf decoder that way. **The default
-  constructor is unchanged and still returns a fresh message per decode** — the pool
-  invalidates the previous decode, which is only sound where the frame is consumed before
-  the next one arrives, so it is opted into rather than inherited.
+  `ProtobufWireCodec` gained `ProtobufWireCodec.CreatePooled()`, which pools the decoded
+  `SnapshotMessage` and its entity and event objects across calls, and `WireConnection` now
+  builds its inbound Protobuf decoder that way. **The default constructor is unchanged and
+  still returns a fresh message per decode** — the pool invalidates the previous decode,
+  which is only sound where the frame is consumed before the next one arrives, so it is
+  opted into rather than inherited.
+
+  A static factory rather than a constructor overload, and not for style. `RegisterNetworking`
+  registers the type as `builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and
+  VContainer selects a constructor by reflection, takes the greediest one, and resolves its
+  parameters out of the container. Adding a `ProtobufWireCodec(bool)` overload therefore
+  broke `RegisterNetworking` at resolve time inside VContainer's `ReflectionInjector` — it
+  compiled, and 691 of 692 EditMode tests still passed. `ProtobufWireCodec` must keep
+  exactly one public constructor and it must be parameterless; a reflection test now
+  asserts that outside Unity, where the pure-C# suites can catch it.
 
   `WireConnection` builds its own inbound codec even when the outbound codec is already
   Protobuf, instead of aliasing it as before. That is a correctness fix riding along: the

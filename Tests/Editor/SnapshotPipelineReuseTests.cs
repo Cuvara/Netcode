@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Reflection;
 using Google.Protobuf;
 using NUnit.Framework;
 using Cuvara.Netcode.Codec;
@@ -66,7 +67,7 @@ namespace Cuvara.Netcode.Tests.Editor
         [Test]
         public void ReusingCodec_ReturnsTheSameMessageInstance()
         {
-            var codec = new ProtobufWireCodec(reuseDecodedSnapshot: true);
+            var codec = ProtobufWireCodec.CreatePooled();
             byte[] body = SnapshotBody(true, 1, Entity("a", 1, 1f, 90));
 
             var first = (SnapshotMessage)codec.DecodeBody(body).Payload;
@@ -80,7 +81,7 @@ namespace Cuvara.Netcode.Tests.Editor
         [Test]
         public void ReusingCodec_SecondSnapshotDoesNotInheritTheFirstsEntities()
         {
-            var codec = new ProtobufWireCodec(reuseDecodedSnapshot: true);
+            var codec = ProtobufWireCodec.CreatePooled();
 
             codec.DecodeBody(SnapshotBody(true, 1,
                 Entity("a", 1, 1f, 90), Entity("b", 2, 2f, 80), Entity("c", 3, 3f, 70)));
@@ -105,7 +106,7 @@ namespace Cuvara.Netcode.Tests.Editor
             // action or action_seq. A pooled entity that skipped writing them would serve
             // the first frame's values, and every one of those reads as a plausible live
             // value rather than as an error.
-            var codec = new ProtobufWireCodec(reuseDecodedSnapshot: true);
+            var codec = ProtobufWireCodec.CreatePooled();
 
             var rich = new Pb.EntitySnapshot
             {
@@ -133,7 +134,7 @@ namespace Cuvara.Netcode.Tests.Editor
         [Test]
         public void ReusingCodec_RemovedAndEventsDoNotAccumulate()
         {
-            var codec = new ProtobufWireCodec(reuseDecodedSnapshot: true);
+            var codec = ProtobufWireCodec.CreatePooled();
 
             var withExtras = new Pb.SnapshotMessage { Tick = 1, Full = false };
             withExtras.Removed.AddRange(new[] { "x", "y" });
@@ -154,6 +155,26 @@ namespace Cuvara.Netcode.Tests.Editor
             Type = (uint)MsgType.Snapshot,
             Payload = ByteString.CopyFrom(s.ToByteArray()),
         }.ToByteArray();
+
+        [Test]
+        public void ProtobufWireCodec_ExposesExactlyOneParameterlessPublicConstructor()
+        {
+            // Guards the DI contract from outside Unity. `RegisterNetworking` registers this
+            // type with VContainer, which picks a constructor by reflection and takes the
+            // GREEDIEST one, then tries to resolve its parameters out of the container. A
+            // second public constructor therefore breaks RegisterNetworking at resolve time
+            // while every codec test here still passes — which is exactly what happened when
+            // the pool was first added as `ProtobufWireCodec(bool)`: 691/692 in CI, failing
+            // inside VContainer's ReflectionInjector, green in every pure-C# run. Hence
+            // CreatePooled() as a static factory rather than an overload.
+            var ctors = typeof(ProtobufWireCodec).GetConstructors(
+                BindingFlags.Public | BindingFlags.Instance);
+
+            Assert.That(ctors.Length, Is.EqualTo(1),
+                "VContainer resolves this type by reflection; a second public constructor " +
+                "makes it try to inject that constructor's parameters");
+            Assert.That(ctors[0].GetParameters(), Is.Empty);
+        }
 
         // ── WorldState's conversion buffers ──────────────────────────────────────
 
