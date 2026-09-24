@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using UnityEngine;
 
 namespace DOTSSample
@@ -50,6 +51,12 @@ namespace DOTSSample
             public string DeviceId;
             public string InstanceLabel;
 
+        /// <summary>
+        /// Seconds before the client disconnects itself, or 0 for no cap. Negative means
+        /// the caller did not ask, so the scene's own value stands.
+        /// </summary>
+        public float RunSeconds;
+
             public string NakamaBaseUrl => $"{NakamaScheme}://{NakamaHost}:{NakamaPort}";
 
             public string NakamaHealthUrl => NakamaBaseUrl + "/healthcheck";
@@ -81,6 +88,7 @@ namespace DOTSSample
                     Str(args, "-cuvara-nakama-port", "CUVARA_NAKAMA_PORT", null) != null,
                 DeviceId = Str(args, "-cuvara-device", "CUVARA_DEVICE_ID", null),
                 InstanceLabel = Str(args, "-cuvara-instance", "CUVARA_INSTANCE", null),
+                RunSeconds = Seconds(args, "-cuvara-run-seconds", "CUVARA_RUN_SECONDS"),
             };
 
             var map = Str(args, "-cuvara-map", "CUVARA_MAP_ID", null);
@@ -148,6 +156,35 @@ namespace DOTSSample
 
             var fromEnv = SafeEnv(envName);
             return string.IsNullOrEmpty(fromEnv) ? fallback : fromEnv;
+        }
+
+        /// <summary>
+        /// A duration in seconds: 0 means "no cap", and a negative return means the flag
+        /// was absent so the caller's own default stands.
+        /// </summary>
+        /// <remarks>
+        /// This cannot reuse <see cref="Int"/>, which clamps to 1-65535 because every other
+        /// numeric flag here is a port. A run length of 0 is meaningful and a run length of
+        /// 86400 is reasonable, and both would be silently rejected by the port range.
+        /// </remarks>
+        private static float Seconds(string[] args, string flag, string envName)
+        {
+            var raw = Str(args, flag, envName, null);
+            if (string.IsNullOrEmpty(raw))
+            {
+                return -1f;
+            }
+
+            if (float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                && parsed >= 0f)
+            {
+                return parsed;
+            }
+
+            Debug.LogWarning(
+                $"[backend-args] {flag}='{raw}' is not a usable duration (want seconds >= 0, " +
+                "or 0 for no cap) -- keeping the scene's value.");
+            return -1f;
         }
 
         private static int Int(string[] args, string flag, string envName, int fallback)
