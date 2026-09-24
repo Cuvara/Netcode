@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The DOTS sample's health line printed the raw fitted skew without saying whether the
+  estimator applied it** (#174). `skew=` is whatever the last fit read, including a fit the
+  corroboration or extraordinary-skew guard refused, so a starved-loop artefact of ~90 000 ppm
+  read like a clock running 9% off-rate. The line now prints `skewApplied=` (`RateCorroborated`)
+  and `ageFitted=` (`AgeIsFitted`) beside it, and `uncorroborated=` / `extraordinary=` (which
+  guard refused) next to the existing `refusedFits=` / `refusedSkew=`. Sample-only: the estimator's gating was already correct.
+  `Documentation~/PREDICTION.md` says how to read the pair.
+
 ## [0.44.0] - 2026-09-24
 
 ### Fixed
