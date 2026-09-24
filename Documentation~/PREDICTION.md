@@ -350,6 +350,12 @@ In the measurement report, read `rate corroborated` before `clock rate differenc
 large ppm is the artefact being caught; `NO` beside a small one, early in a session, is simply a
 baseline that has not doubled yet.
 
+The DOTS sample's `[DOTSNet/health]` line follows the same rule. `skew=` is the raw fitted
+reading and prints whether or not the estimator applied it, so `skewApplied=` (the rate reached
+the clock, i.e. `RateCorroborated`) and `ageFitted=` (`AgeIsFitted`) print beside it, and
+`uncorroborated=` / `extraordinary=` at the end of the line say which guard refused a fit. A large `skew=`
+beside `skewApplied=0` is a refused fit, not a clock running off-rate (Cuvara/Netcode#174).
+
 ### Reading a correction figure
 
 Size a correction by the tick rate **measured off the wire**, never by the one the client

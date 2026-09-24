@@ -1096,6 +1096,15 @@ namespace DOTSSample
                 $"histHit={_predictor.HistoryHits} histMiss={_predictor.HistoryMisses} " +
                 $"staleness={_binder.Staleness.StalenessTicks:F2}t " +
                 $"skew={_binder.Staleness.SkewPpm:F0}ppm " +
+                // Whether that skew is APPLIED. SkewPpm is the raw fitted slope and is printed
+                // whether or not it corroborated; only a corroborated rate steers the clock, and
+                // only then is staleness measured against the fitted line (AgeIsFitted) rather
+                // than the unit-rate floor. Without these two, "skew=25448ppm staleness=18.40t"
+                // on a starved frame loop read as a clock 2.5% fast and a 307 ms staleness --
+                // and nearly got published as evidence (Cuvara/Netcode#174), when the slope was
+                // most likely never applied at all.
+                $"skewApplied={(_binder.Staleness.RateCorroborated ? 1 : 0)} " +
+                $"ageFitted={(_binder.Staleness.AgeIsFitted ? 1 : 0)} " +
                 $"baseline={_binder.Staleness.BaselineSeconds:F0}s " +
                 $"unityWin={window:F3}s swWin={swWindow:F3}s " +
                 // Absolute totals as well as per-window rates. A per-window rate is a
@@ -1115,7 +1124,9 @@ namespace DOTSSample
                 // exactly what two clocks that agree look like. That is how a bound set at
                 // 0.90/1.10 disabled the measurement for a whole session and said nothing.
                 $"refusedFits={_binder.Staleness.FitsRefused} " +
-                $"refusedSkew={_binder.Staleness.RefusedSkewPpm:F0}ppm");
+                $"refusedSkew={_binder.Staleness.RefusedSkewPpm:F0}ppm " +
+                $"uncorroborated={_binder.Staleness.FitsUncorroborated} " +
+                $"extraordinary={_binder.Staleness.FitsExtraordinary}");
         }
 
         private void OnDestroy()
