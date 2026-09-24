@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-09-24
+
 ### Fixed
 
 - **The DOTS sample's health line printed the raw fitted skew without saying whether the
