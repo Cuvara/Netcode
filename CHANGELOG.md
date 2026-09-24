@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-09-24
+
 ### Fixed
 
 - **The DOTS sample's run cap was indistinguishable from a netcode fault**
