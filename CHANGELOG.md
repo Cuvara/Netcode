@@ -34,10 +34,14 @@
     of nothing, saying either that the run cap fired (and that this is not an expiry, a drop
     or an eviction) or that there is no session and counters have been re-baselined.
 
-  Verified by compiling the changed code outside Unity — `Samples~` is hidden from the Editor,
-  so nothing else compiles that file — across five parser inputs (absent, `0`, `86400`,
-  negative, garbage) and both arms of every new expression (capped and uncapped, run-complete
-  and no-session).
+  Verified two ways. The `Compile samples` CI job imports every sample the manifest declares
+  into a bootstrapped project and compiles it, which is what covers these files — a claim that
+  nothing compiled them would have been wrong, and was checked rather than assumed. On top of
+  that, the parser and every new expression were run outside Unity against a stub, because a
+  compile says the code is legal and not that it is right: five parser inputs (absent, `0`,
+  `86400`, negative, garbage) and both arms of each expression (capped and uncapped,
+  run-complete and no-session). `86400` is the case that matters — the port-clamped helper this
+  deliberately does not reuse would have rejected it, and a compile cannot see that.
 
   Not changed: the 3600 default, `ReconnectPolicy` not firing on `LocalClose` (correct — it is
   a deliberate local shutdown, not a fault), and the gateway session's activity refresh, which
