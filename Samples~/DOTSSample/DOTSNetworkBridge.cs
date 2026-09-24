@@ -91,9 +91,13 @@ namespace DOTSSample
         [SerializeField] private float cameraFollowSharpness = 8f;
 
         [Header("Run")]
-        [Tooltip("Seconds before the client disconnects itself. The end is quiet -- the avatar " +
-                 "simply stops and the HUD reads 'Run complete' -- so a value shorter than the " +
-                 "session you are actually running looks like a movement or netcode fault.")]
+        [Tooltip("Seconds before the client disconnects itself, or 0 for no cap. Override at " +
+                 "launch with -cuvara-run-seconds (or CUVARA_RUN_SECONDS) rather than " +
+                 "rebuilding. The cap announces itself at run start, counts down on the " +
+                 "[DOTSNet/health] line as runEndsIn=, and says so loudly when it fires -- " +
+                 "because a value shorter than the session you are actually running is " +
+                 "otherwise indistinguishable from a movement or netcode fault, and 3600 " +
+                 "collides with the gateway's SessionTTL, which is a different 3600.")]
         [SerializeField] private float runSeconds = 3600f;
 
         private NetworkClient _client;
@@ -117,6 +121,12 @@ namespace DOTSSample
             _client != null && _client.TickRate > 0
                 ? 1f / _client.TickRate
                 : 1f / Mathf.Max(1, GameConstants.DefaultTickRate);
+
+        /// <summary>When the run cap will fire, or null when the run is uncapped.</summary>
+        private DateTime? _runEndsAtUtc;
+
+        /// <summary>Set once the run cap has fired, so the silence afterwards can name itself.</summary>
+        private bool _runComplete;
 
         // --- Status for OnGUI ---
         private string _status = "Initializing...";
@@ -320,6 +330,14 @@ namespace DOTSSample
             if (_backend.StatusUrlExplicit)
             {
                 gameServerStatusUrl = _backend.StatusUrl;
+            }
+
+            // A play session is not a test run, and the cap is baked into the scene asset,
+            // so without a flag the only way to sit in world for longer than the scene says
+            // is to rebuild. 0 means no cap.
+            if (_backend.RunSeconds >= 0f)
+            {
+                runSeconds = _backend.RunSeconds;
             }
 
             if (_backend.MapExplicit)
@@ -1000,6 +1018,20 @@ namespace DOTSSample
                 _lastReconciles = _predictor.Reconciles;
                 _lastSnapshotsApplied = _snapshotsApplied;
                 _lastFramesRx = _client?.Session?.FramesReceived ?? 0L;
+
+                // The health line is what a reader watches, so its ABSENCE is the signal --
+                // and an absence reads as nothing wrong. Two clients stopped reporting at
+                // 3598.8s and 3597.9s and it took a day to find out why, because the run cap
+                // (3600s) and the gateway's SessionTTL (3600s) are the same number by
+                // coincidence and the log said neither. Print on the same cadence instead,
+                // naming which of the two it was.
+                Debug.Log(_runComplete
+                    ? "[DOTSNet/health] suspended -- the RUN CAP fired and this client " +
+                      $"disconnected ITSELF after {runSeconds:F0}s. Nothing expired and nothing " +
+                      "dropped; the world on screen is frozen from here. " +
+                      "Pass -cuvara-run-seconds 0 for an uncapped session."
+                    : $"[DOTSNet/health] suspended -- no session (state={_client?.State.ToString() ?? "no client"}). " +
+                      "Counters are re-baselined, so the next in-world line is measured from here.");
                 return;
             }
 
@@ -1073,6 +1105,9 @@ namespace DOTSSample
                 // suspect, not the network.
                 $"rxTotal={_client.Session?.FramesReceived ?? 0L} " +
                 $"sinceFirst={_healthStopwatch.Elapsed.TotalSeconds - _firstHealthAt:F1}s " +
+                // On the line the reader is already reading, because the run cap ending a
+                // session is indistinguishable downstream from a network fault.
+                $"runEndsIn={(_runEndsAtUtc.HasValue ? $"{(_runEndsAtUtc.Value - DateTime.UtcNow).TotalSeconds:F0}s" : "never")} " +
                 $"clockRatio={(swWindow > 0 ? window / swWindow : 0):F4} " +
                 $"fits={_binder.Staleness.Fits} " +
                 $"stSamples={_binder.Staleness.Samples} " +
@@ -1189,6 +1224,13 @@ namespace DOTSSample
                 Debug.Log($"[DOTSNet] IN WORLD as {_client.UserId}");
 
                 var started = DateTime.UtcNow;
+                _runEndsAtUtc = runSeconds > 0f ? started.AddSeconds(runSeconds) : (DateTime?)null;
+                Debug.Log(_runEndsAtUtc.HasValue
+                    ? $"[DOTSNet] run capped at {runSeconds:F0}s -- this client will disconnect " +
+                      $"ITSELF at {_runEndsAtUtc.Value:HH:mm:ss} UTC and the world will freeze. " +
+                      "Pass -cuvara-run-seconds 0 for an uncapped session."
+                    : "[DOTSNet] run is uncapped (-cuvara-run-seconds 0); the client will stay " +
+                      "in world until it is closed.");
 
                 // PINNED SCHEDULE, NOT "delay one period after each send". UniTask.Delay
                 // starts its stopwatch after the send and resumes on the first Update frame
@@ -1244,9 +1286,15 @@ namespace DOTSSample
                     }
                 }
 
+                _runComplete = true;
                 _client.Disconnect();
-                _status = "Run complete";
-                Debug.Log("[DOTSNet] Run finished");
+                _status = $"Run complete ({runSeconds:F0}s cap) -- world is frozen";
+                Debug.LogWarning(
+                    $"[DOTSNet] RUN CAP REACHED after {runSeconds:F0}s. This client is " +
+                    "disconnecting ITSELF -- this is not a network fault, not a session " +
+                    "expiry and not an eviction. The process keeps rendering, so the world " +
+                    "you are looking at is frozen at its last known state from here on. " +
+                    "Pass -cuvara-run-seconds 0 (or a larger value) for a longer session.");
             }
             catch (OperationCanceledException)
             {

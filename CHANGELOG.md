@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The DOTS sample's run cap was indistinguishable from a netcode fault**
+  (Cuvara/rpg-mmo-server#412).
+
+  `runSeconds` defaults to 3600, so the sample disconnects itself after an hour. That is
+  intended. What was not is how it ended: one `Debug.Log` among 200 fps of probe output, and
+  then a process that keeps rendering a world frozen at its last known state. The signal a
+  reader watches — the `[DOTSNet/health]` line — simply **stops**, because the health path
+  returns early when there is no session, and an absence reads as nothing wrong.
+
+  Two clients stopped reporting at `sinceFirst` 3598.8s and 3597.9s, and the cause was
+  diagnosed for a day as the gateway's `constants.SessionTTL` expiring, which is **also 3600
+  seconds**. Two unrelated one-hour numbers. The logs said neither; the only clue that
+  distinguished them was `LocalClose` in `[Net] game session closed`, which says the client
+  closed it deliberately — nothing expired and nothing dropped.
+
+  Four changes, all of them about saying so:
+
+  - **`-cuvara-run-seconds` / `CUVARA_RUN_SECONDS`** overrides the cap at launch, with `0`
+    meaning no cap. Every other knob in the sample already had a flag; this one was reachable
+    only by rebuilding. It gets its own parser rather than reusing `Int`, which clamps to
+    1-65535 because every other numeric flag is a port — `0` and `86400` are both meaningful
+    here and both would have been silently rejected.
+  - **The cap announces itself at run start**, naming the wall-clock time it will fire and
+    that the world will freeze.
+  - **`runEndsIn=` on the health line**, so the countdown is on the line the reader is already
+    reading. Downstream of the disconnect, a run cap and a network fault look identical.
+  - **The silence names itself.** The early-return path now logs on the same cadence instead
+    of nothing, saying either that the run cap fired (and that this is not an expiry, a drop
+    or an eviction) or that there is no session and counters have been re-baselined.
+
+  Verified two ways. The `Compile samples` CI job imports every sample the manifest declares
+  into a bootstrapped project and compiles it, which is what covers these files — a claim that
+  nothing compiled them would have been wrong, and was checked rather than assumed. On top of
+  that, the parser and every new expression were run outside Unity against a stub, because a
+  compile says the code is legal and not that it is right: five parser inputs (absent, `0`,
+  `86400`, negative, garbage) and both arms of each expression (capped and uncapped,
+  run-complete and no-session). `86400` is the case that matters — the port-clamped helper this
+  deliberately does not reuse would have rejected it, and a compile cannot see that.
+
+  Not changed: the 3600 default, `ReconnectPolicy` not firing on `LocalClose` (correct — it is
+  a deliberate local shutdown, not a fault), and the gateway session's activity refresh, which
+  was checked and is sound.
+
 ## [0.43.0] - 2026-09-21
 
 ### Added
