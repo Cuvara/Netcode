@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- **CI tests against the Shared.GameLogic the game ships** - the package CI's
+  `com.rpgmmo.shared-gamelogic` pin moves `sgl-v0.5.0` -> `sgl-v0.6.0` (all three rows), matching
+  `IndieRPGMMOAdventure`'s `packages-lock.json`. sgl-v0.6.0 removes the ten-argument positional
+  `EntitySnapshotData` constructor (rpg-mmo-server #388); `WorldState.Apply`, the only call site, already
+  passes `actionSeq:`/`changedFields:` by name, so it compiles unchanged. The `com.cuvara.dots` pin
+  (`v0.29.0`) already matches the client.
+
 ## [0.45.0] - 2026-09-24
 
 ### Fixed
