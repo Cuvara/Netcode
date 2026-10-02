@@ -27,6 +27,14 @@ namespace Cuvara.Netcode.Snapshot
         public ResolvedGameEvent(
             GameEventType type, string sourceId, string targetId,
             int amount, uint abilityId, GameEventFlags flags)
+            : this(type, sourceId, targetId, amount, abilityId, flags, 0u)
+        {
+        }
+
+        /// <summary>Full constructor, including the protocol version 3 status effect id.</summary>
+        public ResolvedGameEvent(
+            GameEventType type, string sourceId, string targetId,
+            int amount, uint abilityId, GameEventFlags flags, uint effectId)
         {
             Type = type;
             SourceId = sourceId;
@@ -34,6 +42,7 @@ namespace Cuvara.Netcode.Snapshot
             Amount = amount;
             AbilityId = abilityId;
             Flags = flags;
+            EffectId = effectId;
         }
 
         public GameEventType Type { get; }
@@ -57,6 +66,12 @@ namespace Cuvara.Netcode.Snapshot
 
         public GameEventFlags Flags { get; }
 
+        /// <summary>
+        /// Content id of the status effect involved (applied, removed, or the periodic source of
+        /// a Damage / Heal tick); 0 for none. Protocol version 3.
+        /// </summary>
+        public uint EffectId { get; }
+
         public bool HasSource => !string.IsNullOrEmpty(SourceId);
 
         public bool HasTarget => !string.IsNullOrEmpty(TargetId);
@@ -65,6 +80,6 @@ namespace Cuvara.Netcode.Snapshot
 
         public override string ToString() =>
             $"{Type}({(HasSource ? SourceId : "-")} -> {(HasTarget ? TargetId : "-")}, " +
-            $"amount={Amount}, ability={AbilityId}, flags={Flags})";
+            $"amount={Amount}, ability={AbilityId}, effect={EffectId}, flags={Flags})";
     }
 }

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Cuvara.Netcode.Protocol.Messages
 {
     /// <summary>
@@ -118,5 +120,70 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// the server so a disagreement is a compile error rather than a wire bug.
         /// </remarks>
         public uint ChangedFields { get; set; }
+
+        // --- Protocol version 3 (ADR-28..30). Sent only to a connection that advertised
+        // version >= 3; from a version 2 server every one of these stays at its default,
+        // which each documents as "not sent". ---
+
+        /// <summary>
+        /// Height above the ground plane (wire field 14, ADR-28). <see cref="X"/>/<see cref="Y"/>
+        /// keep their protocol 2 meaning as the ground plane; a renderer maps
+        /// <c>(X, Y, Z)</c> to Unity <c>(x, z, y)</c>. Zero from a version 2 server, which is
+        /// exactly the flat protocol 2 world.
+        /// </summary>
+        public float Z { get; set; }
+
+        /// <summary>Velocity along X in world units per second (wire field 15).</summary>
+        public float VelX { get; set; }
+
+        /// <summary>Velocity along Y in world units per second (wire field 16).</summary>
+        public float VelY { get; set; }
+
+        /// <summary>
+        /// Velocity along Z in world units per second (wire field 17). Sent for projectiles
+        /// always and for characters while airborne. All three zero means "stationary or not
+        /// sent"; on a delta, bit <c>0x0400</c> of <see cref="ChangedFields"/> says which.
+        /// </summary>
+        public float VelZ { get; set; }
+
+        /// <summary>
+        /// Interned HANDLE of the owning entity -- the caster of a projectile (wire field 18).
+        /// Zero for none. Resolved through the same handle table as <see cref="Handle"/>, but
+        /// like a game-event participant it may name an entity that is not in this snapshot.
+        /// </summary>
+        public uint Owner { get; set; }
+
+        /// <summary>
+        /// Full id of <see cref="Owner"/>, used ONLY by the non-interning legacy JSON encoding
+        /// (wire field 24), for which <see cref="Owner"/> is always zero. Empty on Protobuf. The
+        /// same id/handle duality as <see cref="GameEvent.SourceId"/>.
+        /// </summary>
+        public string OwnerId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// <see cref="InputMessage.SpawnSeq"/> of the input that created this projectile (wire
+        /// field 19), sent only to the OWNER's connection so it can replace its predicted
+        /// projectile with this entity. Zero for every other receiver and every non-projectile.
+        /// </summary>
+        public uint SpawnSeq { get; set; }
+
+        /// <summary>
+        /// Content stat block (wire field 20, ADR-30). Complete on a keyframe or a first
+        /// introduction; on a delta with bit <c>0x1000</c> only the stats that changed.
+        /// </summary>
+        public List<StatValue> Stats { get; } = new List<StatValue>();
+
+        /// <summary>Stat ids that no longer exist (wire field 21). Delta only.</summary>
+        public List<uint> StatsRemoved { get; } = new List<uint>();
+
+        /// <summary>
+        /// Active status effects (wire field 22), keyed by <see cref="StatusEffect.EffectId"/>
+        /// under the same complete-set / delta rule as <see cref="Stats"/> with bit
+        /// <c>0x2000</c>.
+        /// </summary>
+        public List<StatusEffect> Statuses { get; } = new List<StatusEffect>();
+
+        /// <summary>Status ids that ended (wire field 23). Delta only.</summary>
+        public List<uint> StatusesRemoved { get; } = new List<uint>();
     }
 }

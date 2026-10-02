@@ -66,5 +66,83 @@ namespace Cuvara.Netcode.Protocol.Messages
 
         /// <inheritdoc cref="AimX"/>
         public float AimY { get; set; }
+
+        // --- Protocol version 3 (ADR-28, ADR-29). A version 2 server skips these fields
+        // (proto3 unknown fields; JSON unknown keys), so sending them to one is harmless and
+        // simply has no effect. ---
+
+        /// <summary>
+        /// Height of the aim point (wire field 9). With <see cref="AimX"/>/<see cref="AimY"/>
+        /// this is the full 3D point a skillshot is fired AT; the server derives the direction
+        /// from the caster's own authoritative position, never from a client origin.
+        /// </summary>
+        public float AimZ { get; set; }
+
+        /// <summary>
+        /// The server tick the client was RENDERING remote entities at when it produced this
+        /// input -- its interpolation time, not its prediction tick (wire field 10). Lag
+        /// compensation rewinds hit targets to this instant, clamped to 200 ms (ADR-29).
+        /// <b>Zero means "not sent"</b>: no rewind.
+        /// </summary>
+        /// <remarks>
+        /// Fill it with <see cref="SetRenderTime"/> from the interpolation clock
+        /// (<c>WorldViewBinder.RenderTick</c>), which splits the fractional tick into this and
+        /// <see cref="RenderAlpha"/>.
+        /// </remarks>
+        public ulong RenderTick { get; set; }
+
+        /// <summary>
+        /// Fraction [0, 1) of the way from <see cref="RenderTick"/> to the next tick that the
+        /// client was rendering at (wire field 13). Rewind interpolates hitboxes to it.
+        /// </summary>
+        public float RenderAlpha { get; set; }
+
+        /// <summary>
+        /// Jump request (wire field 11). Level-triggered for the tick it is sent on; the motor
+        /// ignores it unless the character is grounded, so a held button does not fly.
+        /// </summary>
+        public bool Jump { get; set; }
+
+        /// <summary>
+        /// Client-chosen sequence number for a projectile this input fires (wire field 12), so
+        /// the predicted projectile can be matched to the server's entity
+        /// (<see cref="EntitySnapshot.SpawnSeq"/>). Zero when the input fires nothing.
+        /// </summary>
+        public uint SpawnSeq { get; set; }
+
+        /// <summary>
+        /// Splits a fractional interpolation tick into <see cref="RenderTick"/> and
+        /// <see cref="RenderAlpha"/>. A value below 1 or non-finite leaves both at zero --
+        /// "not sent", so the server applies no rewind rather than a wrong one.
+        /// </summary>
+        /// <param name="renderTick">
+        /// The moment being rendered, in server ticks -- <c>WorldViewBinder.RenderTick</c> /
+        /// <c>InterpolationClock.RenderTick</c>.
+        /// </param>
+        /// <returns>This message, for chaining.</returns>
+        public InputMessage SetRenderTime(double renderTick)
+        {
+            if (double.IsNaN(renderTick) || double.IsInfinity(renderTick) || renderTick < 1.0)
+            {
+                RenderTick = 0UL;
+                RenderAlpha = 0f;
+                return this;
+            }
+
+            double whole = System.Math.Floor(renderTick);
+            float alpha = (float)(renderTick - whole);
+
+            // Float rounding can turn 0.99999999 into 1.0f, which the wire defines as out of
+            // range ([0, 1)); fold it into the next tick instead.
+            if (alpha >= 1f)
+            {
+                whole += 1.0;
+                alpha = 0f;
+            }
+
+            RenderTick = (ulong)whole;
+            RenderAlpha = alpha < 0f ? 0f : alpha;
+            return this;
+        }
     }
 }

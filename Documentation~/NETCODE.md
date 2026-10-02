@@ -446,6 +446,92 @@ other entities' state. Drive a cast animation and a cooldown sweep off the `Abil
 event, not off the input — a mispredicted ability is visible as a cast that plays and then
 un-happens, which is worse than one that starts a round trip late.
 
+## Wire protocol version 3 — "Core v3" (0.46.0)
+
+`WireProtocolVersion.Current` is **3** (ADR-28..31), in step with `WireProtocol.ProtocolVersion`
+(C# server) and `messages.WireProtocolVersion` (Go). **Requires `com.rpgmmo.shared-gamelogic`
+`sgl-v0.7.0`** — `CharacterMotor`, `ProjectileLogic`, `MapGeometry`, `Vec3`, the
+`EntitySnapshotData` v3 constructor and `StatValueData`/`StatusEffectData` do not exist in 0.6.0.
+
+### Version rule
+
+The client accepts a server echoing any version from `WireProtocolVersion.MinimumServerVersion`
+(2) to `Current` (3), or none (unversioned, admitted on trust as before); a server ahead of the
+client is still refused with `protocol_version_mismatch`. Features are gated on what the game
+server echoed in `JoinTokenResponse.protocol_version`, via `WireProtocolVersion.Supports(version,
+feature)`:
+
+| Feature | Constant | Below it |
+|---|---|---|
+| Command channel (MsgType 32-34) | `CommandChannel` = 3 | `SendCommandAsync` completes at once with `client_protocol_too_old`, nothing is sent |
+| 3D movement (`CharacterMotor`) | `Motor3D` = 3 | `LocalMovePredictor` stays on the planar `MovementSystem` path |
+
+An unversioned server supports no versioned feature. A version 2 server never sends any v3
+field, so every v3 property below reads as its "not sent" default against one.
+
+### Snapshot state (fields 14-24, mask bits `0x0200`-`0x2000`)
+
+`EntitySnapshot` gains `Z`, `VelX/VelY/VelZ`, `Owner` (handle) / `OwnerId` (JSON twin),
+`SpawnSeq`, `Stats` + `StatsRemoved`, `Statuses` + `StatusesRemoved`. `SnapshotResolver`
+resolves the two new entity references — a projectile's `owner` and a status's `source` —
+against the same handle table **after** the snapshot's own bindings land, like event
+participants. An unbound reference resolves to `null` and is counted in
+`UnresolvedEntityReferences`; it never aborts the snapshot or forces a resync, because the entity
+carrying it is still correctly identified. `ResolvedEntity` carries the v3 state (constructor
+taking `in ResolvedEntity core` plus every v3 field, mirroring Shared.GameLogic), and
+`WorldState.Apply` hands it to `EntitySnapshotData`'s v3 constructor; `SnapshotMerger` owns what a
+delta means for each bit (keep-last-known, stats/statuses upserted and removed by id).
+`ResolvedGameEvent.EffectId` carries the status id for `StatusApplied` (7), `StatusRemoved` (8)
+and periodic damage/heal; `ProjectileHit` (9) is the impact cue.
+
+### Input (fields 9-13)
+
+`InputMessage` gains `AimZ`, `RenderTick` + `RenderAlpha`, `Jump`, `SpawnSeq`.
+`InputMessage.SetRenderTime(binder.RenderTick)` fills the render pair from the interpolation
+clock (`WorldViewBinder.RenderTick`, i.e. `InterpolationClock.RenderTick`) — the instant remote
+entities were drawn at, which lag compensation rewinds hit targets to (ADR-29, capped at 200 ms).
+Send it with `GameSessionClient.SendInput(InputMessage)`. Every v3 field is elided at zero in
+both encodings, so an input that uses none of them is byte-identical to a version 2 input.
+
+### Command channel (MsgType 32-34, ADR-30)
+
+```csharp
+CommandResult r = await client.SendCommandAsync(GameplayOpcodes.X, payloadBytes, ct);
+if (!r.Ok) { /* r.Error: a server code, or a CommandChannelErrors name */ }
+client.ServerPushReceived += push => { /* decode push.Payload for push.Opcode */ };
+```
+
+- Netcode only moves bytes; payloads are encoded with Shared.GameLogic's gameplay codec.
+- `seq` is allocated per connection from 1 (0 is skipped on wrap) and results are matched by it,
+  in any order. Every result is also raised on `CommandResultReceived`, including one whose
+  caller cancelled — cancellation stops the wait, not the command.
+- **Never throws for a channel failure.** `client_not_connected`, `client_protocol_too_old`
+  (checked before anything is sent) and `client_connection_closed` (in flight when the
+  connection ended — a drop, kick, transfer, reconnect or disconnect) complete the task with
+  `Ok == false`. `CommandChannelErrors.IsLocal` tells them from server codes. A
+  `client_connection_closed` command may or may not have executed; retry only what is
+  idempotent. Opcode 0 throws `ArgumentOutOfRangeException` (a caller bug).
+- JSON carries `payload` as padded standard base64, as Go marshals `[]byte`.
+
+### Character slots (ADR-31)
+
+`NetworkClient.CharacterId` is the roster character the next connect, dungeon entry or transfer
+asks for (`EnterWorldRequest.character_id`; empty = the account's default and the pre-slot
+bytes). The gateway checks it against the `cid` claim Nakama put in the gateway token, so the JWT
+must be minted for the same character. A reconnect rejoins as the character the lost session
+played. The server's echo (`JoinTokenResponse.character_id`) is `GameSessionClient.CharacterId` /
+`NetworkClient.ActiveCharacterId` — bind the local view to that, not to the request.
+`GatewayClient.EnterWorldAsync(mapId, partyId, characterId, ct)` is the low-level form.
+
+### JSON names
+
+Every v3 field uses its `wire.proto` snake_case name, identical to the Go struct tags in
+`shared/messages`: `z`, `vel_x`, `vel_y`, `vel_z`, `owner`, `owner_id`, `spawn_seq`, `stats`
+(`stat_id`, `value`), `stats_removed`, `statuses` (`effect_id`, `stacks`, `expires_tick`,
+`source`), `statuses_removed`, `effect_id`, `aim_z`, `render_tick`, `render_alpha`, `jump`,
+`character_id`, `seq`, `opcode`, `payload`, `ok`, `error`. The JSON reader now also reads
+`changed_fields`.
+
 ## Heartbeat — implemented once
 
 Both hops ping every **10 s** and drop a peer after **30 s** without a pong, so

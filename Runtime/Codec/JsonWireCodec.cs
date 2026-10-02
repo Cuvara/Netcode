@@ -116,6 +116,9 @@ namespace Cuvara.Netcode.Codec
                     // then produces the SAME bytes a pre-party client produced, so the field
                     // is additive in JSON and not only in Protobuf.
                     if (!string.IsNullOrEmpty(m.PartyId)) b.String("party_id", m.PartyId);
+                    // Same omitempty rule as party_id: an empty character id (the account's
+                    // default character) produces the bytes a pre-slot client produced.
+                    if (!string.IsNullOrEmpty(m.CharacterId)) b.String("character_id", m.CharacterId);
                     b.EndObject();
                     return b.ToString();
 
@@ -151,6 +154,28 @@ namespace Cuvara.Netcode.Codec
 
                     if (m.AimX != 0f) b.Number("aim_x", m.AimX);
                     if (m.AimY != 0f) b.Number("aim_y", m.AimY);
+
+                    // Protocol version 3, each omitted when zero exactly as the Go struct tags
+                    // (`omitempty`) and proto3 elision do.
+                    if (m.AimZ != 0f) b.Number("aim_z", m.AimZ);
+                    if (m.RenderTick != 0UL) b.Number("render_tick", (long)m.RenderTick);
+                    if (m.RenderAlpha != 0f) b.Number("render_alpha", m.RenderAlpha);
+                    if (m.Jump) b.Bool("jump", true);
+                    if (m.SpawnSeq != 0) b.Number("spawn_seq", m.SpawnSeq);
+
+                    b.EndObject();
+                    return b.ToString();
+
+                case CommandRequest m:
+                    // Go marshals []byte as padded standard base64, and that is the shape the
+                    // backend's struct tags (`payload,omitempty`) decode.
+                    b.BeginObject()
+                        .Number("seq", m.Seq)
+                        .Number("opcode", m.Opcode);
+                    if (m.Payload != null && m.Payload.Length > 0)
+                    {
+                        b.String("payload", Convert.ToBase64String(m.Payload));
+                    }
 
                     b.EndObject();
                     return b.ToString();
@@ -218,7 +243,32 @@ namespace Cuvara.Netcode.Codec
                         UserId = payload.GetString("user_id"),
                         Error = payload.GetString("error"),
                         TickRate = payload.GetUInt("tick_rate"),
-                        ProtocolVersion = payload.GetUInt("protocol_version")
+                        ProtocolVersion = payload.GetUInt("protocol_version"),
+                        CharacterId = payload.GetString("character_id")
+                    };
+
+                case MsgType.CommandResult:
+                    return new CommandResult
+                    {
+                        Seq = payload.GetUInt("seq"),
+                        Ok = payload.GetBool("ok"),
+                        Error = payload.GetString("error"),
+                        Payload = payload.GetBytes("payload")
+                    };
+
+                case MsgType.ServerPush:
+                    return new ServerPush
+                    {
+                        Opcode = payload.GetUInt("opcode"),
+                        Payload = payload.GetBytes("payload")
+                    };
+
+                case MsgType.Command:
+                    return new CommandRequest
+                    {
+                        Seq = payload.GetUInt("seq"),
+                        Opcode = payload.GetUInt("opcode"),
+                        Payload = payload.GetBytes("payload")
                     };
 
                 case MsgType.Snapshot:
@@ -258,7 +308,7 @@ namespace Cuvara.Netcode.Codec
 
             foreach (var item in payload.GetArray("entities"))
             {
-                snapshot.Entities.Add(new EntitySnapshot
+                var entity = new EntitySnapshot
                 {
                     Id = item.GetString("id"),
                     Type = item.GetString("type"),
@@ -289,8 +339,49 @@ namespace Cuvara.Netcode.Codec
                     // the same animator from the same level-triggered action field and hits
                     // the same repeated-attack problem. Leaving it out of one encoding would
                     // make retriggering work on Protobuf and silently not on JSON.
-                    ActionSeq = item.GetUInt("action_seq")
-                });
+                    ActionSeq = item.GetUInt("action_seq"),
+
+                    // Absent leaves 0, "every field present" -- the same reading a server that
+                    // never sends a partial update needs, so no second rule.
+                    ChangedFields = item.GetUInt("changed_fields"),
+
+                    // Protocol version 3. Names are wire.proto's snake_case, identical to the Go
+                    // struct tags. owner_id is the JSON twin of the interned `owner` handle: this
+                    // encoding never interns, so the server names the owner outright.
+                    Z = item.GetFloat("z"),
+                    VelX = item.GetFloat("vel_x"),
+                    VelY = item.GetFloat("vel_y"),
+                    VelZ = item.GetFloat("vel_z"),
+                    Owner = item.GetUInt("owner"),
+                    OwnerId = item.GetString("owner_id"),
+                    SpawnSeq = item.GetUInt("spawn_seq")
+                };
+
+                foreach (var stat in item.GetArray("stats"))
+                {
+                    entity.Stats.Add(new StatValue(stat.GetUInt("stat_id"), stat.GetInt("value")));
+                }
+
+                foreach (var id in item.GetArray("stats_removed"))
+                {
+                    entity.StatsRemoved.Add(ReadUInt(id));
+                }
+
+                foreach (var status in item.GetArray("statuses"))
+                {
+                    entity.Statuses.Add(new StatusEffect(
+                        status.GetUInt("effect_id"),
+                        status.GetUInt("stacks"),
+                        (ulong)System.Math.Max(0L, status.GetLong("expires_tick")),
+                        status.GetUInt("source")));
+                }
+
+                foreach (var id in item.GetArray("statuses_removed"))
+                {
+                    entity.StatusesRemoved.Add(ReadUInt(id));
+                }
+
+                snapshot.Entities.Add(entity);
             }
 
             foreach (var removed in payload.GetArray("removed"))
@@ -319,10 +410,27 @@ namespace Cuvara.Netcode.Codec
                     Amount = item.GetInt("amount"),
                     AbilityId = item.GetUInt("ability_id"),
                     Flags = (GameEventFlags)item.GetUInt("flags"),
+                    EffectId = item.GetUInt("effect_id"),
                 });
             }
 
             return snapshot;
+        }
+
+        /// <summary>
+        /// A bare number inside an array (<c>stats_removed</c>, <c>statuses_removed</c>). A
+        /// negative, fractional-overflow or non-number element reads as 0, which no content id
+        /// uses (ids are allocated from 1), so it can never remove a real entry.
+        /// </summary>
+        private static uint ReadUInt(JsonValue value)
+        {
+            if (value == null || value.Kind != JsonKind.Number)
+            {
+                return 0u;
+            }
+
+            double n = value.AsNumber();
+            return n < 0d || n > uint.MaxValue ? 0u : (uint)n;
         }
     }
 }

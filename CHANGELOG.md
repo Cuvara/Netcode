@@ -2,13 +2,80 @@
 
 ## [Unreleased]
 
+Wire protocol version 3 — "Core v3" (ADR-28..31). Targets **0.46.0**. **Needs
+`com.rpgmmo.shared-gamelogic` `sgl-v0.7.0`** (does not compile against `sgl-v0.6.0`).
+
+### Added
+- **Wire protocol 3 bindings** — `Runtime/Protocol/Generated/Wire.cs` is a byte copy of the
+  server's regenerated `GameServer/Net/Generated/RpgMmo/Wire/V1/Wire.cs` (protoc 29.3).
+  `MsgType.Command` (32), `CommandResult` (33), `ServerPush` (34); `GameEventType.StatusApplied`
+  (7), `StatusRemoved` (8), `ProjectileHit` (9).
+- **Snapshot v3 state** — `EntitySnapshot.Z`, `VelX/VelY/VelZ`, `Owner` (handle) / `OwnerId`
+  (its JSON twin), `SpawnSeq`, `Stats`/`StatsRemoved`, `Statuses`/`StatusesRemoved`, with new
+  `StatValue`/`StatusEffect` message types, decoded by both codecs (the pooled Protobuf decode
+  clears the lists per entity). `ResolvedEntity` carries them through a new constructor taking
+  `in ResolvedEntity core` plus every v3 field (`HasVersion3Fields`); `SnapshotResolver` resolves
+  the projectile `owner` and each status `source` handle after the snapshot's own bindings land,
+  reporting an unbound one as null and counting it in `UnresolvedEntityReferences` without
+  aborting the snapshot. `WorldState.Apply` hands them to Shared.GameLogic's
+  `EntitySnapshotData` v3 constructor, so `SnapshotMerger` merges the new mask bits
+  (`0x0200`-`0x2000`). `GameEvent.EffectId` / `ResolvedGameEvent.EffectId` (new 7-argument
+  constructor).
+- **Input v3** — `InputMessage.AimZ`, `RenderTick`, `RenderAlpha`, `Jump`, `SpawnSeq`, and
+  `InputMessage.SetRenderTime(double renderTick)` to fill the render pair from
+  `WorldViewBinder.RenderTick`. `GameSessionClient.SendInput(InputMessage)` sends a full message.
+  All v3 fields are elided at zero in both encodings (a v2-shaped input is byte-identical).
+- **Command channel (ADR-30)** — `GameSessionClient.SendCommandAsync(uint opcode, byte[] payload,
+  CancellationToken)` / `NetworkClient.SendCommandAsync(...)` return `UniTask<CommandResult>`
+  correlated by a per-connection seq starting at 1; `CommandResultReceived` and
+  `ServerPushReceived` events on both. Channel failures complete with `Ok == false` and a
+  `CommandChannelErrors` name instead of throwing or hanging: `client_not_connected`,
+  `client_protocol_too_old` (server echoed < 3; checked before sending) and
+  `client_connection_closed` (in flight when the connection ended, including a reconnect or
+  transfer). `SupportsCommands`, `PendingCommandCount`, `UnmatchedCommandResults` on the session.
+  `CommandRequest`/`CommandResult`/`ServerPush` messages in both codecs (JSON `payload` is base64,
+  as Go marshals `[]byte`).
+- **Character slots (ADR-31)** — `NetworkClient.CharacterId` (sent as
+  `EnterWorldRequest.character_id` on every connect, dungeon entry and transfer; a reconnect
+  rejoins as the character the lost session played), `GameSessionClient.CharacterId` /
+  `NetworkClient.ActiveCharacterId` (the server's `JoinTokenResponse.character_id` echo),
+  `GatewayClient.EnterWorldAsync(mapId, partyId, characterId, ct)`. Empty is omitted from the wire.
+- **3D prediction (ADR-28)** — `LocalMovePredictor.UseServerProtocol(uint)` selects
+  `CharacterMotor` for a protocol 3 server and keeps the planar `MovementSystem` path for
+  protocol 2 / unversioned (the default, bit-identical to 0.45.0). `SetMapGeometry`,
+  `SetMotorParams`, `RecordInput(tick, x, y, jump)`, `Reconcile(Vec3, float verticalVelocity,
+  long, long)`, `Position3`, `SimulatedPosition3`, `VerticalVelocity`, `IsGrounded`,
+  `UsesCharacterMotor`, `Geometry`, `MotorParameters`. An airborne body takes a passive motor step
+  on ticks nothing else steps, so gravity does not wait for input. `WorldViewBinder` reconciles
+  with height and `vel_z` when the predictor runs the motor.
+- **Projectile prediction (ADR-29)** — `ProjectilePredictor`: `Fire` allocates the `spawn_seq`
+  and predicts with `ProjectileLogic`; `ApplySnapshot`/`TryHandOver` hand over to the
+  authoritative entity with the same `spawn_seq` (`HandedOver`); an unclaimed prediction is
+  dropped after `HandoverTimeoutSeconds` (`Unconfirmed`).
+- `WireProtocolVersion.MinimumServerVersion` (2), `CommandChannel` (3), `Motor3D` (3),
+  `Supports(serverVersion, feature)`. `JsonValue.AsNumber`.
+- EditMode tests: `CoreV3WireTests`, `CommandChannelTests`, `SnapshotV3ResolveTests`,
+  `PredictionModelSelectionTests` (61 tests).
+
 ### Changed
+- **`WireProtocolVersion.Current` is 3** (was 2), in step with the C# and Go servers.
+  `IsCompatible` now accepts a server echoing 2 or 3 (or nothing); a server ahead is still
+  refused. **Rollout:** a game server still on protocol 2 refuses a protocol 3 client by exact
+  match, so the server leg must be deployed before a client on this version ships.
+- **DOTS Sample** calls `LocalMovePredictor.UseServerProtocol(client.ServerProtocolVersion)` after
+  each join, so it predicts with the motor against a protocol 3 server.
+- The JSON snapshot reader also reads `changed_fields` (absent = 0 = every field present, as
+  before).
+- `GameEvent.ToString()` / `ResolvedGameEvent.ToString()` include `effect=`.
+- `x-manualDependencies` and the CI rows pin `sgl-v0.7.0` (was `sgl-v0.5.0` in `package.json`,
+  `sgl-v0.6.0` in CI). **CI fails until that tag exists**, and the `wire` job until the server's
+  protocol 3 bindings are on its `develop`.
 - **CI tests against the Shared.GameLogic the game ships** - the package CI's
   `com.rpgmmo.shared-gamelogic` pin moves `sgl-v0.5.0` -> `sgl-v0.6.0` (all three rows), matching
   `IndieRPGMMOAdventure`'s `packages-lock.json`. sgl-v0.6.0 removes the ten-argument positional
   `EntitySnapshotData` constructor (rpg-mmo-server #388); `WorldState.Apply`, the only call site, already
   passes `actionSeq:`/`changedFields:` by name, so it compiles unchanged. The `com.cuvara.dots` pin
-  (`v0.29.0`) already matches the client.
+  (`v0.29.0`) already matches the client. (Superseded by the `sgl-v0.7.0` move above.)
 
 ## [0.45.0] - 2026-09-24
 

@@ -147,7 +147,25 @@ namespace Cuvara.Netcode.Client
         /// with <c>Token already used</c> rather than merely failing again.
         /// </remarks>
         public UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken) =>
-            EnterWorldAsync(mapId, null, cancellationToken);
+            EnterWorldCoreAsync(mapId, null, null, cancellationToken);
+
+        /// <summary>
+        /// Asks for a server for <paramref name="mapId"/> -- or, with a
+        /// <paramref name="partyId"/>, a dungeon instance of it -- playing
+        /// <paramref name="characterId"/>.
+        /// </summary>
+        /// <param name="mapId">The map to enter, or the dungeon content to instance.</param>
+        /// <param name="partyId">Null or empty for a map; a party id for a dungeon instance.</param>
+        /// <param name="characterId">
+        /// The roster character to play (ADR-31), or null/empty for the account's default. The
+        /// gateway refuses an id that differs from the <c>cid</c> claim of the token this
+        /// connection authenticated with, so the auth provider must have minted that token for
+        /// the same character.
+        /// </param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        public UniTask<MapAssignment> EnterWorldAsync(
+            string mapId, string partyId, string characterId, CancellationToken cancellationToken) =>
+            EnterWorldCoreAsync(mapId, partyId, characterId, cancellationToken);
 
         /// <summary>
         /// Asks for a DUNGEON INSTANCE of <paramref name="contentId"/> for
@@ -184,11 +202,11 @@ namespace Cuvara.Netcode.Client
                     nameof(partyId));
             }
 
-            return EnterWorldAsync(contentId, partyId, cancellationToken);
+            return EnterWorldCoreAsync(contentId, partyId, null, cancellationToken);
         }
 
-        private async UniTask<MapAssignment> EnterWorldAsync(
-            string mapId, string partyId, CancellationToken cancellationToken)
+        private async UniTask<MapAssignment> EnterWorldCoreAsync(
+            string mapId, string partyId, string characterId, CancellationToken cancellationToken)
         {
             var connection = RequireHandshakeConnection();
 
@@ -202,7 +220,12 @@ namespace Cuvara.Netcode.Client
 
                 await connection.SendFrameAsync(
                     MsgType.EnterWorld,
-                    new EnterWorldRequest { MapId = mapId, PartyId = partyId ?? string.Empty },
+                    new EnterWorldRequest
+                    {
+                        MapId = mapId,
+                        PartyId = partyId ?? string.Empty,
+                        CharacterId = characterId ?? string.Empty,
+                    },
                     timeout.Token);
 
                 var frame = await ReceiveAsync(connection, timeout.Token);

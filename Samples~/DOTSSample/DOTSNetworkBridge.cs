@@ -556,6 +556,13 @@ namespace DOTSSample
 
             _predictor = new LocalMovePredictor(settings);
 
+            // Step with the model the server moves this player with: the 3D CharacterMotor
+            // for a protocol 3 server, the planar MovementSystem for protocol 2. Over this
+            // sample's flat map the two differ only in float rounding -- which is exactly the
+            // drift prediction exists to rule out, so the choice follows the server rather
+            // than a default.
+            _predictor.UseServerProtocol(_client?.ServerProtocolVersion ?? 0u);
+
             // Deferred spawn is a RUNTIME switch rather than a build-time one on purpose.
             // Its effect is a percentage of frozen frames in an entity's first quarter
             // second, and a percentage is only readable against the same scene, the same
