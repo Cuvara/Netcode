@@ -6,6 +6,11 @@ Wire protocol version 3 — "Core v3" (ADR-28..31). Targets **0.46.0**. **Needs
 `com.rpgmmo.shared-gamelogic` `sgl-v0.7.0`** (does not compile against `sgl-v0.6.0`).
 
 ### Added
+
+- **`LocalMovePredictor.Reconcile(Vec3, float verticalVelocity, long ackTick)`**: the 3D form of the
+  two-argument reconcile, for callers that cannot supply the snapshot's base tick (the
+  `com.cuvara.dots` prediction system). Without it the DOTS path could only reconcile the ground
+  plane, and a 3D motor's height was never corrected.
 - **Wire protocol 3 bindings** — `Runtime/Protocol/Generated/Wire.cs` is a byte copy of the
   server's regenerated `GameServer/Net/Generated/RpgMmo/Wire/V1/Wire.cs` (protoc 29.3).
   `MsgType.Command` (32), `CommandResult` (33), `ServerPush` (34); `GameEventType.StatusApplied`

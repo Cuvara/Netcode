@@ -1148,6 +1148,15 @@ namespace Cuvara.Netcode.Prediction
             ReconcileCore(_predicted.WithXY(authoritative), ackTick, serverBaseTick);
 
         /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long)"/>: as the four-argument overload
+        /// below, for a caller that cannot supply the snapshot's base tick (the DOTS path).
+        /// Such callers keep the two-dimensional overload's behaviour exactly, extended to
+        /// height and vertical velocity.
+        /// </summary>
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick) =>
+            Reconcile(authoritative, verticalVelocity, ackTick, NoServerTick);
+
+        /// <summary>
         /// The 3D form of <see cref="Reconcile(Vec2,long,long)"/>: the local player's full
         /// authoritative position and vertical velocity (<c>EntitySnapshot.z</c> /
         /// <c>vel_z</c>), for a predictor running the 3D motor.
