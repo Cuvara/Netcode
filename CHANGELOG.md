@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-03
+
 Wire protocol version 3 — "Core v3" (ADR-28..31). Targets **0.46.0**. **Needs
 `com.rpgmmo.shared-gamelogic` `sgl-v0.7.0`** (does not compile against `sgl-v0.6.0`).
 
