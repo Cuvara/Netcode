@@ -52,6 +52,25 @@ namespace Cuvara.Netcode.Protocol.Messages
 
         /// <summary>Target reached level Amount. Only ever sent to the subject.</summary>
         LevelUp = 6,
+
+        /// <summary>
+        /// Source applied status <see cref="GameEvent.EffectId"/> to Target; Amount is the stack
+        /// count after applying. Protocol version 3.
+        /// </summary>
+        StatusApplied = 7,
+
+        /// <summary>
+        /// Status <see cref="GameEvent.EffectId"/> ended on Target (expired, cleansed or
+        /// replaced). Protocol version 3.
+        /// </summary>
+        StatusRemoved = 8,
+
+        /// <summary>
+        /// A projectile owned by Source hit Target. Damage it dealt, if any, is a separate
+        /// <see cref="Damage"/> event; this one exists so a client can play the impact even when
+        /// the hit dealt nothing. Protocol version 3.
+        /// </summary>
+        ProjectileHit = 9,
     }
 
     /// <summary>Presentation flags on a <see cref="GameEvent"/>.</summary>
@@ -130,9 +149,17 @@ namespace Cuvara.Netcode.Protocol.Messages
 
         public GameEventFlags Flags { get; set; }
 
+        /// <summary>
+        /// Content id of the status effect for <see cref="GameEventType.StatusApplied"/> /
+        /// <see cref="GameEventType.StatusRemoved"/>, and of the status that ticked for a
+        /// periodic Damage / Heal (<see cref="GameEventFlags.Periodic"/>). 0 when none.
+        /// Protocol version 3 (wire field 9).
+        /// </summary>
+        public uint EffectId { get; set; }
+
         public override string ToString() =>
             $"{Type}(src={Source}{(SourceId.Length > 0 ? "/" + SourceId : "")} " +
             $"dst={Target}{(TargetId.Length > 0 ? "/" + TargetId : "")} " +
-            $"amount={Amount} ability={AbilityId} flags={Flags})";
+            $"amount={Amount} ability={AbilityId} effect={EffectId} flags={Flags})";
     }
 }

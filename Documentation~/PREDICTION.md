@@ -56,6 +56,82 @@ Replay calls `MovementSystem.TryMove` — the **exact** entry point the server's
    moves at unit speed, not 1.414x. Calling `Integrate` directly with unnormalized
    input would predict diagonal movement 41% too fast.
 
+### 3D movement: the character motor (protocol 3, 0.46.0)
+
+Against a protocol 3 server (ADR-28) every step goes through `Shared.GameLogic`'s
+`CharacterMotor.Step` instead of `MovementSystem.TryMove`: planar input times speed, gravity, a
+jump honoured only when grounded, step-up onto low boxes, a slope limit, and walls — over a
+`MapGeometry`. The predicted body carries height, vertical velocity and grounded-ness. Requires
+`sgl-v0.7.0`.
+
+```csharp
+// After every join, before the first Reconcile:
+predictor.UseServerProtocol(session.ServerProtocolVersion); // 3 -> motor, 2/0 -> planar
+predictor.SetMapGeometry(mapGeometry);   // the SAME map file the server loaded; null = flat
+predictor.SetMotorParams(MotorParams.Default); // only if content overrides the defaults
+
+// Input: the jump rides on the step this input takes.
+predictor.RecordInput(tick, moveX, moveY, jump);
+
+// Reconcile with height and vertical velocity (WorldViewBinder does this itself when
+// predictor.UsesCharacterMotor):
+predictor.Reconcile(new Vec3(e.X, e.Y, e.Z), e.VelZ, world.AckTick, world.Tick);
+
+Vec3 render = predictor.Position3; // server (x, y, z) -> Unity (x, z, y)
+```
+
+- **Model selection is by protocol, not by configuration.** `UseServerProtocol` picks the motor
+  for version 3 and the planar path for version 2 or an unversioned server. A call that changes
+  the model resets the predictor; one that keeps it does nothing. The default is planar, so a
+  consumer that never calls it behaves exactly as before.
+- **The planar path is bit-identical to 0.45.0.** Under it height and vertical velocity stay 0,
+  grounded stays true, and `jump` is ignored; every existing prediction test passes unchanged.
+- **Gravity does not wait for input.** The clock, rule 1, the hold window, the history
+  comparison, replay and smoothing are the same code for both models. The one addition: on a
+  base tick that neither an input nor the hold steps, an *airborne* body still takes one motor
+  step with no horizontal input, so a jump keeps rising and falling between keypresses. That
+  passive step stamps the last-moved tick like a held step, so an input arriving later on the
+  same tick re-takes the tick's single step (rule 1) rather than adding a second.
+- **Under the motor a step always happens.** `CharacterMotor.Step` integrates gravity even for a
+  stop or a refused vector, so the "refused input rolls back to the tick start" rule of the planar
+  path becomes "the tick's step is the motor's step with that input".
+- **Grounded is derived on reconcile.** A snapshot carries position and `vel_z`, not the flag:
+  zero vertical velocity with the feet within 1 mm of `MapGeometry.SupportHeight` is standing,
+  anything else is airborne. The `Vec2` overloads keep the predicted height and vertical state.
+- **The geometry must be the server's.** A flat prediction of a hilly map is corrected on every
+  step. `MapGeometry.Flat(settings.Bounds)` is the default and is exactly the protocol 2 world.
+- `Position3.X/Y` always equal `Position.X/Y`; the render offset and the in-step spread gain a
+  vertical component. `LastCorrection` is the 3D distance when height changed, the planar one
+  otherwise.
+
+### Projectile prediction: `ProjectilePredictor` (protocol 3, ADR-29)
+
+Predicts the local player's own skillshots from the button press until the server's projectile
+entity with the same `spawn_seq` appears, then hands over:
+
+```csharp
+var projectiles = new ProjectilePredictor(tickRate, mapGeometry);
+
+uint seq = projectiles.Fire(origin, aimPoint, speed, radius, range); // 0 = refused, send nothing
+input.SpawnSeq = seq; input.AimX = aimPoint.X; /* ... */
+session.SendInput(input);
+
+projectiles.Advance(Time.deltaTime);              // whole server ticks, ProjectileLogic.Step
+client.SnapshotReceived += s => projectiles.ApplySnapshot(s);
+projectiles.HandedOver += (predicted, entityId) => { /* swap visuals */ };
+projectiles.Unconfirmed += predicted => { /* server never claimed it */ };
+```
+
+- Spawn and flight are `ProjectileLogic.Spawn`/`Step` over the same geometry, one step per server
+  tick, so the path matches the server's wherever the inputs agree. The origin cannot match
+  exactly — the server launches from the caster's *authoritative* position — so a small offset at
+  handover is normal and is the game's to blend.
+- The server sends `spawn_seq` only to the owner's connection; any entity carrying one this
+  predictor issued is the authoritative copy. Seqs start at 1 and skip 0 on wrap.
+- A prediction nobody claims (cast refused, or the projectile lived less than a snapshot
+  interval) is dropped after `HandoverTimeoutSeconds` (1 s) and reported, never kept.
+- Hits are not predicted: impact is `PROJECTILE_HIT` and damage is `DAMAGE`, both from the server.
+
 ### Smoothing vs snapping
 
 Every reconcile produces some position error:

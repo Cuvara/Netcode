@@ -62,7 +62,14 @@ PONG            either direction       Heartbeat reply
 KICK            server → client        Forced disconnect with reason
 TRANSFER_MAP    client → gameserver    Request map transfer
 TRANSFER_MAP_RESP gameserver → client  Transfer result
+SEALED_CLIENT_HELLO client → gameserver Sealed-session handshake (Protobuf only)
+SEALED_SERVER_HELLO gameserver → client Sealed-session handshake (Protobuf only)
+COMMAND (32)    client → gameserver    {seq, opcode, payload} — protocol 3
+COMMAND_RESULT (33) gameserver → client {seq, ok, error, payload} — protocol 3
+SERVER_PUSH (34) gameserver → client   {opcode, payload} — protocol 3
 ```
+
+18-31 stay reserved for the gateway hop's handshake.
 
 **Numeric values are FROZEN.** Never renumber; only append.
 
@@ -118,13 +125,40 @@ enum EntityType {
   MOB        = 2;
   NPC        = 3;    // reserved, not yet produced
   ITEM       = 4;    // reserved
-  PROJECTILE = 5;    // reserved
+  PROJECTILE = 5;    // produced from protocol 3 (ADR-29)
 }
 ```
 
 The enum costs 2 bytes vs 8+ for a string type. When `type` is `UNSPECIFIED`,
 the `type_name` string field is the fallback — forward compatibility for kinds
 this schema does not enumerate yet.
+
+## Protocol version 3 (Netcode 0.46.0)
+
+`WireProtocolVersion.Current = 3` (ADR-28..31). A version 3 server keeps serving version 2 peers
+the version 2 shape, and this client accepts a server echoing 2 or 3 (or nothing); every v3
+feature is gated on the game server's echoed `protocol_version` being at least 3.
+
+| Area | Wire | Netcode surface |
+|---|---|---|
+| 3D (ADR-28) | `EntitySnapshot.z` (14), `vel_x/y/z` (15-17); `InputMessage.aim_z` (9), `jump` (11) | `EntitySnapshot.Z/VelX/VelY/VelZ`, `ResolvedEntity.Z/...`, `InputMessage.AimZ/Jump` |
+| Projectiles (ADR-29) | `EntitySnapshot.owner` (18, handle) / `owner_id` (24, JSON), `spawn_seq` (19); `InputMessage.spawn_seq` (12), `render_tick` (10), `render_alpha` (13) | `ResolvedEntity.OwnerId/SpawnSeq`, `InputMessage.SpawnSeq`, `InputMessage.SetRenderTime`, `ProjectilePredictor` |
+| Stat block / statuses (ADR-30) | `stats` (20), `stats_removed` (21), `statuses` (22), `statuses_removed` (23); `StatValue`, `StatusEffect` | `ResolvedEntity.Stats/Statuses` (SGL `StatValueData`/`StatusEffectData`), merged by `SnapshotMerger` |
+| Events | `GameEvent.effect_id` (9); types `STATUS_APPLIED` (7), `STATUS_REMOVED` (8), `PROJECTILE_HIT` (9) | `ResolvedGameEvent.EffectId`, `GameEventType` |
+| Commands (ADR-30) | `CommandRequest`, `CommandResult`, `ServerPush` (MsgType 32-34) | `SendCommandAsync`, `CommandResultReceived`, `ServerPushReceived` |
+| Characters (ADR-31) | `EnterWorldRequest.character_id` (3), `JoinTokenResponse.character_id` (6) | `NetworkClient.CharacterId`, `ActiveCharacterId` |
+
+`changed_fields` bits added in version 3: `0x0200` z, `0x0400` velocity (all three axes),
+`0x0800` owner / owner_id / spawn_seq, `0x1000` stats (+ removed), `0x2000` statuses (+ removed).
+On a delta with `0x1000`/`0x2000` the lists carry only changed entries; ids in the `_removed`
+list are dropped and everything else keeps its last-known value.
+
+Legacy JSON uses the same snake_case names as `wire.proto` (and the Go struct tags). `owner_id`
+is the JSON twin of the interned `owner` handle; `payload` is padded standard base64. Every v3
+field is omitted when zero, so a peer using none of them produces version 2 bytes.
+
+See `NETCODE.md` → "Wire protocol version 3" for the client API and `PREDICTION.md` → "3D
+movement" for prediction.
 
 ## Kick reasons
 

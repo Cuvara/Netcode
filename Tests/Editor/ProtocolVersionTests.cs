@@ -55,12 +55,13 @@ namespace Cuvara.Netcode.Tests.Editor
         /// #158. This test did its job on that change: the bump failed here first, which is
         /// exactly the "make me deliberate" the pin exists for. The server had already moved
         /// to 2, and because it refuses any inexact version match, a client left at 1 was
-        /// being refused at the handshake rather than served the older wire.
+        /// being refused at the handshake rather than served the older wire. Bumped to 3 in
+        /// 0.46.0 for ADR-28..31 (Core v3), in step with both servers.
         /// </remarks>
         [Test]
         public void CurrentVersionIsPinned()
         {
-            Assert.That(WireProtocolVersion.Current, Is.EqualTo(2u),
+            Assert.That(WireProtocolVersion.Current, Is.EqualTo(3u),
                 "mirror any bump in shared/messages/messages.go and GameServer/Net/WireProtocol.cs");
         }
 
@@ -96,6 +97,9 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             Assert.That(WireProtocolVersion.IsCompatible(WireProtocolVersion.Current + 1), Is.False);
             Assert.That(WireProtocolVersion.IsCompatible(9999u), Is.False);
+            // Behind the supported range: version 1 predates field-level delta, which every
+            // snapshot merge now assumes.
+            Assert.That(WireProtocolVersion.IsCompatible(WireProtocolVersion.MinimumServerVersion - 1), Is.False);
         }
 
         // ---- The client sends its version by default -----------------------------

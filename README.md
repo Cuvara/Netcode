@@ -10,10 +10,13 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 - **Two-hop handshake** — Gateway auth → JoinToken → Game server connect. Retryable assignment refusals ("server is starting…") consume a join attempt with a jittered pause; the gateway's terminal precondition answers abort with the real error
 - **Automatic reconnect** — an explicit policy by disconnect cause (`ReconnectPolicy`, table in `Documentation~/NETCODE.md`): plain drops, heartbeat timeouts and transport errors retry at once, a `server_shutdown` retries after a pause, evictions / user close / protocol faults never. Exponential backoff + jitter inside a 60 s budget (the server's 30 s entity hold starts when the server notices the drop, not when the client does); every round re-authenticates through the registered `IAuthProvider`; permanent server refusals stop the loop early. Observable via `ReconnectProgress`/`ReconnectAttemptStarted`/`Reconnected`/`ReconnectFailed` and the `Reconnecting` state
 - **One operation at a time** — connect, transfer, disconnect and reconnect rounds run under an operation generation; a cancelled or superseded flow closes what it dialed and never flips state. Elapsed time (heartbeat age, RTT, budget) runs on a monotonic clock
-- **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync
+- **Protocol messages** — Auth, JoinToken, EnterWorld, Ping/Pong, Kick, Disconnect, Snapshot, Input, Resync, and from wire protocol **3** the command channel (Command / CommandResult / ServerPush)
+- **Wire protocol 3 ("Core v3", 0.46.0)** — 3D state (`z`, velocity), projectile entities with `owner`/`spawn_seq`, the content stat block and status effects, `effect_id` on game events, and the version 3 input fields (`jump`, `aim_z`, `render_tick`/`render_alpha`, `spawn_seq`). A version 2 server is still supported; every v3 feature is gated on the version the game server echoes
+- **Command channel** — `SendCommandAsync(opcode, payload)` returns the server's `CommandResult`, correlated by a per-connection seq; `ServerPushReceived` for unsolicited messages. Payloads are opaque here and encoded with Shared.GameLogic's gameplay codec. Channel failures (not connected, server older than protocol 3, connection closed while in flight) complete with a named `CommandChannelErrors` code instead of hanging
+- **Character slots** — `NetworkClient.CharacterId` selects the roster character on enter-world; the server's echo is `ActiveCharacterId`
 - **Snapshot resolution** — Entity handle table, delta resolution
 - **World state** — Adapter between wire snapshots and `Shared.GameLogic` simulation types
-- **Prediction** — Local player movement predicted on input and reconciled against the server's `AckTick`, replaying through `Shared.GameLogic` so client and server agree bit-for-bit. Refuses to run rather than approximate when it cannot match the server. Movement only — combat stays server-authoritative
+- **Prediction** — Local player movement predicted on input and reconciled against the server's `AckTick`, replaying through `Shared.GameLogic` so client and server agree bit-for-bit. Against a protocol 3 server it steps the 3D `CharacterMotor` over the map's `MapGeometry` (gravity, jump, step-up, walls); against protocol 2 the planar `MovementSystem`. `ProjectilePredictor` predicts the player's own skillshots until the authoritative projectile with the same `spawn_seq` arrives. Refuses to run rather than approximate when it cannot match the server. Hits and damage stay server-authoritative
 - **Map transfer** — `NetworkClient.TransferToMapAsync` for seamless map transitions, reusing the gateway redirect flow with no new wire message
 - **Network metrics** — `INetworkMetrics` / `NetworkMetrics` with observable RTT, jitter, snapshot rate, bandwidth, reconciliation tracking; event-driven publishing over a configurable window
 - **VContainer DI** — One-line registration via `NetworkingRegistration.RegisterNetworking()`
@@ -74,10 +77,11 @@ with `CS0246: The type or namespace name 'VContainer' could not be found`.
 **Must be added manually to your project's `Packages/manifest.json`:**
 
 - **Shared.GameLogic** (`com.rpgmmo.shared-gamelogic`) — deterministic game logic shared
-  with the server.
+  with the server. **0.46.0 needs `sgl-v0.7.0`** (character motor, projectiles, map
+  geometry, the snapshot v3 types); it does not compile against `sgl-v0.6.0`.
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.9"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.7.0"
 ```
 
 This one cannot be declared by the package. A UPM package's `dependencies` accepts

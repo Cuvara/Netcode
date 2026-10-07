@@ -63,5 +63,13 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// </para>
         /// </remarks>
         public uint ProtocolVersion { get; set; }
+
+        /// <summary>
+        /// The character this connection plays, taken from the join token's <c>cid</c> claim
+        /// (ADR-31, protocol version 3). Echoed so the client binds its local view to the right
+        /// character without trusting its own request. Empty on a rejected join and from a
+        /// server predating character slots.
+        /// </summary>
+        public string CharacterId { get; set; } = string.Empty;
     }
 }

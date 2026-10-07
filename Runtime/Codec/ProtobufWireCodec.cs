@@ -184,6 +184,9 @@ namespace Cuvara.Netcode.Codec
                     {
                         MapId = m.MapId ?? string.Empty,
                         PartyId = m.PartyId ?? string.Empty,
+                        // Empty is elided by proto3, so a default-character entry is the SAME
+                        // bytes a pre-slot client produced (ADR-31).
+                        CharacterId = m.CharacterId ?? string.Empty,
                     }.ToByteArray();
 
                 case Msg.SealedClientHello m:
@@ -218,6 +221,24 @@ namespace Cuvara.Netcode.Codec
                         // which field gates which, and proto3 elides a zero float anyway.
                         AimX = m.AimX,
                         AimY = m.AimY,
+                        // Protocol version 3. Written unconditionally for the same reason as the
+                        // aim: proto3 elides every zero, so an input that uses none of them is
+                        // byte-identical to a version 2 input, and a version 2 server skips
+                        // them as unknown fields when they are set.
+                        AimZ = m.AimZ,
+                        RenderTick = m.RenderTick,
+                        RenderAlpha = m.RenderAlpha,
+                        Jump = m.Jump,
+                        SpawnSeq = m.SpawnSeq,
+                    }.ToByteArray();
+
+                case Msg.CommandRequest m:
+                    // Opaque: the payload's schema is the opcode's, defined in Shared.GameLogic.
+                    return new Pb.CommandRequest
+                    {
+                        Seq = m.Seq,
+                        Opcode = m.Opcode,
+                        Payload = ByteString.CopyFrom(m.Payload ?? Array.Empty<byte>()),
                     }.ToByteArray();
 
                 case Msg.DisconnectMessage m:
@@ -283,6 +304,42 @@ namespace Cuvara.Netcode.Codec
                             Error = m.Error,
                             TickRate = m.TickRate,
                             ProtocolVersion = m.ProtocolVersion,
+                            CharacterId = m.CharacterId,
+                        };
+                    }
+
+                    case MsgType.CommandResult:
+                    {
+                        var m = Pb.CommandResult.Parser.ParseFrom(bytes);
+                        return new Msg.CommandResult
+                        {
+                            Seq = m.Seq,
+                            Ok = m.Ok,
+                            Error = m.Error,
+                            Payload = m.Payload.ToByteArray(),
+                        };
+                    }
+
+                    case MsgType.ServerPush:
+                    {
+                        var m = Pb.ServerPush.Parser.ParseFrom(bytes);
+                        return new Msg.ServerPush
+                        {
+                            Opcode = m.Opcode,
+                            Payload = m.Payload.ToByteArray(),
+                        };
+                    }
+
+                    case MsgType.Command:
+                    {
+                        // Client -> server only; decoded anyway so a tool or test that reads
+                        // its own outbound frames sees the same shape it sent.
+                        var m = Pb.CommandRequest.Parser.ParseFrom(bytes);
+                        return new Msg.CommandRequest
+                        {
+                            Seq = m.Seq,
+                            Opcode = m.Opcode,
+                            Payload = m.Payload.ToByteArray(),
                         };
                     }
 
@@ -412,6 +469,43 @@ namespace Cuvara.Netcode.Codec
             // does not implement field-delta produces exactly the value that makes
             // the receiver apply every field, which is why this needs no fallback.
             target.ChangedFields = e.ChangedFields;
+
+            // Protocol version 3. Every field written, including the lists, which are
+            // CLEARED first: a pooled entity still holds the previous snapshot's stats, and
+            // appending to them would hand this entity another entity's stat block.
+            target.Z = e.Z;
+            target.VelX = e.VelX;
+            target.VelY = e.VelY;
+            target.VelZ = e.VelZ;
+            // A HANDLE, resolved a layer up like Handle itself; never resolved here.
+            target.Owner = e.Owner;
+            target.OwnerId = e.OwnerId;
+            target.SpawnSeq = e.SpawnSeq;
+
+            target.Stats.Clear();
+            foreach (var stat in e.Stats)
+            {
+                target.Stats.Add(new Msg.StatValue(stat.StatId, stat.Value));
+            }
+
+            target.StatsRemoved.Clear();
+            foreach (var id in e.StatsRemoved)
+            {
+                target.StatsRemoved.Add(id);
+            }
+
+            target.Statuses.Clear();
+            foreach (var status in e.Statuses)
+            {
+                target.Statuses.Add(new Msg.StatusEffect(
+                    status.EffectId, status.Stacks, status.ExpiresTick, status.Source));
+            }
+
+            target.StatusesRemoved.Clear();
+            foreach (var id in e.StatusesRemoved)
+            {
+                target.StatusesRemoved.Add(id);
+            }
         }
 
         /// <summary>Copies one wire event onto a decoded one. Total, for the same reason
@@ -433,6 +527,7 @@ namespace Cuvara.Netcode.Codec
             target.Amount = ev.Amount;
             target.AbilityId = ev.AbilityId;
             target.Flags = (Msg.GameEventFlags)ev.Flags;
+            target.EffectId = ev.EffectId;
         }
 
         /// <summary>

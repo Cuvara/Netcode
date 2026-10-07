@@ -947,7 +947,18 @@ namespace Cuvara.Netcode.View
                         // ordinary play: inputs go at ~15 Hz against a 60 Hz base tick, so
                         // there is a window of up to four base ticks after an
                         // acknowledgement before the next input is recorded (#53).
-                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick, world.Tick);
+                        //
+                        // Under the 3D motor (a protocol 3 server) the height and vertical
+                        // velocity ride along, so the replay starts from the body the server has
+                        // rather than from its shadow on the ground plane.
+                        if (_predictor.UsesCharacterMotor)
+                        {
+                            _predictor.Reconcile(new Vec3(e.X, e.Y, e.Z), e.VelZ, world.AckTick, world.Tick);
+                        }
+                        else
+                        {
+                            _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick, world.Tick);
+                        }
                     }
 
                     // Only the time no frame has advanced yet. AdvanceFrame is the

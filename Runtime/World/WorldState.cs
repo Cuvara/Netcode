@@ -201,9 +201,25 @@ namespace Cuvara.Netcode.World
                     // changedFields now rides through from the wire (#158). Zero still means
                     // "every field present", so a keyframe, a pre-v2 server and any full
                     // entity all keep the behaviour they had before this line existed.
-                    converted[i] = new EntitySnapshotData(
+                    var core = new EntitySnapshotData(
                         e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
                         actionSeq: e.ActionSeq, changedFields: e.ChangedFields);
+
+                    // Protocol version 3 fields ride through the shared type's own v3
+                    // constructor -- the one whose first parameter is a whole core snapshot, so
+                    // no positional overload can capture this call the way the ten-argument one
+                    // captured actionSeq above. SnapshotMerger owns what a delta means for them
+                    // (keep-last-known per mask bit, stats/statuses upserted by id), exactly as it
+                    // does for the protocol 2 fields. A version 2 entity has every one at its
+                    // "not sent" value and takes the plain core unchanged.
+                    converted[i] = e.HasVersion3Fields
+                        ? new EntitySnapshotData(
+                            in core,
+                            e.Z, e.VelX, e.VelY, e.VelZ,
+                            e.OwnerId, e.SpawnSeq,
+                            e.Stats, e.StatsRemoved,
+                            e.Statuses, e.StatusesRemoved)
+                        : core;
                 }
             }
 

@@ -1,5 +1,6 @@
 using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
+using Shared.GameLogic.World;
 
 namespace Cuvara.Netcode.Prediction
 {
@@ -99,11 +100,60 @@ namespace Cuvara.Netcode.Prediction
     /// rather than change, and if one of them genuinely has to change, say so on the dots
     /// side before it lands, not after.</para>
     ///
+    /// <para><b>Two movement models, chosen by the server's protocol version.</b> Against a
+    /// protocol 2 server every step is <see cref="MovementSystem.TryMove"/> in the plane, exactly
+    /// as it always was. Against a protocol 3 server (ADR-28) every step is
+    /// <see cref="CharacterMotor.Step"/> over a <see cref="MapGeometry"/> the game supplies
+    /// (<see cref="SetMapGeometry"/>; <see cref="MapGeometry.Flat"/> of the settings' bounds by
+    /// default): gravity, jumping, step-up and walls, with the predicted state carrying height,
+    /// vertical velocity and grounded-ness. <see cref="UseServerProtocol"/> selects between them.
+    /// Everything else -- the base-tick clock, rule 1, the hold window, the history comparison,
+    /// replay and smoothing -- is the same code for both, so the planar path is bit-identical to
+    /// what it was. The one addition the motor needs is that <b>gravity does not wait for
+    /// input</b>: on a base tick that neither an input nor the hold steps, an AIRBORNE character
+    /// still takes one motor step with no horizontal input, so a jump released mid-air keeps
+    /// falling instead of hanging until the next keypress.</para>
+    ///
     /// <para>Not thread-safe. Drive it from the thread that sends input and consumes
     /// snapshots.</para>
     /// </remarks>
     public sealed class LocalMovePredictor
     {
+        /// <summary>
+        /// The simulated body: ground-plane position plus, for the 3D motor, height, vertical
+        /// velocity and whether it stands on support. Under the planar model Z and VelZ stay 0
+        /// and Grounded stays true, so every planar computation is the one it always was.
+        /// </summary>
+        private readonly struct Body
+        {
+            public readonly float X;
+            public readonly float Y;
+            public readonly float Z;
+            public readonly float VelZ;
+            public readonly bool Grounded;
+
+            public Body(float x, float y, float z, float velZ, bool grounded)
+            {
+                X = x;
+                Y = y;
+                Z = z;
+                VelZ = velZ;
+                Grounded = grounded;
+            }
+
+            public static Body Planar(in Vec2 position) => new Body(position.X, position.Y, 0f, 0f, true);
+
+            public Vec2 XY => new Vec2(X, Y);
+
+            public Vec3 Position => new Vec3(X, Y, Z);
+
+            public Body WithXY(in Vec2 position) => new Body(position.X, position.Y, Z, VelZ, Grounded);
+
+            public Body Shifted(float dx, float dy, float dz) => new Body(X + dx, Y + dy, Z + dz, VelZ, Grounded);
+
+            public bool SameAs(in Body other) =>
+                X == other.X && Y == other.Y && Z == other.Z && VelZ == other.VelZ && Grounded == other.Grounded;
+        }
         private readonly struct PendingInput
         {
             public readonly long Tick;
@@ -137,14 +187,18 @@ namespace Cuvara.Netcode.Prediction
             /// </remarks>
             public readonly long LastMoveTickBefore;
 
+            /// <summary>The input's jump request; only the 3D motor reads it.</summary>
+            public readonly bool Jump;
+
             public PendingInput(
-                long tick, float moveX, float moveY, long baseTick, long lastMoveTickBefore)
+                long tick, float moveX, float moveY, long baseTick, long lastMoveTickBefore, bool jump)
             {
                 Tick = tick;
                 MoveX = moveX;
                 MoveY = moveY;
                 BaseTick = baseTick;
                 LastMoveTickBefore = lastMoveTickBefore;
+                Jump = jump;
             }
         }
 
@@ -191,9 +245,16 @@ namespace Cuvara.Netcode.Prediction
         private int _count;     // live entries
         private long _lastRecordedTick;
 
-        private Vec2 _predicted;      // simulated position: authoritative + replayed inputs
+        private Body _predicted = Body.Planar(Vec2.Zero); // simulated body: authoritative + replayed inputs
         private Vec2 _renderOffset;   // predicted-minus-corrected, decayed to zero
         private Vec2 _step;           // displacement the most recent input produced
+        private float _renderOffsetZ; // vertical part of _renderOffset; 0 under the planar model
+        private float _stepZ;         // vertical part of _step; 0 under the planar model
+
+        // Movement model (see the class remarks). Planar until UseServerProtocol says otherwise.
+        private bool _motor3D;
+        private MapGeometry _geometry;
+        private MotorParams _motorParams = MotorParams.Default;
         private float _sinceInput;    // seconds since it, for spreading that step over frames
         // Starts at 1, never 0: zero is the "nothing held" sentinel for _heldFrom, so a
         // hold set by the very first input on tick 0 would read as no hold at all and
@@ -247,17 +308,17 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         private const int HistoryTicks = 256;
 
-        private readonly Vec2[] _history = new Vec2[HistoryTicks];
+        private readonly Vec3[] _history = new Vec3[HistoryTicks];
         private readonly long[] _historyTick = new long[HistoryTicks];
 
-        private void RecordHistory(long tick, in Vec2 position)
+        private void RecordHistory(long tick, in Body body)
         {
             int i = (int)((tick % HistoryTicks + HistoryTicks) % HistoryTicks);
-            _history[i] = position;
+            _history[i] = body.Position;
             _historyTick[i] = tick;
         }
 
-        private bool TryReadHistory(long tick, out Vec2 position)
+        private bool TryReadHistory(long tick, out Vec3 position)
         {
             int i = (int)((tick % HistoryTicks + HistoryTicks) % HistoryTicks);
             if (_historyTick[i] == tick)
@@ -266,7 +327,7 @@ namespace Cuvara.Netcode.Prediction
                 return true;
             }
 
-            position = Vec2.Zero;
+            position = Vec3.Zero;
             return false;
         }
 
@@ -279,12 +340,12 @@ namespace Cuvara.Netcode.Prediction
         /// corrected again — a correction that never converges, applied at the snapshot
         /// rate, which is exactly the artefact the history exists to remove.
         /// </remarks>
-        private void ShiftHistory(float dx, float dy)
+        private void ShiftHistory(float dx, float dy, float dz)
         {
             for (int i = 0; i < HistoryTicks; i++)
             {
                 if (_historyTick[i] == 0) continue;
-                _history[i] = new Vec2(_history[i].X + dx, _history[i].Y + dy);
+                _history[i] = new Vec3(_history[i].X + dx, _history[i].Y + dy, _history[i].Z + dz);
             }
         }
 
@@ -344,7 +405,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int Adoptions { get; private set; }
 
-        private Vec2 _tickStart;
+        private Body _tickStart;
         private long _tickStartTick;
 
         // _lastMoveTick as it stood before that first step. Replay seeds its own bookkeeping
@@ -388,6 +449,7 @@ namespace Cuvara.Netcode.Prediction
             IsEnabled = settings.IsUsable;
             _dt = IsEnabled ? MovementSystem.DeltaTimeForTickRate(settings.TickRate) : 0f;
             _maxCatchUpTicks = GameConstants.MaxBankedMovementTicks(settings.TickRate);
+            _geometry = MapGeometry.Flat(settings.Bounds);
 
             // DeltaTimeForTickRate is the server's own helper, so this cannot disagree
             // with the server's dt for a tick rate both sides agree on. A zero here would
@@ -426,6 +488,23 @@ namespace Cuvara.Netcode.Prediction
                 return new Vec2(
                     _predicted.X - _step.X * remaining + _renderOffset.X,
                     _predicted.Y - _step.Y * remaining + _renderOffset.Y);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Position"/> with height: where to render the local player under the 3D
+        /// motor, in the server's (x, y, z) space -- map to Unity as (x, z, y). Its X and Y are
+        /// always exactly <see cref="Position"/>'s; Z is 0 under the planar model.
+        /// </summary>
+        public Vec3 Position3
+        {
+            get
+            {
+                float remaining = 1f - StepProgress;
+                return new Vec3(
+                    _predicted.X - _step.X * remaining + _renderOffset.X,
+                    _predicted.Y - _step.Y * remaining + _renderOffset.Y,
+                    _predicted.Z - _stepZ * remaining + _renderOffsetZ);
             }
         }
 
@@ -517,7 +596,90 @@ namespace Cuvara.Netcode.Prediction
         public float ObservedInputInterval => _inputInterval;
 
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
-        public Vec2 SimulatedPosition => _predicted;
+        public Vec2 SimulatedPosition => _predicted.XY;
+
+        /// <summary><see cref="SimulatedPosition"/> with height. Z is 0 under the planar model.</summary>
+        public Vec3 SimulatedPosition3 => _predicted.Position;
+
+        /// <summary>
+        /// Predicted vertical velocity, units per second (positive is up). Always 0 under the
+        /// planar model.
+        /// </summary>
+        public float VerticalVelocity => _predicted.VelZ;
+
+        /// <summary>
+        /// Whether the predicted body stands on support. Always true under the planar model, which
+        /// has no air to be in.
+        /// </summary>
+        public bool IsGrounded => _predicted.Grounded;
+
+        /// <summary>
+        /// True when steps go through <see cref="CharacterMotor.Step"/> (a protocol 3 server);
+        /// false for the planar <see cref="MovementSystem.TryMove"/> path (protocol 2 or
+        /// unversioned). Set by <see cref="UseServerProtocol"/>.
+        /// </summary>
+        public bool UsesCharacterMotor => _motor3D;
+
+        /// <summary>
+        /// The collision world the 3D motor steps against. <see cref="MapGeometry.Flat"/> of
+        /// <see cref="PredictionSettings.Bounds"/> until <see cref="SetMapGeometry"/> supplies the
+        /// map's own -- which it must, because the server steps against the map file and a flat
+        /// prediction of a hilly map is corrected on every step.
+        /// </summary>
+        public MapGeometry Geometry => _geometry;
+
+        /// <summary>Motor tuning in force; <see cref="MotorParams.Default"/> unless replaced.</summary>
+        public MotorParams MotorParameters => _motorParams;
+
+        /// <summary>
+        /// Selects the movement model the game server uses, from the protocol version it echoed on
+        /// join (<c>GameSessionClient.ServerProtocolVersion</c>): the 3D
+        /// <see cref="CharacterMotor"/> for version 3 and above, the planar
+        /// <see cref="MovementSystem"/> for version 2 and for an unversioned server.
+        /// </summary>
+        /// <remarks>
+        /// Call it after every join, before the first <see cref="Reconcile(Vec2,long)"/>. A call
+        /// that CHANGES the model also <see cref="Reset"/>s the predictor -- state predicted
+        /// under one model is not a valid starting point for the other -- and a call that keeps
+        /// it changes nothing.
+        /// </remarks>
+        public void UseServerProtocol(uint serverProtocolVersion)
+        {
+            bool motor = Cuvara.Netcode.Protocol.WireProtocolVersion.Supports(
+                serverProtocolVersion, Cuvara.Netcode.Protocol.WireProtocolVersion.Motor3D);
+            if (motor == _motor3D)
+            {
+                return;
+            }
+
+            _motor3D = motor;
+            Reset();
+        }
+
+        /// <summary>
+        /// Supplies the map's collision world for the 3D motor (ADR-28). Null restores
+        /// <see cref="MapGeometry.Flat"/> of <see cref="PredictionSettings.Bounds"/>, which is the
+        /// protocol 2 world and what the server uses for a map with no map file.
+        /// </summary>
+        /// <remarks>
+        /// Must be the SAME geometry the server loaded for this map
+        /// (<c>content/maps/&lt;map_id&gt;.json</c>), or prediction and authority step against
+        /// different worlds. Ignored by the planar model.
+        /// </remarks>
+        public void SetMapGeometry(MapGeometry geometry)
+        {
+            _geometry = geometry ?? MapGeometry.Flat(_settings.Bounds);
+        }
+
+        /// <summary>
+        /// Replaces the motor tuning. Must match the server's, or the first jump diverges; the
+        /// default is <see cref="MotorParams.Default"/>, which is what the server uses unless its
+        /// content says otherwise.
+        /// </summary>
+        public void SetMotorParams(in MotorParams parameters)
+        {
+            _motorParams = parameters;
+        }
 
         /// <summary>
         /// The outstanding correction still being blended out. Zero when the rendered and
@@ -699,7 +861,16 @@ namespace Cuvara.Netcode.Prediction
         /// <c>InputCursor</c> check; a repeated tick is counted and dropped rather than
         /// predicted, because the server will drop it too.
         /// </remarks>
-        public void RecordInput(long tick, float moveX, float moveY)
+        public void RecordInput(long tick, float moveX, float moveY) =>
+            RecordInput(tick, moveX, moveY, false);
+
+        /// <summary>
+        /// As <see cref="RecordInput(long,float,float)"/>, with the input's jump request
+        /// (<c>InputMessage.Jump</c>). Only the 3D motor reads it, and only on the step this input
+        /// takes: like the server, a jump is honoured on the tick it is sent and only when
+        /// grounded, so a held button does not fly.
+        /// </summary>
+        public void RecordInput(long tick, float moveX, float moveY, bool jump)
         {
             if (!IsEnabled || !_seeded)
             {
@@ -737,15 +908,16 @@ namespace Cuvara.Netcode.Prediction
                 // input away and then applies the hold in the PREVIOUS direction. Live and
                 // replay then diverge by one step per input and the correction accumulates
                 // instead of converging: measured at 120 steps over 30 snapshots.
-                replacesHeldStep ? _tickStartLastMove : _lastMoveTick);
+                replacesHeldStep ? _tickStartLastMove : _lastMoveTick,
+                jump);
             _count++;
 
             // Whatever of the previous step was still unshown would otherwise vanish
             // when the new step replaces it. Carry it into the render offset so the
             // visible position does not jump on an input boundary.
-            Vec2 before = Position;
+            Vec3 before = Position3;
 
-            Vec2 previous = _predicted;
+            Body previous = _predicted;
 
             // Rule 1: at most one step per player per server tick. The server coalesces
             // inputs landing in the same tick to the newest and moves once; a client that
@@ -778,7 +950,7 @@ namespace Cuvara.Netcode.Prediction
                 // has always run inputs before holds. It cost nothing while the hold expired
                 // on exactly the tick the next input arrived on; widening the window to the
                 // silence timeout is what made the two paths meet.
-                verdict = StepResult(_tickStart, moveX, moveY, _dt, out Vec2 replaced);
+                verdict = StepResult(_tickStart, moveX, moveY, jump, _dt, out Body replaced);
 
                 // Including a STOP, which rolls the tick back to where it began: a deadzone
                 // input means the server moved that tick not at all, so neither may the
@@ -791,7 +963,11 @@ namespace Cuvara.Netcode.Prediction
                 // _renderOffset, and the carry at the end of this method folds the whole
                 // rollback into that offset, which decays over the next few frames. The
                 // rendered avatar eases; only the simulated position moves at once.
-                _predicted = verdict is MoveResult.Accepted or MoveResult.Clamped
+                //
+                // Under the 3D motor the step is taken whatever the verdict: gravity and a jump
+                // run even on a stop, so `replaced` IS the tick's one step. Under the planar
+                // model a refused step returns its origin, so the two readings agree there.
+                _predicted = _motor3D || verdict is MoveResult.Accepted or MoveResult.Clamped
                     ? replaced
                     : _tickStart;
             }
@@ -805,7 +981,7 @@ namespace Cuvara.Netcode.Prediction
                 // against the deadzone constant here: a second copy of that threshold is
                 // free to drift from the server's.
                 CoalescedInputs++;
-                verdict = StepResult(_predicted, moveX, moveY, _dt, out _);
+                verdict = StepResult(_predicted, moveX, moveY, false, _dt, out _);
                 if (verdict is MoveResult.Clamped) verdict = MoveResult.Accepted;
             }
             else
@@ -815,7 +991,7 @@ namespace Cuvara.Netcode.Prediction
                 _tickStartLastMove = _lastMoveTick;
 
                 verdict = StepResult(
-                    _predicted, moveX, moveY,
+                    _predicted, moveX, moveY, jump,
                     StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom),
                     out _predicted);
             }
@@ -843,10 +1019,12 @@ namespace Cuvara.Netcode.Prediction
                 // _sinceInput is deliberately NOT reset with it: the step this replaces is
                 // already part-shown, and restarting its clock would show it twice.
                 _step = new Vec2(_predicted.X - _tickStart.X, _predicted.Y - _tickStart.Y);
+                _stepZ = _predicted.Z - _tickStart.Z;
             }
             else if (!coalesced)
             {
                 _step = new Vec2(_predicted.X - previous.X, _predicted.Y - previous.Y);
+                _stepZ = _predicted.Z - previous.Z;
             }
 
             // Set or clear the hold on the server's rule: a direction becomes held only
@@ -909,10 +1087,11 @@ namespace Cuvara.Netcode.Prediction
                 }
             }
 
-            Vec2 after = Position;
+            Vec3 after = Position3;
             _renderOffset = new Vec2(
                 _renderOffset.X + (before.X - after.X),
                 _renderOffset.Y + (before.Y - after.Y));
+            _renderOffsetZ += before.Z - after.Z;
         }
 
         /// <summary>
@@ -962,13 +1141,77 @@ namespace Cuvara.Netcode.Prediction
         /// all. The anchor supplies a start; only the snapshot's tick supplies the end.
         /// </para>
         /// </remarks>
-        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick)
+        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick) =>
+            // A caller that knows only the ground plane leaves height to the prediction: the
+            // vertical state is kept, which under the planar model is the constant (0, 0,
+            // grounded) and so changes nothing.
+            ReconcileCore(_predicted.WithXY(authoritative), ackTick, serverBaseTick);
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long)"/>: as the four-argument overload
+        /// below, for a caller that cannot supply the snapshot's base tick (the DOTS path).
+        /// Such callers keep the two-dimensional overload's behaviour exactly, extended to
+        /// height and vertical velocity.
+        /// </summary>
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick) =>
+            Reconcile(authoritative, verticalVelocity, ackTick, NoServerTick);
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long,long)"/>: the local player's full
+        /// authoritative position and vertical velocity (<c>EntitySnapshot.z</c> /
+        /// <c>vel_z</c>), for a predictor running the 3D motor.
+        /// </summary>
+        /// <param name="authoritative">Position from the newest snapshot, server (x, y, z) space.</param>
+        /// <param name="verticalVelocity">
+        /// The snapshot's <c>vel_z</c>. Together with the map geometry it decides whether the
+        /// replay starts grounded: zero vertical velocity with the feet on support is standing;
+        /// anything else is in the air.
+        /// </param>
+        /// <param name="ackTick">As for the two-dimensional overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <remarks>
+        /// Under the planar model only X and Y are used, exactly as the
+        /// <see cref="Vec2"/> overloads would use them.
+        /// </remarks>
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick)
+        {
+            if (!_motor3D)
+            {
+                Reconcile(authoritative.XY, ackTick, serverBaseTick);
+                return;
+            }
+
+            bool grounded = verticalVelocity == 0f && IsOnSupport(authoritative);
+            ReconcileCore(
+                new Body(authoritative.X, authoritative.Y, authoritative.Z, verticalVelocity, grounded),
+                ackTick, serverBaseTick);
+        }
+
+        /// <summary>
+        /// Whether feet at <paramref name="feet"/> stand on terrain or a box top, to within a
+        /// millimetre. Used only to seed the motor's grounded flag from a snapshot, which carries
+        /// position and velocity but not the flag itself.
+        /// </summary>
+        private bool IsOnSupport(in Vec3 feet)
+        {
+            float support = _geometry.SupportHeight(
+                feet.X, feet.Y, _motorParams.CapsuleRadius, feet.Z + _motorParams.StepHeight);
+            float gap = feet.Z - support;
+            return gap <= SupportTolerance && gap >= -SupportTolerance;
+        }
+
+        /// <summary>Height difference, in units, still read as standing on support.</summary>
+        private const float SupportTolerance = 1e-3f;
+
+        private void ReconcileCore(Body authoritative, long ackTick, long serverBaseTick)
         {
             if (!IsEnabled)
             {
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 return;
             }
 
@@ -978,6 +1221,8 @@ namespace Cuvara.Netcode.Prediction
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 _sinceInput = 0f;
                 LastCorrection = 0f;
                 return;
@@ -985,7 +1230,7 @@ namespace Cuvara.Netcode.Prediction
 
             Reconciles++;
 
-            Vec2 before = _predicted;
+            Body before = _predicted;
 
             // COMPARE AT THE SNAPSHOT'S OWN TICK, when the history reaches it.
             //
@@ -1000,18 +1245,20 @@ namespace Cuvara.Netcode.Prediction
             // after that tick is kept by construction -- the same offset is applied to the
             // current position -- so there is nothing to replay and nothing to guess.
             if (serverBaseTick != NoServerTick && serverBaseTick > 0
-                && TryReadHistory(serverBaseTick, out Vec2 thenPredicted))
+                && TryReadHistory(serverBaseTick, out Vec3 thenPredicted))
             {
                 HistoryHits++;
                 DropAcknowledged(ackTick);
 
                 float ex = authoritative.X - thenPredicted.X;
                 float ey = authoritative.Y - thenPredicted.Y;
+                // Always 0 under the planar model: both sides are at height 0.
+                float ez = authoritative.Z - thenPredicted.Z;
 
-                if (ex != 0f || ey != 0f)
+                if (ex != 0f || ey != 0f || ez != 0f)
                 {
-                    _predicted = new Vec2(_predicted.X + ex, _predicted.Y + ey);
-                    ShiftHistory(ex, ey);
+                    _predicted = _predicted.Shifted(ex, ey, ez);
+                    ShiftHistory(ex, ey, ez);
 
                     // The current tick's start marker moves with it. RecordInput's
                     // replacement path re-takes the tick's step FROM that marker, so a
@@ -1022,7 +1269,7 @@ namespace Cuvara.Netcode.Prediction
                     // second.
                     if (_tickStartTick == _baseTick)
                     {
-                        _tickStart = new Vec2(_tickStart.X + ex, _tickStart.Y + ey);
+                        _tickStart = _tickStart.Shifted(ex, ey, ez);
                     }
                 }
 
@@ -1064,7 +1311,7 @@ namespace Cuvara.Netcode.Prediction
             // direction on every base tick in the window, including ticks where no packet
             // arrived, so replaying input-by-input reproduces a quarter of its motion at
             // a 15 Hz send rate against a 60 Hz base tick.
-            Vec2 replayed = authoritative;
+            Body replayed = authoritative;
 
             if (_count > 0)
             {
@@ -1123,7 +1370,7 @@ namespace Cuvara.Netcode.Prediction
                         && _pending[(_head + next) % Capacity].BaseTick == t
                         && _pending[(_head + next) % Capacity].LastMoveTickBefore == t;
 
-                    Vec2 tickStart = replayed;
+                    Body tickStart = replayed;
                     var heldStepped = false;
 
                     if (holdWentFirst)
@@ -1144,9 +1391,9 @@ namespace Cuvara.Netcode.Prediction
                             // began, in this input's direction -- and if the vector is a stop
                             // or the model refuses it, the held step stands rather than being
                             // rolled back. See RecordInput for why that trade is made.
-                            verdict = StepResult(tickStart, input.MoveX, input.MoveY, _dt,
-                                out Vec2 replacedStep);
-                            replayed = verdict is MoveResult.Accepted or MoveResult.Clamped
+                            verdict = StepResult(tickStart, input.MoveX, input.MoveY, input.Jump, _dt,
+                                out Body replacedStep);
+                            replayed = _motor3D || verdict is MoveResult.Accepted or MoveResult.Clamped
                                 ? replacedStep
                                 : tickStart;
                         }
@@ -1159,7 +1406,7 @@ namespace Cuvara.Netcode.Prediction
                         else
                         {
                             verdict = StepResult(
-                                replayed, input.MoveX, input.MoveY,
+                                replayed, input.MoveX, input.MoveY, input.Jump,
                                 StepDeltaTime(t, replayLastMove, heldFrom), out replayed);
                         }
                         ReplayedSteps++;
@@ -1227,9 +1474,10 @@ namespace Cuvara.Netcode.Prediction
             // rewind would undo it on the next input.
             if (_tickStartTick == _baseTick)
             {
-                _tickStart = new Vec2(
-                    _tickStart.X + (replayed.X - _predicted.X),
-                    _tickStart.Y + (replayed.Y - _predicted.Y));
+                _tickStart = _tickStart.Shifted(
+                    replayed.X - _predicted.X,
+                    replayed.Y - _predicted.Y,
+                    replayed.Z - _predicted.Z);
             }
 
             _predicted = replayed;
@@ -1253,16 +1501,20 @@ namespace Cuvara.Netcode.Prediction
         /// Two copies of this decision is how the two paths would come to disagree about
         /// what a snap is.
         /// </remarks>
-        private void ApplyCorrectionToRender(in Vec2 before)
+        private void ApplyCorrectionToRender(in Body before)
         {
             float dx = before.X - _predicted.X;
             float dy = before.Y - _predicted.Y;
+            float dz = before.Z - _predicted.Z;
 
             // Measured here, from the move actually made, so both paths report the same
             // thing: how far the simulated position just jumped. Computing it separately per
             // path is how the two came to disagree about what a snap is -- the replay path
             // stopped reporting one at all when this was factored out.
-            LastCorrection = new Vec2(dx, dy).Magnitude;
+            //
+            // dz is always 0 under the planar model, which therefore keeps the planar magnitude
+            // to the bit.
+            LastCorrection = dz == 0f ? new Vec2(dx, dy).Magnitude : new Vec3(dx, dy, dz).Magnitude;
 
             if (LastCorrection > SmoothingThreshold)
             {
@@ -1274,6 +1526,8 @@ namespace Cuvara.Netcode.Prediction
                 // corrected one would add a second, smaller wrong movement after the snap.
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 Snaps++;
             }
             else if (LastCorrection > 0f)
@@ -1288,6 +1542,7 @@ namespace Cuvara.Netcode.Prediction
                 // jump at snapshot rate, which is the exact artefact this release is
                 // removing.
                 _renderOffset = new Vec2(_renderOffset.X + dx, _renderOffset.Y + dy);
+                _renderOffsetZ += dz;
                 SmoothedCorrections++;
             }
         }
@@ -1370,10 +1625,11 @@ namespace Cuvara.Netcode.Prediction
 
                     BaseTicksAdvanced++;
 
-                    Vec2 before = _predicted;
+                    Body before = _predicted;
                     if (ApplyHeld(ref _predicted, _baseTick))
                     {
                         _step = new Vec2(_predicted.X - before.X, _predicted.Y - before.Y);
+                        _stepZ = _predicted.Z - before.Z;
                         _sinceInput = 0f;
                         NoteStep();
                         HeldStepsApplied++;
@@ -1383,7 +1639,7 @@ namespace Cuvara.Netcode.Prediction
                 }
             }
 
-            if (_renderOffset.X == 0f && _renderOffset.Y == 0f)
+            if (_renderOffset.X == 0f && _renderOffset.Y == 0f && _renderOffsetZ == 0f)
             {
                 return;
             }
@@ -1391,16 +1647,20 @@ namespace Cuvara.Netcode.Prediction
             float factor = (float)System.Math.Pow(OffsetDecayPerSecond, deltaTime);
             float x = _renderOffset.X * factor;
             float y = _renderOffset.Y * factor;
+            float z = _renderOffsetZ * factor;
 
             // Settle exactly, so Position stops changing rather than approaching forever.
             const float epsilon = 1e-4f;
-            if (System.Math.Abs(x) < epsilon && System.Math.Abs(y) < epsilon)
+            if (System.Math.Abs(x) < epsilon && System.Math.Abs(y) < epsilon
+                && System.Math.Abs(z) < epsilon)
             {
                 _renderOffset = Vec2.Zero;
+                _renderOffsetZ = 0f;
                 return;
             }
 
             _renderOffset = new Vec2(x, y);
+            _renderOffsetZ = z;
         }
 
         /// <summary>
@@ -1726,9 +1986,11 @@ namespace Cuvara.Netcode.Prediction
             SkipNoDisplacement = 0;
             StepIntervalSamples = 0;
             StepIntervalResets = 0;
-            _predicted = Vec2.Zero;
+            _predicted = Body.Planar(Vec2.Zero);
             _renderOffset = Vec2.Zero;
             _step = Vec2.Zero;
+            _renderOffsetZ = 0f;
+            _stepZ = 0f;
             _sinceInput = 0f;
             _inputInterval = 0f;
             _stepInterval = 0f;
@@ -1930,12 +2192,12 @@ namespace Cuvara.Netcode.Prediction
         /// because an off-by-one here is a fixed fraction of every step and lands under
         /// the smoothing threshold — the failure mode this class has now produced twice.
         /// </remarks>
-        private bool ApplyHeld(ref Vec2 position, long baseTick)
+        private bool ApplyHeld(ref Body position, long baseTick)
         {
             // Where this tick started, kept so a real input arriving after the hold has
             // already stepped can RE-TAKE the tick's single step from the same place rather
             // than being coalesced away. See RecordInput for why that matters.
-            Vec2 tickStart = position;
+            Body tickStart = position;
             long lastMoveBefore = _lastMoveTick;
 
             bool stepped = ApplyHeld(
@@ -1967,12 +2229,54 @@ namespace Cuvara.Netcode.Prediction
         }
 
         private bool ApplyHeld(
-            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
             ref long lastMoveTick) =>
             ApplyHeld(ref position, baseTick, heldFrom, heldX, heldY, ref lastMoveTick, out _);
 
+        /// <summary>
+        /// One base tick with no input of its own: the held step if the hold takes it, and under
+        /// the 3D motor otherwise one passive motor step for an airborne body.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Gravity does not wait for input.</b> A body in the air keeps falling on a tick
+        /// nothing steers -- nothing held, the hold expired, or the held vector refused -- so it
+        /// takes one motor step with no horizontal input. Never on a tick an input already
+        /// stepped (<see cref="HoldSkip.InputAlreadyStepped"/>): that step integrated gravity
+        /// itself, and rule 1 allows one step per tick.
+        /// </para>
+        /// <para>
+        /// A passive step stamps <paramref name="lastMoveTick"/> like any other, so an input
+        /// landing on the same tick afterwards re-takes the tick's single step from where it
+        /// began, exactly as it does after a held step.
+        /// </para>
+        /// </remarks>
         private bool ApplyHeld(
-            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref long lastMoveTick, out HoldSkip reason)
+        {
+            bool stepped = ApplyHeldStep(
+                ref position, baseTick, heldFrom, heldX, heldY, ref lastMoveTick, out reason);
+
+            if (stepped || !_motor3D || position.Grounded || reason == HoldSkip.InputAlreadyStepped)
+            {
+                return stepped;
+            }
+
+            StepResult(position, 0f, 0f, false, _dt, out Body fallen);
+            if (fallen.SameAs(position))
+            {
+                return false;
+            }
+
+            position = fallen;
+            lastMoveTick = baseTick;
+            reason = HoldSkip.None;
+            return true;
+        }
+
+        private bool ApplyHeldStep(
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
             ref long lastMoveTick, out HoldSkip reason)
         {
             reason = HoldSkip.None;
@@ -1997,8 +2301,8 @@ namespace Cuvara.Netcode.Prediction
             // The hold path updates LastMoveTick exactly as the packet path does, on both
             // sides, so the two agree on which ticks have already been stepped.
             MoveResult result = StepResult(
-                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
-                out Vec2 moved);
+                position, heldX, heldY, false, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
+                out Body moved);
 
             if (result is not (MoveResult.Accepted or MoveResult.Clamped))
             {
@@ -2006,7 +2310,10 @@ namespace Cuvara.Netcode.Prediction
                 return false;
             }
 
-            if (moved.X == position.X && moved.Y == position.Y)
+            // Z and the vertical state count as displacement under the motor: a held step into a
+            // wall while falling still moved the body. Under the planar model they never change.
+            if (moved.X == position.X && moved.Y == position.Y
+                && (!_motor3D || moved.SameAs(position)))
             {
                 reason = HoldSkip.NoDisplacement;
                 return false;
@@ -2057,20 +2364,46 @@ namespace Cuvara.Netcode.Prediction
         /// One step, reporting the server's own verdict on it.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// The verdict is taken from <c>MovementSystem</c> rather than recomputed here.
         /// Whether a vector counts as a stop is the deadzone rule, and a second copy of
         /// that threshold on the client is a constant free to drift from the server's —
         /// the identical shape as the tick rate and the hold window. There is one
         /// implementation of the movement model and this asks it.
+        /// </para>
+        /// <para>
+        /// Under the 3D motor this is <see cref="CharacterMotor.Step"/>, which resolves the input
+        /// with the same <c>MovementSystem.ResolveDirection</c> and so returns the same verdict for
+        /// the same vector -- but which ALWAYS produces a step: gravity, a jump and landing run
+        /// even when the horizontal input is a stop or refused, because a body in the air must
+        /// keep falling whatever its owner pressed. <paramref name="moved"/> is that step.
+        /// </para>
+        /// <para>
+        /// Under the planar model a refused step returns <paramref name="from"/> unchanged, as it
+        /// always has, and <paramref name="jump"/> is ignored.
+        /// </para>
         /// </remarks>
         private MoveResult StepResult(
-            Vec2 from, float moveX, float moveY, float deltaTime, out Vec2 moved)
+            in Body from, float moveX, float moveY, bool jump, float deltaTime, out Body moved)
         {
-            var probe = new EntityState { Position = from, Speed = _speed, Dead = false };
+            if (_motor3D)
+            {
+                var state = new MotorState(from.Position, from.VelZ, from.Grounded);
+                MoveResult motorResult = CharacterMotor.Step(
+                    in state, moveX, moveY, jump, _speed, deltaTime, _geometry, in _motorParams,
+                    out MotorState stepped);
+
+                moved = new Body(
+                    stepped.Position.X, stepped.Position.Y, stepped.Position.Z,
+                    stepped.VelocityZ, stepped.Grounded);
+                return motorResult;
+            }
+
+            var probe = new EntityState { Position = from.XY, Speed = _speed, Dead = false };
             MoveResult result = MovementSystem.TryMove(
                 in probe, moveX, moveY, deltaTime, in _settings.Bounds, out Vec2 next);
 
-            moved = result is MoveResult.Accepted or MoveResult.Clamped ? next : from;
+            moved = result is MoveResult.Accepted or MoveResult.Clamped ? from.WithXY(next) : from;
             return result;
         }
 

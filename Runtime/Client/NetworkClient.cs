@@ -83,6 +83,10 @@ namespace Cuvara.Netcode.Client
         // not exist, so the rejoin fails; and if such a map ever did exist, the player would
         // silently reappear in the open world while their party carried on without them.
         private string _lastPartyId;
+
+        // The character the committed session joined as, so a reconnect rejoins as the SAME
+        // character even if CharacterId has been changed since for the next connect.
+        private string _lastCharacterId;
         private volatile bool _userClosed;
         private volatile bool _evicted;
         private readonly Random _jitter = new Random();
@@ -102,6 +106,20 @@ namespace Cuvara.Netcode.Client
 
         /// <summary>Raised once when the gameplay connection ends.</summary>
         public event Action<DisconnectInfo> SessionClosed;
+
+        /// <summary>
+        /// Every <see cref="Protocol.Messages.CommandResult"/> from the current session, after
+        /// the awaiting <see cref="SendCommandAsync"/> was completed with it. See
+        /// <see cref="GameSessionClient.CommandResultReceived"/>.
+        /// </summary>
+        public event Action<Protocol.Messages.CommandResult> CommandResultReceived;
+
+        /// <summary>
+        /// Every unsolicited <see cref="Protocol.Messages.ServerPush"/> from the current session
+        /// (protocol version 3). Survives reconnects and transfers: it is re-wired to each new
+        /// session.
+        /// </summary>
+        public event Action<Protocol.Messages.ServerPush> ServerPushReceived;
 
         /// <summary>
         /// Raised before each automatic reconnect round (1-based attempt number),
@@ -219,6 +237,64 @@ namespace Cuvara.Netcode.Client
         public string CurrentMapId => _lastMapId;
 
         /// <summary>
+        /// The roster character the NEXT connect, dungeon entry or map transfer asks for
+        /// (ADR-31, protocol version 3). Null or empty means the account's default character --
+        /// the behaviour of every client predating character slots.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The gateway does not trust this: it must equal the <c>cid</c> claim of the gateway
+        /// token, which Nakama mints after checking the account owns the character. So whatever
+        /// supplies the JWT -- the <see cref="IAuthProvider"/>, or the caller of the JWT
+        /// overloads -- must request its token for the same character, or entry is refused.
+        /// </para>
+        /// <para>
+        /// An automatic reconnect ignores later changes to this and rejoins as the character
+        /// the lost session was playing.
+        /// </para>
+        /// </remarks>
+        public string CharacterId { get; set; }
+
+        /// <summary>
+        /// The character the current session plays, as the game server echoed it
+        /// (<see cref="GameSessionClient.CharacterId"/>). Empty before a join and from a server
+        /// predating character slots.
+        /// </summary>
+        public string ActiveCharacterId => _session?.CharacterId ?? string.Empty;
+
+        /// <summary>
+        /// The wire protocol version the current game server echoed on join; 0 before a join or
+        /// from an unversioned server. 3 enables the command channel and 3D prediction.
+        /// </summary>
+        public uint ServerProtocolVersion => _session?.ServerProtocolVersion ?? 0u;
+
+        /// <summary>
+        /// Sends one gameplay command on the current session's command channel (ADR-30). See
+        /// <see cref="GameSessionClient.SendCommandAsync"/>: completes with the server's result,
+        /// or with a <see cref="CommandChannelErrors"/> name when there is no session
+        /// (<see cref="CommandChannelErrors.NotConnected"/>), the server is older than protocol 3,
+        /// or the session ends -- including a reconnect -- while the command is in flight.
+        /// </summary>
+        public UniTask<Protocol.Messages.CommandResult> SendCommandAsync(
+            uint opcode, byte[] payload, CancellationToken cancellationToken = default)
+        {
+            var session = _session;
+            if (session == null)
+            {
+                if (opcode == 0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(opcode), "opcode 0 means \"not sent\" on the wire and the server refuses it");
+                }
+
+                return UniTask.FromResult(
+                    CommandCorrelator.LocalFailure(0, CommandChannelErrors.NotConnected));
+            }
+
+            return session.SendCommandAsync(opcode, payload, cancellationToken);
+        }
+
+        /// <summary>
         /// The operation generation: incremented by every public entry point that changes what
         /// the client is connected to (<see cref="ConnectAsync(string, CancellationToken)"/>,
         /// <see cref="TransferToMapAsync"/>, <see cref="Disconnect"/>, <see cref="Dispose"/>).
@@ -243,7 +319,7 @@ namespace Cuvara.Netcode.Client
         {
             RequireAuthProvider("the ConnectAsync(jwt, mapId, ct) overload");
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, null, mapId, null, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, null, mapId, null, CharacterId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -277,7 +353,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, null, contentId, partyId, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, null, contentId, partyId, CharacterId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -305,7 +381,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, jwt, contentId, partyId, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, jwt, contentId, partyId, CharacterId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -321,7 +397,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var generation = BeginOperation(userClosed: false);
-            return RunConnectAsync(generation, jwt, mapId, null, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, jwt, mapId, null, CharacterId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>
@@ -342,7 +418,7 @@ namespace Cuvara.Netcode.Client
             // null party id on purpose: a transfer is how a party LEAVES its instance, so it
             // must also clear what a later reconnect would rejoin. Passing the current party
             // here would send a disconnected player back into the dungeon they just left.
-            return RunConnectAsync(generation, null, mapId, null, cancellationToken, inReconnect: false);
+            return RunConnectAsync(generation, null, mapId, null, CharacterId, cancellationToken, inReconnect: false);
         }
 
         /// <summary>Leaves the world and drops both connections. Never reconnects.</summary>
@@ -386,7 +462,7 @@ namespace Cuvara.Netcode.Client
         }
 
         private async UniTask RunConnectAsync(int generation, string jwt, string mapId, string partyId,
-            CancellationToken ct, bool inReconnect)
+            string characterId, CancellationToken ct, bool inReconnect)
         {
             // Nothing from a previous session survives a new join: entity ids are
             // only meaningful within one game server's world.
@@ -429,13 +505,16 @@ namespace Cuvara.Netcode.Client
                         // One call, two meanings, decided by the party id -- the same shape
                         // the wire has (ADR-26 decision 1). A null party id is a map entry and
                         // produces exactly the bytes a pre-party client produced.
-                        var assignment = string.IsNullOrEmpty(partyId)
-                            ? await gateway.EnterWorldAsync(mapId, ct)
-                            : await gateway.EnterDungeonAsync(mapId, partyId, ct);
+                        // The character rides along on either kind of entry (ADR-31); empty is the
+                        // account's default and produces the pre-slot bytes.
+                        var assignment = await gateway.EnterWorldAsync(
+                            mapId, string.IsNullOrEmpty(partyId) ? null : partyId, characterId, ct);
                         Guard(generation, ct);
 
                         session = new GameSessionClient(_settings, _transports, _codec, _log);
                         session.SnapshotReceived += OnSnapshot;
+                        session.CommandResultReceived += OnCommandResult;
+                        session.ServerPushReceived += OnServerPush;
 
                         SetState(NetworkClientState.Joining, "");
                         await session.JoinAsync(assignment, ct);
@@ -460,6 +539,7 @@ namespace Cuvara.Netcode.Client
                         // which is exactly right, because a transfer is how a party LEAVES
                         // its instance.
                         _lastPartyId = partyId;
+                        _lastCharacterId = characterId;
                         committed = true;
                         session.Closed += OnSessionClosed;
                         SetState(NetworkClientState.InWorld, "");
@@ -576,6 +656,8 @@ namespace Cuvara.Netcode.Client
             }
 
             session.SnapshotReceived -= OnSnapshot;
+            session.CommandResultReceived -= OnCommandResult;
+            session.ServerPushReceived -= OnServerPush;
             session.Closed -= OnSessionClosed;
             session.Dispose();
         }
@@ -609,7 +691,10 @@ namespace Cuvara.Netcode.Client
             if (session != null)
             {
                 session.SnapshotReceived -= OnSnapshot;
+                session.CommandResultReceived -= OnCommandResult;
+                session.ServerPushReceived -= OnServerPush;
                 session.Closed -= OnSessionClosed;
+                // Fails every command still in flight with ConnectionClosed.
                 session.Dispose();
             }
 
@@ -633,6 +718,12 @@ namespace Cuvara.Netcode.Client
             World.Apply(snapshot);
             SnapshotReceived?.Invoke(snapshot);
         }
+
+        private void OnCommandResult(Protocol.Messages.CommandResult result) =>
+            CommandResultReceived?.Invoke(result);
+
+        private void OnServerPush(Protocol.Messages.ServerPush push) =>
+            ServerPushReceived?.Invoke(push);
 
         private void OnSessionClosed(DisconnectInfo info)
         {
@@ -701,12 +792,12 @@ namespace Cuvara.Netcode.Client
             // session's generation — but it is the server's doing, not the user's.
             var generation = BeginOperation(userClosed: false);
             _reconnectCts = new CancellationTokenSource();
-            ReconnectLoopAsync(generation, _lastMapId, _lastPartyId, decision == ReconnectDecision.ReconnectAfterDelay, cause,
-                _reconnectCts.Token).Forget();
+            ReconnectLoopAsync(generation, _lastMapId, _lastPartyId, _lastCharacterId,
+                decision == ReconnectDecision.ReconnectAfterDelay, cause, _reconnectCts.Token).Forget();
         }
 
         private async UniTaskVoid ReconnectLoopAsync(int generation, string mapId, string partyId,
-            bool delayFirst, DisconnectInfo cause, CancellationToken ct)
+            string characterId, bool delayFirst, DisconnectInfo cause, CancellationToken ct)
         {
             var startedMs = _settings.MonotonicClock();
             var budgetMs = (long)_settings.ReconnectBudget.TotalMilliseconds;
@@ -751,7 +842,7 @@ namespace Cuvara.Netcode.Client
                         // session record when our socket died. A cached-and-valid
                         // JWT costs the provider nothing; a cold re-auth is its
                         // business, not this loop's.
-                        await RunConnectAsync(generation, null, mapId, partyId, ct, inReconnect: true);
+                        await RunConnectAsync(generation, null, mapId, partyId, characterId, ct, inReconnect: true);
                         _reconnectCts?.Dispose();
                         _reconnectCts = null;
                         Reconnected?.Invoke();
