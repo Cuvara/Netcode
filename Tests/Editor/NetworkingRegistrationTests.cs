@@ -77,6 +77,34 @@ namespace Cuvara.Netcode.Tests.Editor
         /// Demo player against the live backend, 2026-09-07).
         /// </summary>
         [Test]
+        public void RegisterNetworking_HandsNetworkSettingsTransportKeyToTheKcpFactory()
+        {
+            var settings = new NetworkSettings { TransportKey = new string('a', 64) };
+            var builder = new ContainerBuilder();
+            builder.RegisterNetworking(settings);
+            builder.Register<NoAuth>(Lifetime.Singleton).As<IAuthProvider>();
+
+            using var container = builder.Build();
+
+            var factory = (DefaultTransportFactory)container.Resolve<ITransportFactory>();
+            Assert.That(factory.HasTransportKey, Is.True,
+                "the gameplay hop's KCP key must come from NetworkSettings.TransportKey, not null");
+        }
+
+        [Test]
+        public void RegisterNetworking_WithoutATransportKey_BuildsAPlaintextKcpFactory()
+        {
+            var builder = new ContainerBuilder();
+            builder.RegisterNetworking();
+            builder.Register<NoAuth>(Lifetime.Singleton).As<IAuthProvider>();
+
+            using var container = builder.Build();
+
+            var factory = (DefaultTransportFactory)container.Resolve<ITransportFactory>();
+            Assert.That(factory.HasTransportKey, Is.False);
+        }
+
+        [Test]
         public void RegisterNetworking_WithACustomTransportFactory_BuildsTheContainer()
         {
             var builder = new ContainerBuilder();

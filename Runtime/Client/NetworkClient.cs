@@ -642,6 +642,9 @@ namespace Cuvara.Netcode.Client
                 // the client would have to be a different build for the answer to
                 // change, so every retry is a guaranteed-identical refusal.
                 case KickReasons.ProtocolVersionMismatch:
+                // The assigned server advertised a gameplay transport other than KCP. The
+                // same gateway answers the same way every time; retrying only hides it.
+                case TransportKinds.UnsupportedGameplayTransport:
                     return false;
                 default:
                     return true;

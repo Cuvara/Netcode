@@ -130,7 +130,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             Assert.That(parts.Length, Is.EqualTo(2), $"{AddrVar} must be host:port, got '{Addr}'");
 
             var client = new GameSessionClient(
-                new NetworkSettings(), new DefaultTransportFactory(),
+                new NetworkSettings(), new DefaultTransportFactory(LiveBackendConfig.TransportKey),
                 new ProtobufWireCodec(), new UnityNetLog());
 
             var observer = new Observer();
@@ -144,7 +144,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
             var assignment = new MapAssignment(
                 new NetworkEndpoint(parts[0], int.Parse(parts[1])),
                 NextToken(),
-                TransportKind.Tcp);
+                TransportKind.Kcp);
 
             await client.JoinAsync(assignment, ct);
         }

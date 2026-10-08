@@ -71,7 +71,8 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("gateway client is already connected");
             }
 
-            // TLS is a property of the gateway deployment, known before the first byte,
+            // The gateway hop is TCP (optionally TLS) and never KCP; the gameplay hop is
+            // KCP and never TCP. TLS is a property of the gateway deployment, known before the first byte,
             // so the kind is chosen here rather than negotiated. The factory throws if it
             // was asked for TLS without options, instead of handing back cleartext.
             var transport = _transports.Create(
@@ -260,7 +261,13 @@ namespace Cuvara.Netcode.Client
                 // own loopback when the server advertises a listen-style address.
                 var endpoint = NetworkEndpoint.Parse(
                     response.ServerAddr, _settings.GatewayHost, out var normalised);
-                var transport = TransportKinds.Parse(response.Transport);
+                // Realtime gameplay is KCP/UDP only. Anything else -- including an empty
+                // field, which used to mean TCP -- is a gateway or game server this client
+                // cannot play on; refuse it by name rather than dial something else.
+                if (!TransportKinds.TryParseGameplay(response.Transport, out var transport, out var transportError))
+                {
+                    throw new NetworkException(transportError, TransportKinds.UnsupportedGameplayTransport);
+                }
 
                 if (normalised)
                 {
@@ -272,7 +279,7 @@ namespace Cuvara.Netcode.Client
                         "share a host.");
                 }
 
-                _log.Info($"map '{mapId}' assigned to {endpoint} over {transport}");
+                _log.Info($"map '{mapId}' assigned to {endpoint} over KCP/UDP");
                 // The hop is authenticated exactly when it is TLS: the transport has no
                 // accept-anything mode -- TlsOptions either pins a certificate or falls through
                 // to platform validation -- so there is no third state where the flag would be

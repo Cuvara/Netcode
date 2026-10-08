@@ -47,6 +47,27 @@
   </ItemGroup>
 
   <!--
+    KCP/UDP, the only gameplay transport. Everything that decides whether a KCP session is
+    healthy lives in KcpClientSession (no UniTask), so the strict gameplay-transport parsing,
+    the random conversation id, the idle timeout, the bounded receive buffer, the crypto and
+    a real loopback UDP echo all run here. KcpTransport itself (the UniTask/socket shell) and
+    GameSessionClient's refusal of a TCP assignment stay Editor-only
+    (GameplayTransportPolicyTests).
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Transport/TransportKind.cs" />
+    <Compile Include="../../Runtime/Transport/TransportKinds.cs" />
+    <Compile Include="../../Runtime/Transport/Kcp.cs" />
+    <Compile Include="../../Runtime/Transport/KcpCrypto.cs" />
+    <Compile Include="../../Runtime/Transport/KcpClientSession.cs" />
+    <Compile Include="../../Runtime/Transport/NetworkEndpoint.cs" />
+    <Compile Include="../../Tests/Editor/KcpCoreTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpCryptoTests.cs" />
+    <Compile Include="../../Tests/Editor/NetworkEndpointTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpGameplayTransportTests.cs" />
+  </ItemGroup>
+
+  <!--
     Prediction: LocalMovePredictor, the clock it is steered by and the view binder that drives
     it, plus the deterministic server-stub harness (Tests/Editor/PredictionHarness.cs, shared
     with the EditMode suite like every test file here) that measures what a player sees.

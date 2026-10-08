@@ -11,8 +11,10 @@ Every message travels as:
 [4-byte big-endian length][Envelope bytes]
 ```
 
-The framing is identical for both Protobuf and JSON encodings, so the transport
-layer (TCP or KCP) is unaffected by the encoding choice.
+The framing is identical for both Protobuf and JSON encodings and on both hops: the
+gateway hop runs it over TCP (optionally TLS), the gameplay hop over KCP in stream mode on
+UDP — the **only** gameplay transport (no TCP fallback). The encoding choice does not
+affect either transport.
 
 ## Encoding: Protobuf + JSON dual-stack
 
@@ -80,7 +82,9 @@ Client ──AUTH──→ Gateway
 Client ←AUTH_RESP── Gateway         (OK, user_id)
 Client ──ENTER_WORLD──→ Gateway     (map_id)
 Client ←ENTER_WORLD_RESP── Gateway  (server_addr, join_token, transport)
-  ── client opens second connection to game server ──
+  ── transport MUST be "kcp" (case-insensitive); empty / "tcp" / anything else is a hard
+     failure naming the value (ServerError unsupported_gameplay_transport, permanent) ──
+  ── client opens a second connection to the game server: KCP over UDP ──
 Client ──JOIN_TOKEN──→ GameServer   (token)
 Client ←JOIN_TOKEN_RESP── GameServer (OK, tick_rate)
   ── gameplay loop ──

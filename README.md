@@ -5,7 +5,7 @@ Client-side networking module for the RPG MMO. Handles wire transport, codec, tw
 
 ## Features
 
-- **Wire transport** — TCP and KCP (reliable UDP, kcp-go v5 compatible), 4-byte BE length-prefix framing, optional AES-256-CFB encryption for KCP
+- **Wire transport** — gateway hop over TCP (optionally TLS); realtime gameplay over **KCP/UDP only** (reliable UDP, kcp-go v5 compatible, no TCP fallback), 4-byte BE length-prefix framing on both, optional AES-256-CFB datagram encryption for KCP via `NetworkSettings.TransportKey`. KCP/UDP is not available on WebGL, so WebGL builds cannot play realtime gameplay
 - **Codec** — JSON and Protobuf wire codecs, distinguished inbound by a one-byte sniff
 - **Two-hop handshake** — Gateway auth → JoinToken → Game server connect. Retryable assignment refusals ("server is starting…") consume a join attempt with a jittered pause; the gateway's terminal precondition answers abort with the real error
 - **Automatic reconnect** — an explicit policy by disconnect cause (`ReconnectPolicy`, table in `Documentation~/NETCODE.md`): plain drops, heartbeat timeouts and transport errors retry at once, a `server_shutdown` retries after a pause, evictions / user close / protocol faults never. Exponential backoff + jitter inside a 60 s budget (the server's 30 s entity hold starts when the server notices the drop, not when the client does); every round re-authenticates through the registered `IAuthProvider`; permanent server refusals stop the loop early. Observable via `ReconnectProgress`/`ReconnectAttemptStarted`/`Reconnected`/`ReconnectFailed` and the `Reconnecting` state

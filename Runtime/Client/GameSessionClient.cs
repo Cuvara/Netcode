@@ -149,6 +149,31 @@ namespace Cuvara.Netcode.Client
         public DisconnectInfo? CloseInfo => _connection?.CloseInfo;
 
         /// <summary>
+        /// The message for a join that hit <see cref="NetworkSettings.ConnectTimeout"/>.
+        /// </summary>
+        /// <remarks>
+        /// When the KCP transport received not one datagram, the server never answered at
+        /// all: a closed or unmapped UDP port, a firewall dropping UDP, or a transport-key
+        /// mismatch (both ends drop datagrams they cannot decrypt). That is a connect
+        /// failure, and is named as one, with the host and port that were dialled.
+        /// </remarks>
+        internal string DescribeJoinTimeout(ITransport transport, NetworkEndpoint endpoint)
+        {
+            var seconds = _settings.ConnectTimeout.TotalSeconds;
+            if (transport is KcpTransport kcp && kcp.DatagramsReceived == 0)
+            {
+                return $"KCP/UDP connect timeout to {endpoint.Host}:{endpoint.Port} after {seconds:F0} s: " +
+                       "no UDP datagram came back from the game server. Check the firewall and the UDP " +
+                       $"port mapping for udp/{endpoint.Port} (Docker '{endpoint.Port}:{endpoint.Port}/udp', " +
+                       "Agones/k8s 'protocol: UDP'), and that -cuvara-transport-key matches the server's " +
+                       "TRANSPORT_KEY" + (kcp.IsEncrypted ? " (a key is set here)" : " (no key is set here)") + ".";
+            }
+
+            return $"game server at {endpoint.Host}:{endpoint.Port} did not answer the join within {seconds:F0} s " +
+                   "over KCP/UDP (datagrams were received, so the port is reachable)";
+        }
+
+        /// <summary>
         /// Dials the assigned game server and consumes the join token.
         /// </summary>
         /// <remarks>
@@ -164,7 +189,19 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("game session is already connected");
             }
 
-            var transport = _transports.Create(assignment.Transport);
+            // Realtime gameplay is KCP/UDP only. Refused before a factory is asked for
+            // anything, so no factory -- default or custom -- can be talked into building a
+            // TCP gameplay link.
+            try
+            {
+                TransportKinds.RequireGameplay(assignment.Transport);
+            }
+            catch (TransportException ex)
+            {
+                throw new NetworkException(ex.Message, TransportKinds.UnsupportedGameplayTransport);
+            }
+
+            var transport = _transports.Create(TransportKind.Kcp);
             var connection = new WireConnection("gameserver", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
@@ -174,20 +211,34 @@ namespace Cuvara.Netcode.Client
             {
                 timeout.CancelAfter(_settings.ConnectTimeout);
 
-                await transport.ConnectAsync(assignment.Endpoint.Host, assignment.Endpoint.Port, timeout.Token);
+                WireFrame? frame;
+                try
+                {
+                    await transport.ConnectAsync(assignment.Endpoint.Host, assignment.Endpoint.Port, timeout.Token);
 
-                // The join token must be the very first frame; the game server
-                // rejects anything else outright.
-                await connection.SendFrameAsync(
-                    MsgType.JoinToken,
-                    new JoinTokenRequest
-                    {
-                        Token = assignment.JoinToken,
-                        ProtocolVersion = WireProtocolVersion.Current,
-                    },
-                    timeout.Token);
+                    // The join token must be the very first frame; the game server
+                    // rejects anything else outright. Over KCP it is also the first
+                    // datagram, which is what creates the session on the server.
+                    await connection.SendFrameAsync(
+                        MsgType.JoinToken,
+                        new JoinTokenRequest
+                        {
+                            Token = assignment.JoinToken,
+                            ProtocolVersion = WireProtocolVersion.Current,
+                        },
+                        timeout.Token);
 
-                var frame = await connection.ReceiveFrameAsync(timeout.Token);
+                    frame = await connection.ReceiveFrameAsync(timeout.Token);
+                }
+                catch (OperationCanceledException) when (
+                    timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    // Our own deadline, not the caller's cancel. UDP has no connect, so a
+                    // dead or unmapped port is only ever visible as this silence: say so,
+                    // instead of surfacing a bare cancellation.
+                    throw new NetworkException(DescribeJoinTimeout(transport, assignment.Endpoint));
+                }
+
                 if (frame == null)
                 {
                     throw new NetworkException("game server closed the connection during the join");

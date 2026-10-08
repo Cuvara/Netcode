@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**0.47.0: realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, contract
+`.kcp-migration/CONTRACT.md`). The game-server hop builds only `KcpTransport`; the gateway hop
+stays TCP (optionally TLS). Behaviour change, minor bump: a gateway that still answers
+`enter_world_resp.transport` empty or `"tcp"` is refused by name instead of dialled over TCP.
+Pairs with the server leg (game server always listens KCP, registry and gateway always say
+`"kcp"`, optional `TRANSPORT_KEY`).
+
 Netcode side of the prediction-offset fix (`fix/wire/prediction-offset`). Pairs with the server's
 additive `SnapshotMessage.ack_applied_tick` (wire field 7, protocol 3 peers only, no protocol
 version bump) and with `com.cuvara.dots`' `LocalPredictionSystem`, which now drives the APIs below.
@@ -9,6 +16,29 @@ Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
 `Documentation~/PREDICTION.md`.
 
 ### Added
+
+- **`NetworkSettings.TransportKey`** (64 hex chars, the server's `TRANSPORT_KEY`; empty =
+  plaintext datagrams) for the KCP gameplay hop. `RegisterNetworking()` now hands it to
+  `DefaultTransportFactory` (it passed `null`), as do `NetworkBootstrap` (new
+  `NetworkBootstrapConfig.TransportKey` field) and the DOTS Sample (`-cuvara-transport-key` /
+  `CUVARA_TRANSPORT_KEY`). The E2E / WorldView / ReconnectPolicyDemo samples and the PlayMode
+  live tests read `CUVARA_TRANSPORT_KEY`.
+- **`TransportKinds.ParseGameplay` / `TryParseGameplay` / `RequireGameplay`** and
+  `TransportKinds.UnsupportedGameplayTransport` (`"unsupported_gameplay_transport"`), a permanent
+  failure for the join loop and the reconnect policy.
+- **`DefaultTransportFactory.CreateGateway(useTls)` / `CreateGameplay()`**, `HasTransportKey`.
+- **`KcpClientSession`** (internal, Unity-free): the KCP session state `KcpTransport` drives —
+  ARQ, crypto, reassembly, idle timeout, dead link — so it runs under `dotnet test`.
+  `KcpTransport` exposes `Conversation`, `IsEncrypted`, `DatagramsReceived`, `FailureReason`.
+- **Tests.** `KcpGameplayTransportTests` (strict parsing, random non-zero conversation ids,
+  IPv4 preference, idle timeout, bounded receive buffer, invalid length, matching/wrong key, a
+  real loopback KCP/UDP echo with and without a key, a dead UDP port) and
+  `GameplayTransportPolicyTests` (Editor: the factory never builds TCP for gameplay, a TCP/TLS
+  assignment is refused before any factory is asked, the refusal is permanent, the join-timeout
+  message); two `NetworkingRegistrationTests` for the key. The headless project now also
+  compiles `Kcp`, `KcpCrypto`, `KcpClientSession`, `TransportKind(s)`, `NetworkEndpoint` and runs
+  `KcpCoreTests`, `KcpCryptoTests`, `NetworkEndpointTests`, `KcpGameplayTransportTests`
+  (352 tests).
 
 - **`ack_applied_tick` end to end.** `Runtime/Protocol/Generated/Wire.cs` is a byte copy of the
   server's regenerated bindings (protoc 29.3). `SnapshotMessage.AckAppliedTick`, decoded by both
@@ -35,6 +65,23 @@ Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
 
 ### Fixed
 
+- **KCP conversation id was a process-wide counter starting at 1.** Now cryptographically
+  random and non-zero per session.
+- **`KcpTransport`'s 60 s idle timeout was declared and never enforced.** No inbound datagram
+  for 60 s now fails the session with `KCP idle timeout: no UDP datagram from <host:port> ...`,
+  surfaced as a `TransportError` close with the reason. A KCP dead link fails the same way
+  instead of closing as if the peer had hung up.
+- **The KCP stream buffer grew without bound** (it drained the whole ARQ receive queue on every
+  read). It now drains only while no complete frame is buffered and is hard-bounded at one
+  maximum frame plus one MTU; exceeding it fails the connection visibly and never drops bytes.
+- **DNS took `addresses[0]`** while the game server binds IPv4 Any, so a host resolving to `::1`
+  first dialled a port nobody listens on. The first IPv4 address is preferred.
+- **A dead or firewalled UDP port surfaced as a bare cancellation.** A join that times out with
+  no datagram received now throws `NetworkException("KCP/UDP connect timeout to host:port after
+  N s ... check the firewall and the UDP port mapping ... and the transport key")`.
+- Removed the misleading "send a tiny payload" comment: `ConnectAsync` sends nothing; the
+  `join_token` frame is the first datagram.
+
 - **Reconcile compared against the wrong history entry.** It used the snapshot's own tick, but the
   server applies an input on the tick that drains it, so the two tick lines are offset by about the
   lead minus one plus clock skew, and every tick of it came back as a correction (rubber-banding on
@@ -54,6 +101,18 @@ Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
   zero with no fed-forward rate, and an in-step clock is left untouched.
 
 ### Changed
+
+- **Breaking: gameplay is KCP/UDP only.** `TransportKinds.Parse` is replaced by `ParseGameplay`:
+  `"kcp"` (case-insensitive) is accepted, and empty / `"tcp"` / anything else is a failure that
+  names the value — empty no longer means TCP. `GatewayClient` turns it into a
+  `NetworkException` with `ServerError = unsupported_gameplay_transport` (not retried, ends a
+  reconnect). `GameSessionClient.JoinAsync` refuses any `MapAssignment.Transport` but `Kcp`
+  before asking a factory, and asks for `TransportKind.Kcp` only. `TransportKind.Tcp` /
+  `TcpTls` are documented as gateway-hop only.
+- **WebGL:** `new KcpTransport(...)` throws `NotSupportedException("KCP/UDP gameplay transport
+  is not available on WebGL ...")` in a WebGL player. No fallback.
+- Docs: `NETCODE.md` (hops table, "KCP transport (the only gameplay transport)", WebGL row,
+  headless coverage), `WIRE-PROTOCOL.md`, `README.md`.
 
 - **`PredictionClockRateTests.WithoutTheRateTheSteeringDroopsByExactlyTheTextbookAmount` is now
   `WithoutTheRateTheIntegralTermRemovesTheDroopToo`**: it pinned the proportional loop's droop,

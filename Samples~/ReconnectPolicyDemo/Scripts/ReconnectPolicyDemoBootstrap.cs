@@ -177,7 +177,7 @@ namespace Cuvara.Netcode.Samples.ReconnectPolicyDemo
                 PingInterval = TimeSpan.FromSeconds(Mathf.Max(0.5f, pingIntervalSeconds)),
                 RequireSealedSession = requireSealedSession,
             };
-            _chaos = new ChaosTransportFactory(new DefaultTransportFactory());
+            _chaos = new ChaosTransportFactory(new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")));
 
             // The scope. RegisterNetworking registers NetworkSettings, the log, the codec, the
             // transport factory and NetworkClient — exactly one registration of each, which is

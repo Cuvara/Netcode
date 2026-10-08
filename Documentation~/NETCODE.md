@@ -28,6 +28,7 @@ The gateway is a redirector and is **never** in the gameplay data path (ADR-3).
 | | Gateway connection | Game-server connection |
 |---|---|---|
 | Purpose | auth + map assignment | the session |
+| Transport | TCP, optionally TLS (ADR-23) | **KCP over UDP only** — no TCP fallback |
 | Lifetime | can be dropped after step 2 | held for the whole time on that map |
 | Kept open by default? | yes, see below | yes |
 | Class | `Client/GatewayClient` | `Client/GameSessionClient` |
@@ -48,7 +49,7 @@ displaced by another login.
 | `Json/` | minimal JSON parser and writer | yes |
 | `Codec/` | encoding sniff, `IWireCodec`, the JSON codec | yes |
 | `Snapshot/` | handle table, snapshot resolution | yes |
-| `Transport/` | framing, `ITransport`, TCP implementation | framing/endpoint yes; TCP uses UniTask |
+| `Transport/` | framing, `ITransport`, TCP (gateway hop) and KCP (gameplay hop) implementations | framing/endpoint/`Kcp`/`KcpClientSession` yes; `TcpTransport`/`KcpTransport` use UniTask |
 | `Connection/` | `WireConnection` — loops, heartbeat, close semantics | UniTask |
 | `Client/` | `GatewayClient`, `GameSessionClient`, `NetworkClient`, settings | UniTask |
 | `Diagnostics/` | `INetLog` and its Unity implementation | `UnityNetLog` only |
@@ -151,11 +152,14 @@ about one hop and believed about all three.
 |---|---|---|
 | client ↔ **Nakama** (auth, meta) | TLS, terminated by Nakama | the URL scheme the game is built with — `http://` is plaintext no matter what else is set |
 | client ↔ **gateway** | TLS, terminated by the gateway (ADR-23) | `NetworkSettings.GatewayUseTls` |
-| client ↔ **game server** | sealed at the message layer (ADR-22) | `NetworkSettings.RequireSealedSession` |
+| client ↔ **game server** (KCP/UDP only) | sealed at the message layer (ADR-22); optional kcp-go AES datagram key | `NetworkSettings.RequireSealedSession`; `NetworkSettings.TransportKey` |
 
-The gameplay hop is deliberately *not* TLS. It is sealed per message —
-ChaCha20-Poly1305 over an authenticated X25519 exchange — so a KCP session gets the same
-guarantee as a TCP one, which TLS cannot give it.
+The gameplay hop is KCP over UDP and nothing else, so it cannot be TLS. It is sealed per
+message — ChaCha20-Poly1305 over an authenticated X25519 exchange — which gives a KCP session
+authenticated confidentiality that TLS could not. `NetworkSettings.TransportKey` (the server's
+`TRANSPORT_KEY`, 64 hex chars) additionally encrypts every datagram with kcp-go's AES-CFB +
+CRC scheme; that is confidentiality against a passive observer, not authentication, and empty
+means plaintext datagrams (dev).
 
 ### Turning on gateway TLS
 
@@ -173,9 +177,9 @@ transport factory for `TransportKind.TcpTls` instead of `TransportKind.Tcp`; the
 **throws** if it has no `TlsOptions`, rather than handing back a plaintext transport for a
 TLS request.
 
-`TransportKind.TcpTls` is client-side only. `TransportKinds.Parse` refuses it like any
-other unknown string, so a game server cannot ask the client to switch a hop's protection
-by putting a value in `enter_world_resp`.
+`TransportKind.Tcp` and `TransportKind.TcpTls` are gateway-hop kinds only.
+`TransportKinds.ParseGameplay` accepts `"kcp"` and nothing else, so a game server cannot ask
+the client to switch a hop's transport or protection by putting a value in `enter_world_resp`.
 
 ### There is no "skip validation" switch, and there should not be
 
@@ -1545,20 +1549,23 @@ tilde, so Unity never imports it and it needs no `.meta` files.
 cd 'Tests~/Headless' && dotnet test
 ```
 
-30 tests, under a second. The CI job `Headless tests (dotnet)` runs it on every PR and
+352 tests (2026-10-08), a few seconds. The CI job `Headless tests (dotnet)` runs it on every PR and
 fails on a run that executed zero tests, because `dotnet test` exits 0 when it matched
 nothing.
 
 It currently covers the transport's framing and read-loop throughput: `FrameBuffer`,
 `WireFraming`, `TransportException`, exercised by `FrameBufferTests` and
-`TransportReadPumpTests`. Adding a file to it is a deliberate act — `EnableDefaultCompileItems`
+`TransportReadPumpTests`; the KCP gameplay transport's Unity-free core (`Kcp`, `KcpCrypto`,
+`KcpClientSession`, `TransportKinds`, `NetworkEndpoint`), exercised by `KcpCoreTests`,
+`KcpCryptoTests`, `NetworkEndpointTests` and `KcpGameplayTransportTests` (which includes a
+real loopback UDP echo with and without a transport key); and the prediction suites. Adding a file to it is a deliberate act — `EnableDefaultCompileItems`
 is off — and a source that gains a `using UnityEngine` breaks the build here first.
 
-**What still needs Unity, and why.** `TcpTransport` and `WireConnection` await through
+**What still needs Unity, and why.** `TcpTransport`, `KcpTransport` and `WireConnection` await through
 `UniTask`, and `UniTask` needs `UnityEngine`; so the awaiting itself, the TLS handshake,
 cancellation-by-socket-close, the player-loop scheduling and everything above it stay in
 the EditMode suite (`SealedTransportTests`, `GatewayTlsTests`, `WireConnectionDispatchTests`,
-`NetworkClientRecoveryTests`). That line is deliberate: the headless project does not stub
+`NetworkClientRecoveryTests`, `GameplayTransportPolicyTests`). That line is deliberate: the headless project does not stub
 `UniTask`, because a test against a stub measures the stub. What moved out is the one
 thing that governs throughput and never needed a scheduler to decide.
 
@@ -1661,29 +1668,71 @@ still: a suite reporting success while executing nothing is the failure mode thi
 repository has paid for repeatedly. **An Ignore with a reason is visible in the report and
 says what is missing**, which is the only honest option of the three.
 
-## KCP transport
+## KCP transport (the only gameplay transport)
+
+Realtime gameplay is **KCP over UDP only**. There is no TCP gameplay transport, no fallback and
+no setting that selects one; TCP (optionally TLS) is the gateway hop's transport and nothing
+else.
 
 `KcpTransport` implements `ITransport` over UDP using the same ARQ state machine the game
-server runs (ported from `GameServer.Net.Transport.Kcp`, itself a port of kcp-go v5).
+server runs (ported from `GameServer.Net.Transport.Kcp`, itself a port of kcp-go v5). The
+session state — ARQ, crypto, reassembly, idle timeout, dead link — lives in the Unity-free
+`KcpClientSession`, which is what the headless suite tests; `KcpTransport` is the
+socket + UniTask shell around it.
 
-**Stream mode** is on (`Kcp.Stream = 1`), so KCP delivers a byte stream — the same contract
-as TCP. The identical `[4-byte BE length][body]` framing sits on top, and nothing above
-`ITransport` knows which transport it is on. The framing is in `WireFraming`, shared by both
-transports.
+**Stream mode** is on (`Kcp.Stream = 1`), so KCP delivers a byte stream. The same
+`[4-byte BE length][body]` framing as the gateway hop sits on top (`WireFraming`), and nothing
+above `ITransport` knows which transport it is on.
 
-**Selection is server-driven.** The `enter_world_resp` carries a `transport` field (`"tcp"` or
-`"kcp"`); `TransportKinds.Parse` maps it to the enum; `DefaultTransportFactory.Create` builds
-the right transport. A server advertising KCP is not listening on TCP, so falling back would
-be a silent failure — this is why the factory threw before the transport existed.
+**The transport string is checked, never defaulted.** `enter_world_resp.transport` must be
+`"kcp"` (case-insensitive). `GatewayClient` parses it with `TransportKinds.TryParseGameplay`; an
+empty value, `"tcp"` or anything else fails the assignment with a `NetworkException` whose
+message names the value and whose `ServerError` is `unsupported_gameplay_transport` —
+permanent: not retried by the join loop, and it ends a reconnect at once. Empty no longer
+means TCP. `GameSessionClient.JoinAsync` refuses any `MapAssignment.Transport` but
+`TransportKind.Kcp` **before** it asks a factory for anything, so no factory can be talked into
+building a TCP gameplay link. `DefaultTransportFactory.CreateGateway(useTls)` builds only
+TCP/TLS; `CreateGameplay()` builds only `KcpTransport`.
+
+**No handshake, so a dead port is a timeout — reported as one.** KCP has no connect: the
+server creates the session when the first datagram from an unknown endpoint arrives, and
+adopts its conversation id. `ConnectAsync` sends nothing; the first datagram is the one
+carrying `join_token`. When no reply arrives inside `NetworkSettings.ConnectTimeout` and the
+transport received not one datagram, `JoinAsync` throws
+
+```
+KCP/UDP connect timeout to <host>:<port> after 10 s: no UDP datagram came back from the game
+server. Check the firewall and the UDP port mapping for udp/<port> (Docker '<port>:<port>/udp',
+Agones/k8s 'protocol: UDP'), and that -cuvara-transport-key matches the server's TRANSPORT_KEY
+```
+
+(a retryable `NetworkException`, not a bare cancellation).
+
+**Session hygiene.**
+
+| | Behaviour |
+|---|---|
+| Conversation id | cryptographically random and non-zero, per session (`KcpClientSession.NewConversationId`). It used to be a process-wide counter starting at 1. |
+| Address | the first IPv4 address the host resolves to, when there is one — the game server binds IPv4 Any, and `localhost` often resolves to `::1` first. |
+| Idle timeout | no inbound datagram for 60 s fails the session (`KCP idle timeout: no UDP datagram from <host:port> ...`); the read throws, so the connection closes with `TransportError` and the reason, and the reconnect policy treats it like any connection loss. The heartbeat (30 s pong timeout) usually ends a dead link first. |
+| Dead link | a segment retransmitted the maximum number of times fails the session the same way (it used to close silently, as if the peer had hung up). |
+| Receive bound | reassembled bytes are drained from the ARQ only while no complete frame is buffered, so the buffer holds at most one partial frame plus one segment; the rest waits in KCP's receive queue, whose window throttles the sender. The hard bound is `KcpClientSession.MaxStreamBytes` (4 + 1 MiB + one MTU); reaching it fails the session — bytes are never dropped. |
+| Send | `Kcp.Send` < 0 throws `TransportException` with the code; every write is flushed immediately (the server's `SetWriteDelay(false)`). |
 
 **Encryption** is optional. `KcpCrypto` implements kcp-go's AES-256-CFB per-packet encryption
-(nonce + CRC32 + payload, fixed IV). The key is passed through `DefaultTransportFactory`'s
-constructor; empty means plaintext (the dev default). Key derivation matches Go's
+(nonce + CRC32 + payload, fixed IV). The key is `NetworkSettings.TransportKey`, which
+`RegisterNetworking()` hands to `DefaultTransportFactory` (so do `NetworkBootstrap` and the DOTS
+Sample); empty means plaintext (the dev default). Key derivation matches Go's
 `backend/shared/transport/crypto.go` — 64 hex chars decoded verbatim, anything else stretched
-with HKDF-SHA256. A wrong key fails the CRC and the session never forms.
+with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
+is why the connect-timeout message names the key.
 
 **Tuning** matches `KcpTuning` in the server and `backend/shared/transport/transport.go`
 exactly: `NoDelay=1, Interval=10ms, FastResend=2, NoCongestion=1, Wnd=128, MTU=1350`.
+
+**WebGL.** Browsers have no UDP sockets. `new KcpTransport(...)` throws
+`NotSupportedException("KCP/UDP gameplay transport is not available on WebGL ...")` in a WebGL
+player; there is no fallback, so a WebGL build cannot play realtime gameplay.
 
 ## Map transfer
 
@@ -1706,7 +1755,7 @@ creates one from persistent state.
 
 | | Status |
 |---|---|
-| WebGL | `System.Net.Sockets` is unavailable there; needs a WebSocket `ITransport`, which the gateway does not speak today either |
+| WebGL | not supported for realtime play: gameplay is KCP/UDP only and browsers have no UDP (`KcpTransport` throws `NotSupportedException`); `System.Net.Sockets` is unavailable for the TCP gateway hop too |
 | Prediction of anything but movement | deliberate — see below |
 | Ability cast protocol | tracked as Cuvara/Netcode#85 |
 | Status effects in snapshot | tracked as Cuvara/Netcode#86 |
@@ -2000,7 +2049,7 @@ Observed end to end against the local Docker stack on 2026-08-11, gateway on
 [bootstrap]   → auth: sending the JWT to the gateway
 [Net] authenticated with the gateway as 'dev-player'
 [bootstrap] step 3/5 — enter_world 'map_01': asking the gateway which game server to dial
-[Net] map 'map_01' assigned to 127.0.0.1:9200 over Tcp
+[Net] map 'map_01' assigned to 127.0.0.1:9200 over KCP/UDP
 [bootstrap]   → dialing the game server directly and spending the join token
 [Net] joined 127.0.0.1:9200 as 'dev-player'
 [bootstrap]   → join accepted
