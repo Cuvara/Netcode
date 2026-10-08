@@ -12,10 +12,11 @@ namespace Cuvara.Netcode.Tests.Editor
     /// <remarks>
     /// <para>
     /// <b>Why this is not covered by the steering tests.</b>
-    /// <see cref="LocalMovePredictor.SteerToServerTick"/> is a proportional controller with
-    /// no integral term, so it removes a phase error and merely <i>droops</i> against a rate
-    /// error: it settles at a standing offset of <c>drift / (gain * snapshotHz)</c> instead
-    /// of closing it. Every steering test drives it with matched clocks, where that term is
+    /// <see cref="LocalMovePredictor.SteerToServerTick"/> was a proportional controller with
+    /// no integral term, so it removed a phase error and merely <i>drooped</i> against a rate
+    /// error: it settled at a standing offset of <c>drift / (gain * snapshotHz)</c> instead
+    /// of closing it. It now has a clamped integral term that closes it too; the fitted rate
+    /// remains the faster and preferred cure. Every steering test drives it with matched clocks, where that term is
     /// zero and the defect cannot appear.
     /// </para>
     /// <para>
@@ -98,17 +99,21 @@ namespace Cuvara.Netcode.Tests.Editor
         [TestCase(1.05)]
         [TestCase(1.09)]
         [TestCase(1.103)]
-        public void WithoutTheRateTheSteeringDroopsByExactlyTheTextbookAmount(double clockRatio)
+        public void WithoutTheRateTheIntegralTermRemovesTheDroopToo(double clockRatio)
         {
             double drift = (clockRatio - 1.0) * BaseHz;              // ticks/s the clock gains
             double droop = drift / (SteerGain * SnapshotHz);
 
+            // This case used to pin that very droop -- 0.8 to 4.1 ticks across these ratios --
+            // as the textbook behaviour of a proportional-only loop. The steering now has an
+            // integral term (LocalMovePredictor.SteerToServerTick), so with NO rate fed forward
+            // the standing error must still settle at zero, inside the integrator's clamp. The
+            // droop is kept as the number this is measured against.
             Assert.That(SettledTickError(clockRatio, feedTheRateForward: false),
-                Is.EqualTo(droop).Within(0.6),
-                "a proportional controller with no integral term settles at " +
-                "drift / (gain * rate) against a constant rate difference. This case is " +
-                "pinned so the number below is understood as its REMOVAL rather than as a " +
-                "tolerance that happened to widen.");
+                Is.EqualTo(0.0).Within(0.5),
+                $"a proportional-only loop would sit {droop:F2} ticks off at this ratio; the integral " +
+                "term exists to remove exactly that, for the sessions that never corroborate a rate " +
+                "to feed forward.");
         }
 
         [TestCase(1.02)]

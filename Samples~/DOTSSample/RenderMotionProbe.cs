@@ -27,6 +27,14 @@ namespace DOTSSample
     /// double speed, which is the shape a stall-then-jump makes.
     /// </para>
     /// <para>
+    /// <b>Step per frame, and step per SECOND of frame.</b> A frame that took twice as long
+    /// legitimately moves an entity twice as far, so a large step alone cannot tell a render
+    /// hitch (the position jumped) from a frame hitch (the frame was long and the position was
+    /// right). Each step is therefore also divided by that frame's own delta time, and the
+    /// report carries both spreads plus the frame time of the worst step: a worst step whose
+    /// speed is normal is a slow frame; a worst step at a normal frame time is a jump.
+    /// </para>
+    /// <para>
     /// Read in <c>LateUpdate</c> so the view's writes for this frame have already landed,
     /// and gated behind <c>-cuvara-motion-probe</c> so an ordinary run is untouched.
     /// </para>
@@ -78,6 +86,10 @@ namespace DOTSSample
         private sealed class Bucket
         {
             public readonly List<float> Steps = new List<float>();
+            public readonly List<float> Speeds = new List<float>(); // step / frame dt, units per second
+            public float WorstStep;      // largest single step...
+            public float WorstStepDt;    // ...and the frame time it was rendered in
+            public float MaxDt;          // longest frame among the moving frames
             public int Frozen;         // frames where a MOVING entity rendered no movement
             public int FrozenFresh;    // ...of those, within WarmupSeconds of the entity's first sighting
             public int FrozenSteady;   // ...of those, after it
@@ -91,6 +103,8 @@ namespace DOTSSample
         private sealed class Track
         {
             public readonly List<float> Steps = new List<float>();
+            // Parallel to Steps: that frame's unscaled delta time, in seconds.
+            public readonly List<float> Dts = new List<float>();
             // Parallel to Steps: was this frame within WarmupSeconds of the entity's first
             // sighting. A List<bool> rather than an age list because that is all Report needs.
             public readonly List<bool> Fresh = new List<bool>();
@@ -135,7 +149,8 @@ namespace DOTSSample
         private void LateUpdate()
         {
             _frames++;
-            _fpsAccum += Time.unscaledDeltaTime;
+            var dt = Time.unscaledDeltaTime;
+            _fpsAccum += dt;
 
             var now = Time.realtimeSinceStartup;
             _live.Clear();
@@ -176,6 +191,7 @@ namespace DOTSSample
 
                     t.Class = name;
                     t.Steps.Add(step);
+                    t.Dts.Add(dt);
                     t.Fresh.Add(fresh);
                     t.Travel += step;
                 }
@@ -266,6 +282,15 @@ namespace DOTSSample
                 for (var i = 0; i < t.Steps.Count; i++)
                 {
                     b.Steps.Add(t.Steps[i]);
+                    var frameDt = t.Dts[i];
+                    if (frameDt > 0f) b.Speeds.Add(t.Steps[i] / frameDt);
+                    if (frameDt > b.MaxDt) b.MaxDt = frameDt;
+                    if (t.Steps[i] > b.WorstStep)
+                    {
+                        b.WorstStep = t.Steps[i];
+                        b.WorstStepDt = frameDt;
+                    }
+
                     var fresh = t.Fresh[i];
                     if (fresh) b.NFresh++; else b.NSteady++;
                     if (t.Steps[i] < NoiseUnits)
@@ -294,6 +319,13 @@ namespace DOTSSample
                 var ratio = median > NoiseUnits ? worst / median : -1f;
                 var frozenPct = 100f * kv.Value.Frozen / steps.Count;
 
+                // The same spread per second of frame: what tells a jump from a long frame.
+                var speeds = kv.Value.Speeds;
+                speeds.Sort();
+                var medianSpeed = speeds.Count > 0 ? speeds[speeds.Count / 2] : 0f;
+                var worstSpeed = speeds.Count > 0 ? speeds[speeds.Count - 1] : 0f;
+                var speedRatio = medianSpeed > NoiseUnits ? worstSpeed / medianSpeed : -1f;
+
                 // Split the frozen share by lifetime. If a class's chop is the spawn
                 // warm-up, frozenFresh dominates and frozenSteady is near zero; if it is
                 // genuine steady-state stutter, the reverse. This is the line that tells a
@@ -307,11 +339,18 @@ namespace DOTSSample
                     $"[motion-probe] {kv.Key,-14} moving={kv.Value.Moving,2} parked={kv.Value.Parked,2} " +
                     $"n={steps.Count,5} fps={fps,6:F1} " +
                     $"median={median:F5} p99={p99:F5} worst={worst:F5} " +
-                    $"worst/median={ratio,6:F2} frozenFrames={frozenPct,5:F1}% " +
+                    $"worst/median={ratio,6:F2} " +
+                    $"speed median={medianSpeed:F3}/s worst/median={speedRatio,6:F2} " +
+                    $"worstStepDt={kv.Value.WorstStepDt * 1000f,6:F2}ms maxDt={kv.Value.MaxDt * 1000f,6:F2}ms " +
+                    $"frozenFrames={frozenPct,5:F1}% " +
                     $"(fresh={frozenFreshPct,5:F1}% n={fresh,5} | steady={frozenSteadyPct,5:F1}% n={steady,5}) " +
                     $"observerDist={observerDist,6:F1}");
 
                 steps.Clear();
+                speeds.Clear();
+                kv.Value.WorstStep = 0f;
+                kv.Value.WorstStepDt = 0f;
+                kv.Value.MaxDt = 0f;
                 kv.Value.Frozen = 0;
                 kv.Value.FrozenFresh = 0;
                 kv.Value.FrozenSteady = 0;

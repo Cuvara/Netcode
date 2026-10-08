@@ -102,6 +102,13 @@ Keyframe schedule: on join, on `RESYNC`, every N snapshots (default 30).
 `AckTick` is the newest client input tick the server accepted — the reconciliation
 anchor for client-side prediction.
 
+`AckAppliedTick` (field 7, `ack_applied_tick`, 0.46.1) is the SERVER tick on which that input
+was applied -- the tick whose input drain accepted it. `AckTick` counts on the client's tick line
+and `Tick` on the server's; this pairs them, so the prediction layer can compare a snapshot with
+the history entry it actually describes (`Documentation~/PREDICTION.md`). Sent to protocol 3
+peers only; zero means "not sent", and both codecs decode it (`ack_applied_tick` in JSON). No
+protocol version bump: it is additive and ignoring it is always safe.
+
 ## Entity interning
 
 Entity IDs are **interned** to reduce wire cost:

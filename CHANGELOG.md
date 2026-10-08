@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+Netcode side of the prediction-offset fix (`fix/wire/prediction-offset`). Pairs with the server's
+additive `SnapshotMessage.ack_applied_tick` (wire field 7, protocol 3 peers only, no protocol
+version bump) and with `com.cuvara.dots`' `LocalPredictionSystem`, which now drives the APIs below.
+Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
+`Documentation~/PREDICTION.md`.
+
+### Added
+
+- **`ack_applied_tick` end to end.** `Runtime/Protocol/Generated/Wire.cs` is a byte copy of the
+  server's regenerated bindings (protoc 29.3). `SnapshotMessage.AckAppliedTick`, decoded by both
+  codecs (`ack_applied_tick` in JSON; absent = 0); `ResolvedSnapshot.AckAppliedTick` with a new
+  seven-argument constructor (the existing ones pass 0); `WorldState.AckAppliedTick`, kept paired
+  with `AckTick` under the merger's monotonic ack rule and cleared by `Reset`.
+- **`LocalMovePredictor.Reconcile(Vec2, long ackTick, long serverBaseTick, long ackAppliedTick)`**
+  and **`Reconcile(Vec3, float, long, long, long)`**: compare the snapshot at server tick `T` with
+  the history at `T + offset`, where the offset (client base tick of the acked input minus the
+  server tick that applied it) is the median of the last 15 measured pairs, moved only when the
+  window has clearly moved. Zero `ackAppliedTick` behaves exactly as the three-/four-argument
+  overloads. Diagnostics: `AckTickOffset`, `LastMeasuredAckTickOffset`, `AckOffsetSamples`,
+  `AckOffsetChanges`, `AckOffsetUnresolved`, `SteerIntegralTicks`.
+- **`PredictionClockSteering`**: the clock half of `WorldViewBinder` (tick-rate, staleness and
+  acknowledgement-floor estimators, `RoundTripMs`, rate feed-forward, measured `TargetLeadTicks`,
+  phase steering) as its own type, moved unchanged, so a consumer that drives a predictor without
+  the binder steers with the same code: `NoteInputSent`, `SampleTickRate`, `OnSnapshot`,
+  `TargetLeadTicks`, `Reset`. `WorldViewBinder.ClockSteering` exposes the binder's instance.
+- **Headless prediction tests.** `Tests~/Headless` now compiles the predictor, the binder, world
+  state and the estimators against Shared.GameLogic (`-p:SglDir`, default the sibling
+  rpg-mmo-server checkout; CI checks out the `sgl-v*` tag `package.json` pins) and runs the
+  prediction, steering and binder suites plus the new `PredictionHarness` /
+  `AckAppliedTickReconcileTests` (285 tests).
+
+### Fixed
+
+- **Reconcile compared against the wrong history entry.** It used the snapshot's own tick, but the
+  server applies an input on the tick that drains it, so the two tick lines are offset by about the
+  lead minus one plus clock skew, and every tick of it came back as a correction (rubber-banding on
+  curves, a whole step at starts and stops). With `ack_applied_tick`: 59.6 Hz server, 13 Hz jittered
+  sends, lead 6 - mean correction 0.0208 -> 0.0011 on a circle, largest at start/stop 4 steps -> 1;
+  a 60 Hz jitter-free run corrects nothing (was 38).
+- **An input tick's history entry was stale.** `RecordInput` changed where the tick ended but the
+  entry `Advance` wrote at the start of the tick was kept, giving +1/-1 step pairs at every start
+  and stop. It is now re-recorded after the input.
+- **A new tick dropped the unshown part of the step on screen.** `Advance` replaced the current
+  step without carrying its remainder into the render offset (as `RecordInput` already did), so the
+  rendered position jumped in one frame: 2.32x the normal per-frame motion on a curve and 16.67x at
+  a start or stop at 1 ms frames, now 1.31x / 1.34x.
+- **The clock steering drooped against a rate difference.** `SteerToServerTick` was proportional
+  only, so a 0.7% slower server left it about a tick off for the session. It now has a clamped,
+  anti-windup integral term on the integer tick error; every tested ratio (1.02-1.103) settles at
+  zero with no fed-forward rate, and an in-step clock is left untouched.
+
+### Changed
+
+- **`PredictionClockRateTests.WithoutTheRateTheSteeringDroopsByExactlyTheTextbookAmount` is now
+  `WithoutTheRateTheIntegralTermRemovesTheDroopToo`**: it pinned the proportional loop's droop,
+  which the integral term removes.
+- **`Samples~/DOTSSample`**: `RenderMotionProbe` reports step per second of frame (median and
+  worst/median), the frame time of the worst step and the longest frame, so a render jump and a
+  long frame can be told apart; the `[DOTSNet/health]` line adds `ackOffset` and `steerI`.
+
+
 ## [0.46.0] - 2026-10-07
 
 Wire protocol version 3 — "Core v3" (ADR-28..31). **Needs

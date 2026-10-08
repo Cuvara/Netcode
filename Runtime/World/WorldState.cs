@@ -51,6 +51,29 @@ namespace Cuvara.Netcode.World
         /// </summary>
         public long AckTick => (long)_merger.AckTick;
 
+        /// <summary>
+        /// Server base tick on which the input <see cref="AckTick"/> names was applied
+        /// (<c>ack_applied_tick</c>). Zero means "not known": a protocol 2 or older server, or
+        /// an acknowledgement that arrived without it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Always the partner of <see cref="AckTick"/>, never of some other one.</b> It is
+        /// tracked here rather than in <c>SnapshotMerger</c> because that merger is
+        /// <c>Shared.GameLogic</c> and carries no such field; the rule is the merger's own
+        /// monotonic ack, extended to the pair: a snapshot whose ack is the newest one sets
+        /// the applied tick it carries (zero included, when the ack moved), and a snapshot
+        /// carrying an older ack changes nothing.
+        /// </para>
+        /// <para>
+        /// A snapshot that repeats the current ack with a zero applied tick (a server that
+        /// reattached the entity and has not applied a new input since) keeps the known value:
+        /// the pair still describes the same input, and zero there means "not sent", not
+        /// "changed".
+        /// </para>
+        /// </remarks>
+        public long AckAppliedTick { get; private set; }
+
         /// <summary>Keyframes merged so far.</summary>
         public int Keyframes => _merger.Keyframes;
 
@@ -249,15 +272,31 @@ namespace Cuvara.Netcode.World
 
             LastAppliedRemovedCount = removed?.Length ?? 0;
 
+            long ackBefore = AckTick;
+
             _merger.Apply(new SnapshotData(
                 (ulong)snapshot.Tick,
                 (ulong)snapshot.AckTick,
                 snapshot.Full,
                 converted,
                 removed));
+
+            // The pair moves together, under the merger's own monotonic rule. See AckAppliedTick.
+            if (snapshot.AckTick > ackBefore)
+            {
+                AckAppliedTick = snapshot.AckAppliedTick;
+            }
+            else if (snapshot.AckTick == ackBefore && snapshot.AckTick != 0L && snapshot.AckAppliedTick != 0L)
+            {
+                AckAppliedTick = snapshot.AckAppliedTick;
+            }
         }
 
         /// <summary>Drop all reconstructed state — a new join or a map transfer.</summary>
-        public void Reset() => _merger.Reset();
+        public void Reset()
+        {
+            _merger.Reset();
+            AckAppliedTick = 0L;
+        }
     }
 }

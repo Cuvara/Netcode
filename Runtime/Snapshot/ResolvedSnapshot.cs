@@ -23,9 +23,21 @@ namespace Cuvara.Netcode.Snapshot
         public ResolvedSnapshot(long tick, long ackTick, bool full,
             IReadOnlyList<ResolvedEntity> entities, IReadOnlyList<string> removed,
             IReadOnlyList<ResolvedGameEvent> events)
+            : this(tick, ackTick, full, entities, removed, events, 0L)
+        {
+        }
+
+        /// <summary>
+        /// The full form: as above, plus <paramref name="ackAppliedTick"/> -- the server tick that
+        /// applied the input <paramref name="ackTick"/> names (wire field 7; 0 = not sent).
+        /// </summary>
+        public ResolvedSnapshot(long tick, long ackTick, bool full,
+            IReadOnlyList<ResolvedEntity> entities, IReadOnlyList<string> removed,
+            IReadOnlyList<ResolvedGameEvent> events, long ackAppliedTick)
         {
             Tick = tick;
             AckTick = ackTick;
+            AckAppliedTick = ackAppliedTick;
             Full = full;
             Entities = entities;
             Removed = removed;
@@ -43,6 +55,19 @@ namespace Cuvara.Netcode.Snapshot
         /// Zero means "no input accepted yet".
         /// </summary>
         public long AckTick { get; }
+
+        /// <summary>
+        /// Server base tick on which the input <see cref="AckTick"/> names was applied
+        /// (<c>ack_applied_tick</c>). Zero means "not sent" (protocol 2 or an older server).
+        /// </summary>
+        /// <remarks>
+        /// <see cref="AckTick"/> counts on the client's tick line, <see cref="Tick"/> on the
+        /// server's; this joins them. A predictor compares this snapshot with its history at
+        /// <c>Tick + (client base tick of the acked input - AckAppliedTick)</c> rather than at
+        /// <c>Tick</c>. Only meaningful together with the <see cref="AckTick"/> of the SAME
+        /// snapshot.
+        /// </remarks>
+        public long AckAppliedTick { get; }
 
         /// <summary>
         /// Keyframe marker. When true, <see cref="Entities"/> is the complete AOI

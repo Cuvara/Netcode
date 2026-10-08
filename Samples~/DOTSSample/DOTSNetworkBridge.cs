@@ -1095,6 +1095,7 @@ namespace DOTSSample
                 $"clamped={_predictor.ClampedFrames} discarded={_predictor.DiscardedCatchUpSeconds:F2}s " +
                 $"framesRx={framesPerSec:F1}/s rtt={_client.Session?.RoundTripMs ?? 0}ms " +
                 $"tickError={_predictor.TickError}t resyncs={_predictor.HardResyncs} " +
+                $"ackOffset={_predictor.AckTickOffset}t steerI={_predictor.SteerIntegralTicks:F3} " +
                 $"pending={_predictor.PendingCount} rejected={_predictor.RejectedInputs} " +
                 $"dropped={_predictor.DroppedInputs} nothingHeld={_predictor.SkipNothingHeld} " +
                 $"alreadyStepped={_predictor.SkipInputAlreadyStepped} " +
