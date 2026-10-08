@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A cancelled `KcpTransport.ReadFrameAsync` throws instead of reporting end-of-stream.** It returned
+  null, so the join's own deadline against an unreachable UDP port surfaced as "game server closed
+  the connection during the join" instead of the KCP/UDP connect-timeout message. Seen live with a
+  Windows client against a WSL2-NAT stack advertising 127.0.0.1 (Windows localhost forwarding is
+  TCP-only). Same contract as `TcpTransport`.
+
 **0.47.0: realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, contract
 `.kcp-migration/CONTRACT.md`). The game-server hop builds only `KcpTransport`; the gateway hop
 stays TCP (optionally TLS). Behaviour change, minor bump: a gateway that still answers

@@ -219,7 +219,17 @@ namespace Cuvara.Netcode.Transport
                 }
                 catch (OperationCanceledException)
                 {
-                    return null;
+                    // A cancelled read is a cancellation, not end-of-stream. Returning null
+                    // here made the caller's own join deadline read as "the game server
+                    // closed the connection" - the misleading error a Windows client saw
+                    // against an unreachable UDP port - instead of reaching the
+                    // KCP/UDP connect-timeout message. Same contract as TcpTransport.
+                    if (Volatile.Read(ref _closed) != 0)
+                    {
+                        return null;
+                    }
+
+                    throw;
                 }
             }
         }

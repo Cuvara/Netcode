@@ -7,6 +7,7 @@ using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Transport;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
+using UnityEngine.TestTools;
 
 namespace Cuvara.Netcode.Tests.Editor
 {
@@ -127,5 +128,41 @@ namespace Cuvara.Netcode.Tests.Editor
                 Assert.That(message, Does.Contain("udp/7019"));
             }
         }
+
+        /// <summary>
+        /// A cancelled read on an open KCP transport is a cancellation, never end-of-stream.
+        /// It used to return null, so the join's own deadline against an unreachable UDP
+        /// port surfaced as "game server closed the connection during the join" instead of
+        /// the KCP/UDP connect-timeout message (seen live: a Windows client against a WSL2
+        /// NAT stack advertising 127.0.0.1).
+        /// </summary>
+        [UnityTest]
+        public System.Collections.IEnumerator ACancelledKcpRead_Throws_InsteadOfReportingEof() =>
+            UniTask.ToCoroutine(async () =>
+            {
+                int deadPort;
+                using (var probe = new System.Net.Sockets.UdpClient(0))
+                {
+                    deadPort = ((System.Net.IPEndPoint)probe.Client.LocalEndPoint).Port;
+                }
+
+                using (var transport = new KcpTransport())
+                using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+                {
+                    await transport.ConnectAsync("127.0.0.1", deadPort, CancellationToken.None);
+                    bool cancelled = false;
+                    try
+                    {
+                        var frame = await transport.ReadFrameAsync(cts.Token);
+                        Assert.Fail($"ReadFrameAsync returned {(frame == null ? "null (EOF)" : "a frame")} on cancellation");
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        cancelled = true;
+                    }
+
+                    Assert.That(cancelled, Is.True);
+                }
+            });
     }
 }
