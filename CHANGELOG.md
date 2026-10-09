@@ -2,15 +2,10 @@
 
 ## [Unreleased]
 
-### Fixed
-- **A cancelled `KcpTransport.ReadFrameAsync` throws instead of reporting end-of-stream.** It returned
-  null, so the join's own deadline against an unreachable UDP port surfaced as "game server closed
-  the connection during the join" instead of the KCP/UDP connect-timeout message. Seen live with a
-  Windows client against a WSL2-NAT stack advertising 127.0.0.1 (Windows localhost forwarding is
-  TCP-only). Same contract as `TcpTransport`.
+## [0.47.0] - 2026-10-09
 
-**0.47.0: realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, contract
-`.kcp-migration/CONTRACT.md`). The game-server hop builds only `KcpTransport`; the gateway hop
+**Realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, ADR-32 in
+rpg-mmo-server `backend/docs/NETWORKING.md`). The game-server hop builds only `KcpTransport`; the gateway hop
 stays TCP (optionally TLS). Behaviour change, minor bump: a gateway that still answers
 `enter_world_resp.transport` empty or `"tcp"` is refused by name instead of dialled over TCP.
 Pairs with the server leg (game server always listens KCP, registry and gateway always say
@@ -72,6 +67,11 @@ Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
 
 ### Fixed
 
+- **A cancelled `KcpTransport.ReadFrameAsync` throws instead of reporting end-of-stream.** It returned
+  null, so the join's own deadline against an unreachable UDP port surfaced as "game server closed
+  the connection during the join" instead of the KCP/UDP connect-timeout message. Seen live with a
+  Windows client against a WSL2-NAT stack advertising 127.0.0.1 (Windows localhost forwarding is
+  TCP-only). Same contract as `TcpTransport`.
 - **KCP conversation id was a process-wide counter starting at 1.** Now cryptographically
   random and non-zero per session.
 - **`KcpTransport`'s 60 s idle timeout was declared and never enforced.** No inbound datagram
