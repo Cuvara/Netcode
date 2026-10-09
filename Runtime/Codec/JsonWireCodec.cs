@@ -303,6 +303,8 @@ namespace Cuvara.Netcode.Codec
             {
                 Tick = payload.GetLong("tick"),
                 AckTick = payload.GetLong("ack_tick"),
+                // Absent (protocol 2, older server) reads as 0, the "not sent" value.
+                AckAppliedTick = payload.GetLong("ack_applied_tick"),
                 Full = payload.GetBool("full")
             };
 

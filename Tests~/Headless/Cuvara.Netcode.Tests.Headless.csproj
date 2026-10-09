@@ -46,6 +46,88 @@
     <Compile Include="../../Tests/Editor/TransportReadPumpTests.cs" />
   </ItemGroup>
 
+  <!--
+    KCP/UDP, the only gameplay transport. Everything that decides whether a KCP session is
+    healthy lives in KcpClientSession (no UniTask), so the strict gameplay-transport parsing,
+    the random conversation id, the idle timeout, the bounded receive buffer, the crypto and
+    a real loopback UDP echo all run here. KcpTransport itself (the UniTask/socket shell) and
+    GameSessionClient's refusal of a TCP assignment stay Editor-only
+    (GameplayTransportPolicyTests).
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Transport/TransportKind.cs" />
+    <Compile Include="../../Runtime/Transport/TransportKinds.cs" />
+    <Compile Include="../../Runtime/Transport/Kcp.cs" />
+    <Compile Include="../../Runtime/Transport/KcpCrypto.cs" />
+    <Compile Include="../../Runtime/Transport/KcpClientSession.cs" />
+    <Compile Include="../../Runtime/Transport/NetworkEndpoint.cs" />
+    <Compile Include="../../Tests/Editor/KcpCoreTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpCryptoTests.cs" />
+    <Compile Include="../../Tests/Editor/NetworkEndpointTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpGameplayTransportTests.cs" />
+  </ItemGroup>
+
+  <!--
+    Prediction: LocalMovePredictor, the clock it is steered by and the view binder that drives
+    it, plus the deterministic server-stub harness (Tests/Editor/PredictionHarness.cs, shared
+    with the EditMode suite like every test file here) that measures what a player sees.
+
+    Why it is here: the reconcile, the history it compares against and the render smoothing are
+    ordinary C#, and the defects they produce (rubber-banding at starts, stops and on curves) are
+    only visible as distributions over thousands of frames: exactly what a Unity job cannot
+    afford to run often and a dotnet job runs in a second.
+
+    It needs Shared.GameLogic, which this repository consumes as a git package rather than
+    containing. SglDir points at its source: by default the sibling rpg-mmo-server checkout of a
+    workspace laid out like the developers' (C:/Workspaces/UnityIndie/{Netcode,rpg-mmo-server});
+    CI checks the pinned sgl tag out and passes -p:SglDir=... (see .github/workflows/ci.yml).
+  -->
+  <PropertyGroup>
+    <SglDir Condition="'$(SglDir)' == ''">$(MSBuildThisFileDirectory)../../../rpg-mmo-server/backend/gameserver-dotnet/Shared.GameLogic</SglDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(SglDir)/Shared.GameLogic.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Runtime/Prediction/LocalMovePredictor.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictionSettings.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictionClockSteering.cs" />
+    <Compile Include="../../Runtime/Prediction/TickRateEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/SnapshotStalenessEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/AckLatencyEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/InputCadence.cs" />
+    <Compile Include="../../Runtime/Protocol/*.cs" />
+    <Compile Include="../../Runtime/Protocol/Messages/*.cs" />
+    <Compile Include="../../Runtime/Snapshot/*.cs" />
+    <Compile Include="../../Runtime/World/*.cs" />
+    <Compile Include="../../Runtime/Interpolation/*.cs" />
+    <Compile Include="../../Runtime/View/*.cs" Exclude="../../Runtime/View/GameObjectEntityView.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/PredictionClockRateTests.cs" />
+    <Compile Include="../../Tests/Editor/LocalMovePredictorTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconcileLeadTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconcileAdoptionTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconciliationDivergenceTests.cs" />
+    <Compile Include="../../Tests/Editor/RenderSmoothingTests.cs" />
+    <Compile Include="../../Tests/Editor/HeldMovementParityTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorClockAdvancesOnceTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderLeadTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderRateGateTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
+    <Compile Include="../../Tests/Editor/AckFloorConversionRateTests.cs" />
+    <Compile Include="../../Tests/Editor/AckLatencyEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotStalenessEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/TickRateEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/AckAppliedTickReconcileTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictionHarness.cs" />
+    <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="NUnit" Version="3.14.0" />

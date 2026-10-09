@@ -321,6 +321,10 @@ namespace DOTSSample
             _backend = BackendCommandLine.Resolve(gatewayHost, gatewayPort, mapId, gameServerStatusUrl);
             gatewayHost = _backend.GatewayHost;
             gatewayPort = _backend.GatewayPort;
+            Debug.Log("[DOTSNet] gameplay hop: KCP/UDP (the only gameplay transport), transport key " +
+                      (string.IsNullOrWhiteSpace(_backend.TransportKey)
+                          ? "NOT set (plaintext datagrams)"
+                          : "set (-cuvara-transport-key / CUVARA_TRANSPORT_KEY)"));
             if (_backend.NakamaExplicit)
             {
                 nakamaBaseUrl = _backend.NakamaBaseUrl;
@@ -1095,6 +1099,7 @@ namespace DOTSSample
                 $"clamped={_predictor.ClampedFrames} discarded={_predictor.DiscardedCatchUpSeconds:F2}s " +
                 $"framesRx={framesPerSec:F1}/s rtt={_client.Session?.RoundTripMs ?? 0}ms " +
                 $"tickError={_predictor.TickError}t resyncs={_predictor.HardResyncs} " +
+                $"ackOffset={_predictor.AckTickOffset}t steerI={_predictor.SteerIntegralTicks:F3} " +
                 $"pending={_predictor.PendingCount} rejected={_predictor.RejectedInputs} " +
                 $"dropped={_predictor.DroppedInputs} nothingHeld={_predictor.SkipNothingHeld} " +
                 $"alreadyStepped={_predictor.SkipInputAlreadyStepped} " +
@@ -1181,8 +1186,13 @@ namespace DOTSSample
                 // JWT while the token is still valid — a reconnect after a server
                 // restart costs zero Nakama traffic in the common case.
                 _client = new NetworkClient(
-                    new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
-                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog(),
+                    new NetworkSettings
+                    {
+                        GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession,
+                        TransportKey = _backend.TransportKey ?? string.Empty,
+                    },
+                    // Gameplay is KCP/UDP only; the key (if any) encrypts its datagrams.
+                    new DefaultTransportFactory(_backend.TransportKey), new ProtobufWireCodec(), new UnityNetLog(),
                     new DelegateAuthProvider(token => auth.GetGatewayTokenAsync(device, token)));
 
                 _client.StateChanged += state =>

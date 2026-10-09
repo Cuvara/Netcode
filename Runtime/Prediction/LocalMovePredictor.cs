@@ -1092,6 +1092,20 @@ namespace Cuvara.Netcode.Prediction
                 _renderOffset.X + (before.X - after.X),
                 _renderOffset.Y + (before.Y - after.Y));
             _renderOffsetZ += before.Z - after.Z;
+
+            // RE-RECORD THIS TICK'S HISTORY ENTRY, because the input just changed where the
+            // tick ends.
+            //
+            // The entry for _baseTick was written by Advance when the tick began -- before this
+            // input stepped it, re-took the hold's step, or rolled a stop back. Left alone, the
+            // history says the client was somewhere it never ended the tick, and the reconcile
+            // that later compares against this tick reports the difference as an error: a whole
+            // step at every start (the entry predates the first step) and every stop (the entry
+            // still has the held step the stop rolled back), returned as a +1 / -1 step pair over
+            // the next two snapshots. The server has no such ambiguity -- it drains inputs and
+            // only then ends the tick -- so the client's record of a tick must be taken after its
+            // input too.
+            RecordHistory(_baseTick, _predicted);
         }
 
         /// <summary>
@@ -1110,7 +1124,7 @@ namespace Cuvara.Netcode.Prediction
         /// would count a snap that never happened.
         /// </remarks>
         public void Reconcile(Vec2 authoritative, long ackTick) =>
-            Reconcile(authoritative, ackTick, NoServerTick);
+            ReconcileCore(_predicted.WithXY(authoritative), ackTick, NoServerTick, NoAckAppliedTick);
 
         /// <summary>Sentinel for "the caller did not tell us when the snapshot was produced".</summary>
         private const long NoServerTick = long.MinValue;
@@ -1142,10 +1156,30 @@ namespace Cuvara.Netcode.Prediction
         /// </para>
         /// </remarks>
         public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick) =>
+            Reconcile(authoritative, ackTick, serverBaseTick, NoAckAppliedTick);
+
+        /// <summary>
+        /// As <see cref="Reconcile(Vec2,long,long)"/>, plus the snapshot's
+        /// <c>ack_applied_tick</c>: the SERVER tick on which the input <paramref name="ackTick"/>
+        /// names was applied. This is what lets the comparison be made at the right entry of the
+        /// history -- see <see cref="AckTickOffset"/>.
+        /// </summary>
+        /// <param name="authoritative">As for the other overloads.</param>
+        /// <param name="ackTick">As for the other overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <param name="ackAppliedTick">
+        /// <c>SnapshotMessage.AckAppliedTick</c> / <c>WorldState.AckAppliedTick</c> of the SAME
+        /// snapshot as <paramref name="ackTick"/>. Zero or negative means "not sent" (a protocol 2
+        /// or older server), and the call then behaves exactly as the three-argument overload.
+        /// </param>
+        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick, long ackAppliedTick) =>
             // A caller that knows only the ground plane leaves height to the prediction: the
             // vertical state is kept, which under the planar model is the constant (0, 0,
             // grounded) and so changes nothing.
-            ReconcileCore(_predicted.WithXY(authoritative), ackTick, serverBaseTick);
+            ReconcileCore(_predicted.WithXY(authoritative), ackTick, serverBaseTick, ackAppliedTick);
+
+        /// <summary>Sentinel for "the server did not say which tick applied the acked input".</summary>
+        private const long NoAckAppliedTick = 0L;
 
         /// <summary>
         /// The 3D form of <see cref="Reconcile(Vec2,long)"/>: as the four-argument overload
@@ -1173,18 +1207,31 @@ namespace Cuvara.Netcode.Prediction
         /// Under the planar model only X and Y are used, exactly as the
         /// <see cref="Vec2"/> overloads would use them.
         /// </remarks>
-        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick)
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick) =>
+            Reconcile(authoritative, verticalVelocity, ackTick, serverBaseTick, NoAckAppliedTick);
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long,long,long)"/>: full position, vertical
+        /// velocity, and the snapshot's <c>ack_applied_tick</c>.
+        /// </summary>
+        /// <param name="authoritative">Position from the newest snapshot, server (x, y, z) space.</param>
+        /// <param name="verticalVelocity">As for <see cref="Reconcile(Vec3,float,long,long)"/>.</param>
+        /// <param name="ackTick">As for the other overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <param name="ackAppliedTick">As for <see cref="Reconcile(Vec2,long,long,long)"/>.</param>
+        public void Reconcile(
+            Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick, long ackAppliedTick)
         {
             if (!_motor3D)
             {
-                Reconcile(authoritative.XY, ackTick, serverBaseTick);
+                Reconcile(authoritative.XY, ackTick, serverBaseTick, ackAppliedTick);
                 return;
             }
 
             bool grounded = verticalVelocity == 0f && IsOnSupport(authoritative);
             ReconcileCore(
                 new Body(authoritative.X, authoritative.Y, authoritative.Z, verticalVelocity, grounded),
-                ackTick, serverBaseTick);
+                ackTick, serverBaseTick, ackAppliedTick);
         }
 
         /// <summary>
@@ -1203,8 +1250,15 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Height difference, in units, still read as standing on support.</summary>
         private const float SupportTolerance = 1e-3f;
 
-        private void ReconcileCore(Body authoritative, long ackTick, long serverBaseTick)
+        private void ReconcileCore(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
         {
+            // From here on `serverBaseTick` means "the CLIENT base tick the authoritative position
+            // describes": the snapshot's own tick when the server did not say which tick applied
+            // the acked input (today's behaviour, unchanged), and that tick moved onto the client's
+            // tick line when it did. Everything below -- the history comparison and both replay
+            // fallbacks -- asks exactly that question, so mapping it once here is the whole fix.
+            long serverBaseTick = ResolveAnchorTick(snapshotTick, ackTick, ackAppliedTick);
+
             if (!IsEnabled)
             {
                 _predicted = authoritative;
@@ -1626,6 +1680,11 @@ namespace Cuvara.Netcode.Prediction
                     BaseTicksAdvanced++;
 
                     Body before = _predicted;
+
+                    // What is on screen at this instant, taken before the tick can replace the
+                    // step being shown. See the carry below.
+                    Vec3 shownBefore = Position3;
+
                     if (ApplyHeld(ref _predicted, _baseTick))
                     {
                         _step = new Vec2(_predicted.X - before.X, _predicted.Y - before.Y);
@@ -1633,6 +1692,29 @@ namespace Cuvara.Netcode.Prediction
                         _sinceInput = 0f;
                         NoteStep();
                         HeldStepsApplied++;
+
+                        // CARRY THE UNSHOWN PART OF THE PREVIOUS STEP, exactly as RecordInput
+                        // does on an input boundary.
+                        //
+                        // Position walks the latest step in over the smoothing span. A new tick
+                        // replaces that step, and whatever of the old one had not been shown yet
+                        // used to vanish with it: the rendered position jumped forward by the
+                        // unshown remainder in a single frame. In steady motion the remainder is
+                        // small (the span tracks the step interval), but whenever the span runs
+                        // longer than the gap the next step actually arrives after -- a tick
+                        // declined by rule 1, a start, a stop -- it is most of a step. Measured on
+                        // the headless harness (PredictionHarness, 1 ms frames, 59.6 Hz server):
+                        // up to 2.3x the normal per-frame motion on a curve and 16.7x at a start or
+                        // stop before this carry; 1.3x on both with it.
+                        //
+                        // Folding the difference into the render offset keeps the visible
+                        // position continuous; the offset then decays like any other correction,
+                        // so the old step is still shown in full, just not in one frame.
+                        Vec3 shownAfter = Position3;
+                        _renderOffset = new Vec2(
+                            _renderOffset.X + (shownBefore.X - shownAfter.X),
+                            _renderOffset.Y + (shownBefore.Y - shownAfter.Y));
+                        _renderOffsetZ += shownBefore.Z - shownAfter.Z;
                     }
 
                     RecordHistory(_baseTick, _predicted);
@@ -1808,11 +1890,6 @@ namespace Cuvara.Netcode.Prediction
             long error = _baseTick - target;
             TickError = error;
 
-            if (error == 0)
-            {
-                return;
-            }
-
             if (error > HardResyncTicks || error < -HardResyncTicks)
             {
                 // Too far to walk back. Steering out two seconds at the rate below would
@@ -1825,6 +1902,11 @@ namespace Cuvara.Netcode.Prediction
                 _tickStartTick = 0;
                 _head = 0;
                 _count = 0;
+                // The integrator learned a rate against a clock that has just been replaced,
+                // and the remembered offsets pair input ticks with base ticks that no longer
+                // exist. Both restart.
+                _steerIntegral = 0f;
+                ForgetAckOffsets();
                 HardResyncs++;
                 return;
             }
@@ -1835,8 +1917,51 @@ namespace Cuvara.Netcode.Prediction
             // player reads a speed change, and still closes a second of error in a few
             // seconds.
             float ticks = error * SteerGain;
+            bool saturated = ticks >= MaxSteerTicksPerCall || ticks <= -MaxSteerTicksPerCall;
             if (ticks > MaxSteerTicksPerCall) ticks = MaxSteerTicksPerCall;
             if (ticks < -MaxSteerTicksPerCall) ticks = -MaxSteerTicksPerCall;
+
+            // INTEGRAL TERM: the part of the correction that removes a RATE difference.
+            //
+            // The proportional term acts on a phase error and nothing else, so against a constant
+            // rate difference it droops: it settles at the error that makes its own output equal
+            // the drift, drift / (gain * snapshotHz). A server running 0.7% slow (59.6 Hz against
+            // 60) was measured settling about one tick off, and before ack_applied_tick that tick
+            // came back from the reconcile as position at every start and stop.
+            // SetClockRateScale removes the drift when a corroborated rate exists; most sessions
+            // never corroborate one, so the loop has to close on its own.
+            //
+            // Three choices keep it from doing harm, each measured on the headless harness:
+            //
+            //  - It integrates the INTEGER error, the same one the proportional term sees. A clock
+            //    already in step therefore integrates nothing and is left exactly where it is. An
+            //    integrator on the fractional error (accumulator phase included) was tried first:
+            //    it kept nudging an in-step clock about inside its tick, every nudge moved the
+            //    client/server tick offset by one now and then, and on a 60 Hz server with no
+            //    jitter the reconcile corrected 156 of 405 snapshots where this form corrects
+            //    none.
+            //  - It only integrates while the proportional term is NOT saturated and the error is
+            //    inside SteerIntegralBandTicks (conditional-integration anti-windup). A large phase
+            //    error after a join or a stall is a phase event, not a rate, and is walked back by
+            //    the proportional term alone instead of winding the integrator up into an
+            //    overshoot.
+            //  - The gain is small and the contribution clamped. With Kp = 0.1 and Ki = 0.002 per
+            //    call the closed loop's poles are real, at z ~ 0.97 and 0.92: overdamped, and a
+            //    0.7% drift is learned in about a second of snapshots.
+            if (!saturated && error <= SteerIntegralBandTicks && error >= -SteerIntegralBandTicks)
+            {
+                _steerIntegral += error * SteerIntegralGain;
+                if (_steerIntegral > MaxSteerIntegralTicksPerCall) _steerIntegral = MaxSteerIntegralTicksPerCall;
+                if (_steerIntegral < -MaxSteerIntegralTicksPerCall) _steerIntegral = -MaxSteerIntegralTicksPerCall;
+            }
+
+            ticks += _steerIntegral;
+
+
+            if (ticks == 0f)
+            {
+                return;
+            }
 
             // Ahead of the server means run slower: take time OFF the accumulator.
             _tickAccumulator -= ticks * _dt;
@@ -1952,6 +2077,47 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Ceiling on one steering call, in base ticks.</summary>
         private const float MaxSteerTicksPerCall = 0.5f;
 
+        /// <summary>Fraction of the (integer) tick error added to the integrator per call.</summary>
+        private const float SteerIntegralGain = 0.002f;
+
+        /// <summary>
+        /// Ceiling on the integrator's contribution per call, in base ticks: at 15 snapshots a
+        /// second, 7.5 ticks a second, a 12.5% rate difference at 60 Hz -- every rate the
+        /// staleness estimator's own skew bounds would accept.
+        /// </summary>
+        private const float MaxSteerIntegralTicksPerCall = 0.5f;
+
+        /// <summary>
+        /// The integrator only learns while the error is inside this many base ticks. Outside
+        /// it the error is a phase event (a stall, a join), not a rate, and integrating it would
+        /// wind up into an overshoot once the phase is walked back.
+        /// </summary>
+        private const long SteerIntegralBandTicks = 8;
+
+        /// <summary>
+        /// Integral of the fractional tick error, in base ticks per steering call. Persists
+        /// across calls; cleared by a hard resync and by <see cref="Reset"/>.
+        /// </summary>
+        private float _steerIntegral;
+
+        /// <summary>
+        /// The integral term in force, in base ticks per steering call: the rate correction the
+        /// loop has learned. Positive slows the client clock. Diagnostics; near zero once a
+        /// corroborated rate is fed through <see cref="SetClockRateScale"/>.
+        /// </summary>
+        public float SteerIntegralTicks => _steerIntegral;
+
+        private void ForgetAckOffsets()
+        {
+            _offsetCount = 0;
+            _offsetNext = 0;
+            _haveStableOffset = false;
+            _stableOffset = 0;
+            _lastSampledAckTick = 0;
+            _ackedInputTick = 0;
+            _ackedInputBaseTick = 0;
+        }
+
         /// <summary>
         /// True when the tick rate came from a local fallback rather than from the server.
         /// </summary>
@@ -2026,6 +2192,13 @@ namespace Cuvara.Netcode.Prediction
             Reconciles = 0;
             DroppedInputs = 0;
             RejectedInputs = 0;
+            _steerIntegral = 0f;
+            ForgetAckOffsets();
+            AckTickOffset = 0;
+            LastMeasuredAckTickOffset = 0;
+            AckOffsetSamples = 0;
+            AckOffsetChanges = 0;
+            AckOffsetUnresolved = 0;
         }
 
 
@@ -2494,6 +2667,16 @@ namespace Cuvara.Netcode.Prediction
             {
                 _lastAcked = _pending[_head];
                 _haveLastAcked = true;
+
+                // Remembered past the drop: later snapshots repeat the same ack (and the same
+                // applied tick) until the next input lands, and each of them still needs the
+                // client base tick this input was recorded on. See ResolveAnchorTick.
+                if (_lastAcked.Tick == ackTick)
+                {
+                    _ackedInputTick = _lastAcked.Tick;
+                    _ackedInputBaseTick = _lastAcked.BaseTick;
+                }
+
                 _head = (_head + 1) % Capacity;
                 _count--;
             }
@@ -2501,5 +2684,200 @@ namespace Cuvara.Netcode.Prediction
 
         private PendingInput _lastAcked;
         private bool _haveLastAcked;
+
+        // The newest input the server has acknowledged by name, and the client base tick it was
+        // recorded on. Zero tick = none yet.
+        private long _ackedInputTick;
+        private long _ackedInputBaseTick;
+
+        /// <summary>
+        /// How many recent measured offsets the stable offset is chosen from: about a second of
+        /// acknowledgements at a 13-15 Hz send rate.
+        /// </summary>
+        private const int OffsetWindow = 15;
+
+        private readonly long[] _offsets = new long[OffsetWindow];
+        private readonly long[] _offsetScratch = new long[OffsetWindow];
+        private int _offsetCount;
+        private int _offsetNext;
+        private bool _haveStableOffset;
+        private long _stableOffset;
+        private long _lastSampledAckTick;
+
+        /// <summary>
+        /// The client base tick the authoritative position of a snapshot at
+        /// <paramref name="snapshotTick"/> describes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a snapshot's tick is not that tick.</b> The server applies an input on the tick
+        /// whose input drain accepts it, not on the tick number the client was at when it recorded
+        /// it. The client runs ahead by its lead, so the input recorded on client tick <c>B</c> is
+        /// applied on server tick <c>P</c>, and the two tick lines are offset by <c>B - P</c> --
+        /// about the lead minus one, plus whatever clock skew the steering has not removed. A
+        /// snapshot at server tick <c>T</c> therefore shows what the client's history holds at
+        /// <c>T + (B - P)</c>, and comparing it against the entry at <c>T</c> compares two moments
+        /// of the same motion. Every tick of that offset came back as a correction: a fraction of
+        /// a step per reconcile on a curve, a whole step at a start or a stop.
+        /// </para>
+        /// <para>
+        /// <b>A STABLE offset, not the exact pair of each acknowledgement.</b> The exact pair --
+        /// this input's <c>B</c> against the snapshot's <c>ack_applied_tick</c> -- was implemented
+        /// first and measured worse than no field at all. Each input's offset carries a tick of
+        /// drain quantisation (it lands somewhere inside a server tick and is drained at the next
+        /// one), so consecutive pairs differ by one tick roughly as often as not. Moving the
+        /// comparison point by that tick on a body that is moving moves it by a whole step, and the
+        /// reconcile "corrects" that step and then corrects it back: measured on the headless
+        /// harness (59.6 Hz server, 13 Hz jittered sends, a circle) as a one-step correction on
+        /// one reconcile in eight and a mean of 0.019 units, against 0.0011 with the stable
+        /// offset below and 0.019 with no field at all.
+        /// </para>
+        /// <para>
+        /// What aligns two moving timelines is the offset they SHARE, so the offset used is the
+        /// median of the last <see cref="OffsetWindow"/> measured pairs, and it only moves when
+        /// the window has clearly moved away from it (fewer than a third of the samples still
+        /// agree). The quantisation then shows up only where it is real -- an input whose drain
+        /// landed a tick away from the shared offset changes direction a tick early or late on the
+        /// server, which is a genuine, bounded disagreement of at most one step at a start or stop
+        /// and a fraction of a step on a curve -- instead of as a comparison artefact on every
+        /// reconcile.
+        /// </para>
+        /// <para>
+        /// <b>Absent field, unchanged behaviour.</b> With no <c>ack_applied_tick</c> (a protocol
+        /// 2 or older server) this returns <paramref name="snapshotTick"/> -- what every caller
+        /// got before -- so that path is as it was.
+        /// </para>
+        /// </remarks>
+        private long ResolveAnchorTick(long snapshotTick, long ackTick, long ackAppliedTick)
+        {
+            if (!IsEnabled || !_seeded || snapshotTick == NoServerTick || snapshotTick <= 0
+                || ackAppliedTick <= 0 || ackTick <= 0)
+            {
+                return snapshotTick;
+            }
+
+            if (TryFindAckedBaseTick(ackTick, out long ackedBaseTick))
+            {
+                long measured = ackedBaseTick - ackAppliedTick;
+                LastMeasuredAckTickOffset = measured;
+
+                // One sample per acknowledged input, not per snapshot: later snapshots repeat the
+                // same pair until the next input lands, and counting them again would weight a
+                // slow sender's inputs by the snapshot rate.
+                if (ackTick != _lastSampledAckTick)
+                {
+                    _lastSampledAckTick = ackTick;
+                    _offsets[_offsetNext] = measured;
+                    _offsetNext = (_offsetNext + 1) % OffsetWindow;
+                    if (_offsetCount < OffsetWindow) _offsetCount++;
+                    AckOffsetSamples++;
+                }
+            }
+
+            if (_offsetCount == 0)
+            {
+                AckOffsetUnresolved++;
+                return snapshotTick;
+            }
+
+            long median = MedianOffset(out int agreeingWithStable);
+            if (!_haveStableOffset)
+            {
+                _haveStableOffset = true;
+                _stableOffset = median;
+            }
+            else if (median != _stableOffset && agreeingWithStable * 3 < _offsetCount)
+            {
+                _stableOffset = median;
+                AckOffsetChanges++;
+            }
+
+            AckTickOffset = _stableOffset;
+            return snapshotTick + _stableOffset;
+        }
+
+        /// <summary>
+        /// The base tick the input <paramref name="ackTick"/> was recorded on, if this predictor
+        /// recorded it: still pending, or the newest one already dropped by name.
+        /// </summary>
+        private bool TryFindAckedBaseTick(long ackTick, out long baseTick)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                PendingInput input = _pending[(_head + i) % Capacity];
+                if (input.Tick > ackTick) break;
+                if (input.Tick == ackTick)
+                {
+                    baseTick = input.BaseTick;
+                    return true;
+                }
+            }
+
+            if (_ackedInputTick != 0 && _ackedInputTick == ackTick)
+            {
+                baseTick = _ackedInputBaseTick;
+                return true;
+            }
+
+            baseTick = 0;
+            return false;
+        }
+
+        /// <summary>
+        /// Median of the measured offsets in the window, and how many of them equal the stable
+        /// offset in force. Allocation-free: sorts a scratch copy.
+        /// </summary>
+        private long MedianOffset(out int agreeingWithStable)
+        {
+            agreeingWithStable = 0;
+            for (int i = 0; i < _offsetCount; i++)
+            {
+                _offsetScratch[i] = _offsets[i];
+                if (_haveStableOffset && _offsets[i] == _stableOffset) agreeingWithStable++;
+            }
+
+            System.Array.Sort(_offsetScratch, 0, _offsetCount);
+            return _offsetScratch[_offsetCount / 2];
+        }
+
+        /// <summary>
+        /// The offset, in base ticks, between this client's tick line and the server's, as used
+        /// by the last reconcile that had an <c>ack_applied_tick</c>: the snapshot at server tick
+        /// T was compared with this predictor's history at <c>T + AckTickOffset</c>. 0 before the
+        /// first such reconcile.
+        /// </summary>
+        /// <remarks>
+        /// The stable value (see <see cref="ResolveAnchorTick"/>): the median of recent measured
+        /// pairs, moved only when the window has clearly moved. Roughly the steering lead minus
+        /// one plus the clock skew the steering has not removed; a value that keeps changing in
+        /// one direction means the clock is not being steered (a consumer that never calls
+        /// <see cref="SteerToServerTick"/>). The reconcile stays aligned regardless, because the
+        /// offset is measured rather than assumed, but the lead it implies is latency the player
+        /// feels.
+        /// </remarks>
+        public long AckTickOffset { get; private set; }
+
+        /// <summary>
+        /// The most recent EXACT offset: the acked input's recorded base tick minus the server
+        /// tick that applied it. Differs from <see cref="AckTickOffset"/> by the drain
+        /// quantisation of that one input. Diagnostics.
+        /// </summary>
+        public long LastMeasuredAckTickOffset { get; private set; }
+
+        /// <summary>Acknowledged inputs whose exact offset was measured and added to the window.</summary>
+        public int AckOffsetSamples { get; private set; }
+
+        /// <summary>
+        /// Times the stable offset moved. Each move on a moving body is a one-step correction, so
+        /// a count that grows steadily means the clock is drifting against the server's.
+        /// </summary>
+        public int AckOffsetChanges { get; private set; }
+
+        /// <summary>
+        /// Reconciles that had <c>ack_applied_tick</c> but no offset yet (the ack named an input
+        /// this predictor never recorded, before any was measured), and so compared at the
+        /// snapshot's own tick as a protocol 2 server's reconciles do.
+        /// </summary>
+        public int AckOffsetUnresolved { get; private set; }
     }
 }

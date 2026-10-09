@@ -184,7 +184,7 @@ namespace Samples.NetcodeE2E
 
             var netSettings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             _client = new NetworkClient(
-                netSettings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog());
+                netSettings, new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), NewCodec(), new UnityNetLog());
             _client.SnapshotReceived += OnSnapshot;
             _client.SessionClosed += info => Debug.Log($"[E2E] session closed: {info}");
             _client.GatewayClosed += info => Debug.Log($"[E2E] gateway closed: {info}");
@@ -228,7 +228,7 @@ namespace Samples.NetcodeE2E
 
             _client.Dispose();
             _client = new NetworkClient(
-                netSettings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog());
+                netSettings, new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), NewCodec(), new UnityNetLog());
             _client.SnapshotReceived += OnReconnectSnapshot;
 
             // A fresh gateway token, exactly as a real client would on resume.
@@ -280,7 +280,7 @@ namespace Samples.NetcodeE2E
         {
             var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             using (var probe = new GatewayClient(
-                settings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog()))
+                settings, new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), NewCodec(), new UnityNetLog()))
             {
                 await probe.AuthenticateAsync(jwt, ct);
                 Debug.Log($"[E2E] B4 auth_resp ok, user_id='{probe.UserId}'");
@@ -306,7 +306,7 @@ namespace Samples.NetcodeE2E
         {
             var settings = new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession };
             using (var probe = new GatewayClient(
-                settings, new DefaultTransportFactory(), NewCodec(), new UnityNetLog()))
+                settings, new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), NewCodec(), new UnityNetLog()))
             {
                 try
                 {

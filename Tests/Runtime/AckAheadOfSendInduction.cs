@@ -229,7 +229,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     GatewayHost = LiveBackendConfig.GatewayHost,
                     GatewayPort = LiveBackendConfig.GatewayPort,
                 },
-                new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                new DefaultTransportFactory(LiveBackendConfig.TransportKey), new ProtobufWireCodec(), new UnityNetLog());
 
             await client.ConnectAsync(jwt, LiveBackendConfig.MapId, ct);
             Assert.That(client.UserId, Is.Not.Empty, "first session joined without a user id");
@@ -295,7 +295,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     GatewayHost = LiveBackendConfig.GatewayHost,
                     GatewayPort = LiveBackendConfig.GatewayPort,
                 },
-                new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                new DefaultTransportFactory(LiveBackendConfig.TransportKey), new ProtobufWireCodec(), new UnityNetLog());
 
             await client.ConnectAsync(jwt, LiveBackendConfig.MapId, ct);
 

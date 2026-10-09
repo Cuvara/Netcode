@@ -141,6 +141,32 @@ namespace Cuvara.Netcode.Client
         public string GatewayTlsTargetHost { get; set; } = string.Empty;
 
         /// <summary>
+        /// Pre-shared key for the <b>gameplay</b> hop's KCP datagram encryption: 64 hex
+        /// characters (32 bytes), equal to the game server's <c>TRANSPORT_KEY</c>. Empty (the
+        /// default) means plaintext datagrams, which is the dev setting.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Realtime gameplay is KCP/UDP only; this key is read by
+        /// <see cref="DefaultTransportFactory"/> when it builds the <see cref="KcpTransport"/>
+        /// (<c>RegisterNetworking</c> passes it automatically). It has no effect on the
+        /// gateway hop, which is TCP and protected by <see cref="GatewayUseTls"/>.
+        /// </para>
+        /// <para>
+        /// This is kcp-go-compatible AES-CFB with a CRC, i.e. confidentiality against a
+        /// passive observer without authentication. Authenticated confidentiality of the
+        /// gameplay stream is the sealed session (<see cref="RequireSealedSession"/>, ADR-22).
+        /// A key that differs from the server's makes both ends drop every datagram, which is
+        /// reported as a KCP/UDP connect timeout naming the key as a possible cause.
+        /// </para>
+        /// <para>Never log the value.</para>
+        /// </remarks>
+        public string TransportKey { get; set; } = string.Empty;
+
+        /// <summary>True when <see cref="TransportKey"/> is set.</summary>
+        public bool HasTransportKey => !string.IsNullOrWhiteSpace(TransportKey);
+
+        /// <summary>
         /// Builds the <see cref="TlsOptions"/> these settings describe, or null when
         /// <see cref="GatewayUseTls"/> is off.
         /// </summary>

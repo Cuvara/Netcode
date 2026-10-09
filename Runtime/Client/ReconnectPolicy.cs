@@ -1,6 +1,7 @@
 using System;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Protocol;
+using Cuvara.Netcode.Transport;
 
 namespace Cuvara.Netcode.Client
 {
@@ -153,6 +154,10 @@ namespace Cuvara.Netcode.Client
                 // Retrying spends the budget and then reports "could not join",
                 // burying the only message that said what was actually wrong.
                 case KickReasons.ProtocolVersionMismatch:
+                // enter_world_resp named a gameplay transport other than "kcp" (or none).
+                // Realtime gameplay is KCP/UDP only and there is no fallback, so every
+                // further round would be refused identically.
+                case TransportKinds.UnsupportedGameplayTransport:
                     return true;
 
                 default:

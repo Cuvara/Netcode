@@ -406,6 +406,9 @@ namespace Cuvara.Netcode.Codec
             // will not approach the point where this narrows.
             snapshot.Tick = (long)m.Tick;
             snapshot.AckTick = (long)m.AckTick;
+            // Zero when the server did not send it (protocol 2, older server); the pooled
+            // instance is overwritten on every decode, so a previous value cannot leak.
+            snapshot.AckAppliedTick = (long)m.AckAppliedTick;
             snapshot.Full = m.Full;
 
             var entityIndex = 0;

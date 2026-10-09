@@ -5,32 +5,36 @@ namespace Cuvara.Netcode.Transport
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Not all of these can come off the wire.</b> <see cref="Tcp"/> and
-    /// <see cref="Kcp"/> are what a game server can advertise in
-    /// <c>enter_world_resp</c>, and <see cref="TransportKinds.Parse"/> maps those two
-    /// strings. <see cref="TcpTls"/> is a <i>client-side</i> choice about the gateway hop:
-    /// nothing on the wire names it, <c>Parse</c> refuses it like any other unknown value,
-    /// and it never reaches <c>GameSessionClient</c>.
+    /// <b>Realtime gameplay is KCP over UDP only.</b> <see cref="Kcp"/> is the one value the
+    /// game-server hop accepts: it is what the gateway's <c>enter_world_resp</c> carries
+    /// (<c>"kcp"</c>), and <see cref="TransportKinds.ParseGameplay"/> refuses anything else —
+    /// an empty field and <c>"tcp"</c> included. There is no TCP fallback for gameplay.
     /// </para>
     /// <para>
-    /// The asymmetry is real rather than an oversight. Whether the gateway terminates TLS
-    /// is a property of the deployment the client is dialling into, known before the first
-    /// byte is sent; whether the game server speaks TCP or KCP is a property of the server
-    /// the gateway assigns, known only after it answers.
+    /// <see cref="Tcp"/> and <see cref="TcpTls"/> exist for the <b>gateway hop only</b>
+    /// (auth + map assignment, ADR-3). Whether that hop is wrapped in TLS is a property of
+    /// the gateway deployment the client dials into (ADR-23), known before the first byte;
+    /// nothing on the wire names either value, and <c>GameSessionClient</c> refuses them.
     /// </para>
     /// </remarks>
     public enum TransportKind
     {
-        /// <summary>Plaintext TCP. What an empty or <c>"tcp"</c> transport field means.</summary>
+        /// <summary>
+        /// Plaintext TCP. <b>Gateway hop only</b> — never a gameplay transport, and not a
+        /// value <c>enter_world_resp</c> can select.
+        /// </summary>
         Tcp = 0,
 
-        /// <summary>KCP over UDP. What a <c>"kcp"</c> transport field means.</summary>
+        /// <summary>
+        /// KCP over UDP: the only gameplay (game-server hop) transport. What a <c>"kcp"</c>
+        /// transport field means.
+        /// </summary>
         Kcp = 1,
 
         /// <summary>
         /// TCP wrapped in TLS, for a gateway that terminates TLS itself (ADR-23).
-        /// Client-side only — a server never asks for this, and the game-server hop never
-        /// uses it, because that hop is sealed at the message layer instead (ADR-22).
+        /// <b>Gateway hop only</b> — the game-server hop is KCP and is sealed at the message
+        /// layer instead (ADR-22).
         /// </summary>
         TcpTls = 2
     }

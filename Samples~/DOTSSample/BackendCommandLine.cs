@@ -51,6 +51,12 @@ namespace DOTSSample
             public string DeviceId;
             public string InstanceLabel;
 
+            /// <summary>
+            /// KCP datagram key for the gameplay hop (64 hex characters, the server's
+            /// TRANSPORT_KEY), or null for plaintext. Never logged.
+            /// </summary>
+            public string TransportKey;
+
         /// <summary>
         /// Seconds before the client disconnects itself, or 0 for no cap. Negative means
         /// the caller did not ask, so the scene's own value stands.
@@ -88,6 +94,7 @@ namespace DOTSSample
                     Str(args, "-cuvara-nakama-port", "CUVARA_NAKAMA_PORT", null) != null,
                 DeviceId = Str(args, "-cuvara-device", "CUVARA_DEVICE_ID", null),
                 InstanceLabel = Str(args, "-cuvara-instance", "CUVARA_INSTANCE", null),
+                TransportKey = Str(args, "-cuvara-transport-key", "CUVARA_TRANSPORT_KEY", null),
                 RunSeconds = Seconds(args, "-cuvara-run-seconds", "CUVARA_RUN_SECONDS"),
             };
 

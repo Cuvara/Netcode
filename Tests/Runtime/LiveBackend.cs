@@ -25,6 +25,12 @@ namespace Cuvara.Netcode.Tests.PlayMode
         public static string MapId => Env("CUVARA_MAP_ID", "map_01");
 
         /// <summary>
+        /// KCP datagram key for the gameplay hop (the server's TRANSPORT_KEY), empty for
+        /// plaintext. Realtime gameplay is KCP/UDP only. Never logged.
+        /// </summary>
+        public static string TransportKey => Env("CUVARA_TRANSPORT_KEY", string.Empty);
+
+        /// <summary>
         /// Fallback tick rate, used only when the server advertises none in its join
         /// response. Not the rate the measurement predicts at, and NOT the rate it sends at.
         /// </summary>

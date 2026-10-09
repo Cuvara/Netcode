@@ -132,6 +132,78 @@ projectiles.Unconfirmed += predicted => { /* server never claimed it */ };
   interval) is dropped after `HandoverTimeoutSeconds` (1 s) and reported, never kept.
 - Hits are not predicted: impact is `PROJECTILE_HIT` and damage is `DAMAGE`, both from the server.
 
+### Which history entry a snapshot describes: `ack_applied_tick` (0.46.1)
+
+The reconcile compares the snapshot with the predictor's own **history** -- where it thought
+the player was at the tick the snapshot describes -- and moves the prediction by the
+difference. Before 0.46.1 it looked that entry up at the snapshot's own tick number `T`. That
+is the wrong entry:
+
+- The server applies an input on the tick whose **input drain** accepts it, not on the tick
+  the client was at when it recorded it. The client runs ahead by its lead, so an input
+  recorded on client base tick `B` is applied on server tick `P`, and the two tick lines are
+  offset by `B - P` -- about the lead minus one, plus whatever skew the clock steering has not
+  removed.
+- The snapshot at server tick `T` therefore matches the client's history at
+  `T + (B - P)`, not at `T`. Every tick of that offset came back as a correction: about
+  0.0033 units per tick of offset per reconcile on a curve, and a whole step at every start
+  and stop -- the rubber-banding.
+
+The server now says which tick applied the acknowledged input: `SnapshotMessage` field 7,
+`ack_applied_tick` (protocol 3 servers only; the server's `docs/API.md`, *Reconciliation*, is
+normative). It travels as `SnapshotMessage.AckAppliedTick` -> `ResolvedSnapshot.AckAppliedTick`
+-> `WorldState.AckAppliedTick` (kept paired with `WorldState.AckTick`), and the predictor takes
+it through two new overloads:
+
+```csharp
+predictor.Reconcile(Vec2 position, long ackTick, long serverBaseTick, long ackAppliedTick);
+predictor.Reconcile(Vec3 position, float velZ, long ackTick, long serverBaseTick, long ackAppliedTick);
+```
+
+`WorldViewBinder` and the DOTS `LocalPredictionSystem` (com.cuvara.dots) pass
+`world.AckAppliedTick`; a consumer reconciling by hand should do the same.
+
+**The offset is a stable one, not the pair of each acknowledgement.** `B` is the base tick
+stored with the acked input; `P` is `ack_applied_tick`. But every input's pair carries a tick of
+drain quantisation -- it lands somewhere inside a server tick and is drained at the next one --
+so consecutive pairs differ by one tick roughly as often as not, and on a moving body moving the
+comparison point by a tick moves it by a whole step. The exact-pair version was measured
+*worse* than no field at all. The predictor therefore keeps the last 15 measured pairs and
+compares at `T + median`, moving that offset only when fewer than a third of the window still
+agree with it. What is left is real: an input whose drain landed a tick away from the shared
+offset changed direction a tick early or late on the server, which is at most one step at a
+start or stop and a fraction of a step on a curve.
+
+Diagnostics: `AckTickOffset` (the offset in use), `LastMeasuredAckTickOffset` (the newest exact
+pair), `AckOffsetSamples`, `AckOffsetChanges` (each change on a moving body is a one-step
+correction; a steadily growing count means the clock is drifting) and `AckOffsetUnresolved`.
+
+**No field, no change.** With `ack_applied_tick` absent or zero (a protocol 2 or older server)
+the overloads behave exactly as `Reconcile(position, ackTick, serverBaseTick)` always did.
+
+Three smaller defects were fixed beside it, on every path:
+
+- **An input tick's history entry is re-recorded after the input.** `Advance` wrote the entry
+  when the tick began; the input then stepped the tick (or rolled a held step back on a stop),
+  and the history kept the stale value -- a +1/-1 step pair at every start and stop.
+- **A new tick carries the unshown part of the step on screen into the render offset**, as an
+  input boundary already did. It used to vanish, and the rendered position jumped forward by it
+  in one frame: up to 2.3x the normal per-frame motion on a curve and 16.7x at a start or stop
+  (1 ms frames), 1.3x now.
+- **The clock steering has an integral term** -- see *The clock runs on the server's timebase*.
+
+Measured on the deterministic headless harness (`Tests/Editor/PredictionHarness.cs`: the
+server's per-tick rules on one clock, the predictor on another, seeded latency and jitter;
+`AckAppliedTickReconcileTests` asserts these):
+
+| Run (55 s unless noted) | 0.46.0 | 0.46.1 |
+|---|---|---|
+| 60.0 Hz server, 15 Hz sends, no jitter, circle: nonzero corrections | 38 | **0** |
+| 59.6 Hz server, 13 Hz jittered sends, lead 6, circle: mean correction | 0.0208 | **0.0011** |
+| same, start/stop: largest correction | 4 steps | **1 step** |
+| same, 1 ms frames (20 s): largest frame-to-frame motion vs normal, circle / start-stop | 2.32x / 16.67x | **1.31x / 1.34x** |
+| DOTS path (2-argument reconcile, no steering, before): client clock lead over the server after 55 s | 22 ticks and climbing | 2 ticks, the measured target, with `PredictionClockSteering` |
+
 ### Smoothing vs snapping
 
 Every reconcile produces some position error:
@@ -207,9 +279,9 @@ many start/stop transitions is measuring it.
 
 ### The clock runs on the server's timebase
 
-`SteerToServerTick` corrects the base-tick clock's **phase**. It is proportional (gain 0.1,
-called once per snapshot) and has no integral term, so a constant **rate** difference is not
-something it can remove — it settles at a standing offset instead:
+`SteerToServerTick` corrects the base-tick clock's **phase**. Until 0.46.1 it was proportional
+only (gain 0.1, called once per snapshot), and a constant **rate** difference is not something a
+proportional loop can remove — it settles at a standing offset instead:
 
 ```
 standing tick error  =  drift / (gain x snapshotHz)
@@ -230,6 +302,36 @@ counted in `RefusedClockRateScales`.
 
 A ratio near 1.10 is not exotic: it is the Windows performance counter against the Linux
 clock the server ticks on, and it is what the development machine measures.
+
+**Most sessions never corroborate a rate**, though, and a server running 0.7% slow (59.6 Hz)
+left the proportional loop about one tick off for the whole session. Since 0.46.1 the steering
+also has an **integral term**: it integrates the same integer tick error the proportional term
+acts on (so a clock already in step is left exactly where it is), only while the proportional
+term is not saturated and the error is within 8 ticks (anti-windup), with a gain of 0.002 per
+call and a contribution clamped to 0.5 ticks per call. The loop's poles are real (z ~ 0.97 and
+0.92): overdamped. Every ratio from 1.02 to 1.103 now settles at zero tick error without the
+fed-forward rate (`PredictionClockRateTests`), where the proportional loop alone sat 0.8 to 4.1
+ticks off. `SteerIntegralTicks` reads what it has learned.
+
+### `PredictionClockSteering`: the same steering outside the binder (0.46.1)
+
+The measuring and steering half of `WorldViewBinder` -- `TickRate`, `Staleness`, `AckLatency`,
+`RoundTripMs`, the acknowledgement-floor conversion, the corroborated rate feed-forward and the
+measured `TargetLeadTicks` -- now lives in `PredictionClockSteering`, unchanged, and the binder
+forwards to it (`WorldViewBinder.ClockSteering`). A consumer that drives a predictor without the
+binder (the DOTS `LocalPredictionSystem`) steers with the same code:
+
+```csharp
+var steering = new PredictionClockSteering(predictor);
+
+// beside every RecordInput, same tick, same clock as below:
+steering.NoteInputSent(inputTick, nowSeconds);
+
+// once per NEW snapshot, before reconciling:
+steering.SampleTickRate(world.Tick, nowSeconds);
+steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
+predictor.Reconcile(position, world.AckTick, world.Tick, world.AckAppliedTick);
+```
 
 ### The lead must cover the pipeline, not just the snapshot's age
 

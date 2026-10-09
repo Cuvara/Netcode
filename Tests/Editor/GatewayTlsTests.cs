@@ -146,24 +146,22 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var transport = (TcpTransport)factory.Create(TransportKind.Tcp);
 
-            // The game-server hop asks for Tcp and is sealed at the message layer instead.
-            // Wrapping it in TLS here would double-encrypt and, worse, would mean the
-            // sealed-session tests were measuring a link they did not think they had.
+            // The gateway hop asks for Tcp; TLS is only ever what it asked for. (The
+            // game-server hop never asks for Tcp at all: it is KCP/UDP only.)
             Assert.That(transport.IsTls, Is.False);
         }
 
-        // ---- a server cannot talk the client into this kind ----------------------------
+        // ---- a server cannot talk the client into a TCP or TLS gameplay hop -----------
 
         [Test]
-        public void Parse_RefusesTcpTls_BecauseNoServerMayAssignIt()
+        public void ParseGameplay_RefusesEveryTcpFlavour_BecauseGameplayIsKcpOnly()
         {
-            Assert.Throws<TransportException>(() => TransportKinds.Parse("tcptls"));
-            Assert.Throws<TransportException>(() => TransportKinds.Parse("tls"));
+            Assert.Throws<TransportException>(() => TransportKinds.ParseGameplay("tcptls"));
+            Assert.Throws<TransportException>(() => TransportKinds.ParseGameplay("tls"));
+            Assert.Throws<TransportException>(() => TransportKinds.ParseGameplay("tcp"));
+            Assert.Throws<TransportException>(() => TransportKinds.ParseGameplay(string.Empty));
 
-            // The two a server may actually send still work.
-            Assert.That(TransportKinds.Parse("tcp"), Is.EqualTo(TransportKind.Tcp));
-            Assert.That(TransportKinds.Parse("kcp"), Is.EqualTo(TransportKind.Kcp));
-            Assert.That(TransportKinds.Parse(string.Empty), Is.EqualTo(TransportKind.Tcp));
+            Assert.That(TransportKinds.ParseGameplay("kcp"), Is.EqualTo(TransportKind.Kcp));
         }
 
         // ---- settings -> options --------------------------------------------------------

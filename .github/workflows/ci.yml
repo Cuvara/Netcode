@@ -86,11 +86,27 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The prediction tests compile LocalMovePredictor, which needs Shared.GameLogic -- a git
+      # package this repository consumes rather than contains. Check out exactly the tag
+      # package.json pins (x-manualDependencies), so the headless run tests the predictor against
+      # the shared simulation it ships with, not whatever the server's develop holds today.
+      - name: Check out Shared.GameLogic at the pinned tag
+        run: |
+          set -euo pipefail
+          URL=$(node -p "require('./package.json')['x-manualDependencies']['com.rpgmmo.shared-gamelogic']")
+          TAG="${URL##*#}"
+          echo "Shared.GameLogic tag: ${TAG}"
+          git clone --depth 1 --branch "${TAG}" --filter=blob:none --sparse \
+            https://github.com/Cuvara/rpg-mmo-server.git "$RUNNER_TEMP/rpg-mmo-server"
+          git -C "$RUNNER_TEMP/rpg-mmo-server" sparse-checkout set backend/gameserver-dotnet/Shared.GameLogic
+          echo "SGL_DIR=$RUNNER_TEMP/rpg-mmo-server/backend/gameserver-dotnet/Shared.GameLogic" >> "$GITHUB_ENV"
+
       - name: Run headless tests
         id: run
         working-directory: 'Tests~/Headless'
         run: |
           dotnet test \
+            -p:SglDir="$SGL_DIR" \
             --logger 'trx;LogFileName=results.trx' \
             --results-directory "$GITHUB_WORKSPACE/headless-results"
 

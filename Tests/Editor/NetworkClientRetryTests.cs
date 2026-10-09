@@ -153,7 +153,7 @@ namespace Cuvara.Netcode.Tests.Editor
 
         private static byte[] AssignOk() =>
             Frame(MsgType.EnterWorldResp,
-                "{\"server_addr\":\"127.0.0.1:9000\",\"join_token\":\"tok\",\"transport\":\"tcp\"}");
+                "{\"server_addr\":\"127.0.0.1:9000\",\"join_token\":\"tok\",\"transport\":\"kcp\"}");
 
         private static byte[] AssignErr(string error) =>
             Frame(MsgType.EnterWorldResp, "{\"error\":\"" + error + "\"}");

@@ -10,7 +10,7 @@ using Cysharp.Threading.Tasks;
 namespace Cuvara.Netcode.Transport
 {
     /// <summary>
-    /// TCP implementation of <see cref="ITransport"/> with the
+    /// TCP implementation of <see cref="ITransport"/> for the <b>gateway hop</b>, with the
     /// <c>[4-byte big-endian length][body]</c> framing both servers use.
     /// </summary>
     /// <remarks>
@@ -33,8 +33,13 @@ namespace Cuvara.Netcode.Transport
     /// transport there would be a second, redundant encryption of the same bytes.
     /// </para>
     /// <para>
-    /// <see cref="System.Net.Sockets"/> is unavailable on WebGL. A WebGL build needs
-    /// a WebSocket transport behind this same interface; see <c>docs/NETCODE.md</c>.
+    /// <b>Gateway hop only.</b> This is not a gameplay transport: realtime gameplay is
+    /// KCP/UDP only (<see cref="KcpTransport"/>), and <c>GameSessionClient</c> refuses TCP.
+    /// </para>
+    /// <para>
+    /// <see cref="System.Net.Sockets"/> is unavailable on WebGL, and so is UDP: a WebGL
+    /// build can reach neither the gateway nor the game server with this package. See
+    /// <c>Documentation~/NETCODE.md</c>.
     /// </para>
     /// </remarks>
     public sealed class TcpTransport : ITransport

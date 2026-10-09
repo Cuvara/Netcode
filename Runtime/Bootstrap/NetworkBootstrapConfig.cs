@@ -28,6 +28,11 @@ namespace Cuvara.Netcode.Bootstrap
         [Tooltip("Gateway port. The backend default is 8000 (GATEWAY_ADDR=:8000).")]
         [SerializeField] private int gatewayPort = 8000;
 
+        [Header("Game server (KCP/UDP)")]
+        [Tooltip("Pre-shared KCP datagram key, 64 hex characters, equal to the game server's TRANSPORT_KEY. " +
+                 "Empty = plaintext datagrams (dev). Realtime gameplay is KCP/UDP only; this does not affect the gateway hop.")]
+        [SerializeField] private string transportKey = string.Empty;
+
         [Header("Identity (development only)")]
         [Tooltip("Subject claim of the minted JWT. Any string the gateway has not already got a live session for.")]
         [SerializeField] private string userId = "dev-player";
@@ -64,6 +69,8 @@ namespace Cuvara.Netcode.Bootstrap
         public string GatewayHost => gatewayHost;
 
         public int GatewayPort => gatewayPort;
+
+        public string TransportKey => transportKey ?? string.Empty;
 
         public string UserId => userId;
 

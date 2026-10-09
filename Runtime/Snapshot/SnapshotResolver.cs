@@ -173,7 +173,8 @@ namespace Cuvara.Netcode.Snapshot
                 snapshot.Full,
                 entities,
                 snapshot.Removed,
-                events);
+                events,
+                snapshot.AckAppliedTick);
 
             return true;
         }
