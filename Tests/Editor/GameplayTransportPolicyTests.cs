@@ -7,7 +7,6 @@ using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Transport;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
-using UnityEngine.TestTools;
 
 namespace Cuvara.Netcode.Tests.Editor
 {
@@ -136,33 +135,32 @@ namespace Cuvara.Netcode.Tests.Editor
         /// the KCP/UDP connect-timeout message (seen live: a Windows client against a WSL2
         /// NAT stack advertising 127.0.0.1).
         /// </summary>
-        [UnityTest]
-        public System.Collections.IEnumerator ACancelledKcpRead_Throws_InsteadOfReportingEof() =>
-            UniTask.ToCoroutine(async () =>
+        /// <remarks>
+        /// Synchronous on purpose: an IP-literal connect does no DNS hop and a read with an
+        /// already-cancelled token never waits, so neither needs UniTask's player loop. The
+        /// first version awaited a timer through <c>UniTask.ToCoroutine</c> and hung for the
+        /// full 180 s in the install-probe projects, where that loop is not driven in EditMode.
+        /// </remarks>
+        [Test]
+        [Timeout(15000)]
+        public void ACancelledKcpRead_Throws_InsteadOfReportingEof()
+        {
+            int deadPort;
+            using (var probe = new System.Net.Sockets.UdpClient(0))
             {
-                int deadPort;
-                using (var probe = new System.Net.Sockets.UdpClient(0))
-                {
-                    deadPort = ((System.Net.IPEndPoint)probe.Client.LocalEndPoint).Port;
-                }
+                deadPort = ((System.Net.IPEndPoint)probe.Client.LocalEndPoint).Port;
+            }
 
-                using (var transport = new KcpTransport())
-                using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
-                {
-                    await transport.ConnectAsync("127.0.0.1", deadPort, CancellationToken.None);
-                    bool cancelled = false;
-                    try
-                    {
-                        var frame = await transport.ReadFrameAsync(cts.Token);
-                        Assert.Fail($"ReadFrameAsync returned {(frame == null ? "null (EOF)" : "a frame")} on cancellation");
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        cancelled = true;
-                    }
+            using (var transport = new KcpTransport())
+            {
+                var connect = transport.ConnectAsync("127.0.0.1", deadPort, CancellationToken.None);
+                Assert.That(connect.Status, Is.EqualTo(UniTaskStatus.Succeeded),
+                    "an IP-literal KCP connect completes without waiting (UDP has no handshake)");
 
-                    Assert.That(cancelled, Is.True);
-                }
-            });
+                var read = transport.ReadFrameAsync(new CancellationToken(true));
+                Assert.That(read.Status, Is.EqualTo(UniTaskStatus.Canceled),
+                    $"a cancelled read must be Canceled, not {read.Status} (Succeeded would be a null = EOF)");
+            }
+        }
     }
 }

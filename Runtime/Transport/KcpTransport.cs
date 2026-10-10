@@ -120,12 +120,15 @@ namespace Cuvara.Netcode.Transport
                 throw new TransportException("transport already connected");
             }
 
+            // An IP literal (what the gateway advertises) needs no lookup; resolving it through
+            // Dns.GetHostAddressesAsync only adds an async hop that resumes on the player loop.
             IPAddress address;
             try
             {
-                var addresses = await Dns.GetHostAddressesAsync(host).AsUniTask()
-                    .AttachExternalCancellation(cancellationToken);
-                address = KcpClientSession.PreferIPv4(addresses);
+                address = IPAddress.TryParse(host, out var literal)
+                    ? literal
+                    : KcpClientSession.PreferIPv4(await Dns.GetHostAddressesAsync(host).AsUniTask()
+                        .AttachExternalCancellation(cancellationToken));
                 if (address == null)
                 {
                     throw new TransportException($"KCP/UDP: cannot resolve {host}");

@@ -67,6 +67,8 @@ Still needs `sgl-v0.7.0`. Measured on the new headless harness; numbers in
 
 ### Fixed
 
+- **`KcpTransport.ConnectAsync` does not resolve an IP literal through DNS.** The gateway
+  advertises IP addresses; the lookup only added an async hop that resumes on the player loop.
 - **A cancelled `KcpTransport.ReadFrameAsync` throws instead of reporting end-of-stream.** It returned
   null, so the join's own deadline against an unreachable UDP port surfaced as "game server closed
   the connection during the join" instead of the KCP/UDP connect-timeout message. Seen live with a
