@@ -27,6 +27,22 @@
   `StaleSnapshotsDropped`. A new session starts from `Reset()`, and `NetworkClient` resets its
   world on every connect and reconnect, so a server with lower ticks is accepted.
   `SnapshotFreshnessTests` fails before.
+- **`WorldState` also drops a second snapshot at the tick it has merged.** The guard rejected
+  only `Tick < WorldState.Tick`, so a repeat at the current tick was merged and could put an
+  older entity state back (independent review R2-1). The server cannot send two different
+  snapshots at one world tick to one connection: it stages at most one per world tick, encodes
+  each staging once (keyframe or delta is decided in that encode), a resync promotes the next
+  staging, and coalescing keeps the newer tick. So an equal tick is a repeat and is now dropped
+  and counted in `StaleSnapshotsDropped`. A fresh or reset world still accepts its first
+  snapshot at any tick, tick 0 included. A snapshot aborted by the resolver (unknown handle)
+  never reaches the world, so the resync keyframe is applied, also at the aborted tick.
+  New `SnapshotFreshnessTests` cases fail before.
+- **`PredictionClockSteering.Reset()` forgets the whole session.** It reset only the tick-rate
+  and staleness estimators. `AckLatency`, the advertised tick rate and `RoundTripMs` survived,
+  so a steering reused across sessions timed new acknowledgements against old sends and kept
+  the old floor in its lead (independent review R2-3). They are now reset. The lifetime counter
+  `AckFloorRateFallbacks` is kept. `WorldViewBinder.Reset()` now calls `ClockSteering.Reset()`
+  and so also forgets `AckLatency`. New `AckFloorConversionRateTests` cases fail before.
 
 - **`default(InterpolationConfig)` now normalises to the default extrapolation shaping.**
   `Normalized()` filled `ExtrapolationHold`, `ExtrapolationSettle` and `MaxExtrapolationSpan`
@@ -99,7 +115,8 @@
 
 - `LocalMovePredictor.StallResyncs`: clock jumps made for a client stall (also counted in
   `HardResyncs`).
-- `WorldState.StaleSnapshotsDropped`: snapshots dropped because their tick was below `Tick`.
+- `WorldState.StaleSnapshotsDropped`: snapshots dropped because their tick was not above `Tick`
+  (older, or a repeat of the merged tick).
 - `WorldViewBinder.TickLineRestarts`: times the world tick went backwards and the render
   timeline restarted on the new tick line.
 - `LocalMovePredictor.UseServerTickRate(uint advertisedTickRate)`: adopts the server's advertised
