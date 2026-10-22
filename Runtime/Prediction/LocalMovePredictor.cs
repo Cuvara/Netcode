@@ -1408,6 +1408,15 @@ namespace Cuvara.Netcode.Prediction
 
         private void ReconcileCore(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
         {
+            // A snapshot of a stall's backlog (see SkipReconcileForBunchedSnapshot): skipped whole.
+            if (_bunchedSnapshotTick != 0 && snapshotTick == _bunchedSnapshotTick)
+            {
+                _bunchedSnapshotTick = 0;
+                LastCorrection = 0f;
+                BunchedReconcilesSkipped++;
+                return;
+            }
+
             // From here on `serverBaseTick` means "the CLIENT base tick the authoritative position
             // describes": the snapshot's own tick when the server did not say which tick applied
             // the acked input (today's behaviour, unchanged), and that tick moved onto the client's
@@ -2021,6 +2030,47 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         public long TickError { get; private set; }
 
+        /// <summary>
+        /// Reconciles skipped because their snapshot arrived bunched up behind another, as a stall's
+        /// backlog does (<see cref="PredictionClockSteering.BunchedSnapshots"/>). Lifetime total.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why skipped.</b> After a stall the clock is moved onto the server's current tick by
+        /// the first snapshot read; the backlog behind it describes ticks the clock jumped over.
+        /// Their acknowledgement still names the input sent before the stall, so the history entry
+        /// they are compared with lies in the jumped span, which has no entries, and the replay
+        /// fallback then rebuilt the whole span from a stale position: corrections of 3 to 16 steps
+        /// on most of the backlog, in the paced-backlog harness
+        /// (<c>ClientHitchRecoveryTests</c>). The first snapshot back on cadence reconciles
+        /// against a current position a few milliseconds later.
+        /// </para>
+        /// <para>
+        /// Only the snapshot named by <see cref="SkipReconcileForBunchedSnapshot"/> is skipped,
+        /// matched by tick, so a caller that steers without reconciling cannot make a later
+        /// reconcile disappear. The two-argument <c>Reconcile</c> carries no tick and is never
+        /// skipped.
+        /// </para>
+        /// </remarks>
+        public int BunchedReconcilesSkipped { get; private set; }
+
+        // The snapshot tick whose reconcile is to be skipped, or 0.
+        private long _bunchedSnapshotTick;
+
+        /// <summary>
+        /// Marks the snapshot at <paramref name="snapshotTick"/> as part of a backlog: its reconcile
+        /// is skipped, and <see cref="TickError"/> is updated against it without steering. Called by
+        /// <see cref="PredictionClockSteering.OnSnapshot"/>.
+        /// </summary>
+        internal void SkipReconcileForBunchedSnapshot(long snapshotTick, int targetLeadTicks)
+        {
+            _bunchedSnapshotTick = snapshotTick;
+            if (_baseTickSeeded && snapshotTick > 0)
+            {
+                TickError = _baseTick - (snapshotTick + (targetLeadTicks < 0 ? 0 : targetLeadTicks));
+            }
+        }
+
         /// <summary>Times the clock was hard-resynchronised rather than steered.</summary>
         public int HardResyncs { get; private set; }
 
@@ -2433,6 +2483,7 @@ namespace Cuvara.Netcode.Prediction
             _replayStageCount = 0;
             _clampedSinceSteer = false;
             _jumpCredit = 0f;
+            _bunchedSnapshotTick = 0;
         }
 
 
