@@ -6,6 +6,16 @@
 
 ### Fixed
 
+- **A correction made by the replay fallback is no longer applied a second time.** When a
+  snapshot's tick had left the 256-tick history ring (after a long client stall), the reconcile
+  replayed and moved the prediction correctly but recorded only the current tick; every older
+  history entry kept the uncorrected position, and the next snapshot acknowledging one of those
+  ticks measured the same error again and added it on top. Found by the rpg-factory testlab (run
+  20261022T091437Z-S07-c5hc): a respawn during a 5 s stall drew the local player 2.24 units past
+  the server, then snapped back. The replay path now shifts the history by its correction, as
+  the history path always has. `ReplayRewindHistoryTests` (fails before: predicted (-1.63, 0.59)
+  against the server's (0.53, 0)).
+
 - **A predictor registered before the join can now take the server's tick rate, so the local
   player no longer corrects in whole 15 Hz steps against a 60 Hz server.** `LocalMovePredictor`'s
   timestep was fixed at construction, and a game builds its one predictor at the composition

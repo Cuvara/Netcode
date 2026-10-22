@@ -1606,6 +1606,20 @@ namespace Cuvara.Netcode.Prediction
                     replayed.Z - _predicted.Z);
             }
 
+            // Carry the correction into the history, as the history path does (ShiftHistory).
+            // Recording only the current tick left every older entry on the uncorrected
+            // timeline, and the next snapshot acknowledging one of those ticks measured the same
+            // error again and applied it a second time: a respawn delivered after a 5 s client
+            // stall drew the local player 2.24 units past the server and back (rpg-factory
+            // testlab run 20261022T091437Z-S07-c5hc; ReplayRewindHistoryTests).
+            float hx = replayed.X - _predicted.X;
+            float hy = replayed.Y - _predicted.Y;
+            float hz = replayed.Z - _predicted.Z;
+            if (hx != 0f || hy != 0f || hz != 0f)
+            {
+                ShiftHistory(hx, hy, hz);
+            }
+
             _predicted = replayed;
 
             // The replayed timeline replaces the history for those ticks: the next snapshot
