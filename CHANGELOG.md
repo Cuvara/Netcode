@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-22
+
 ### Fixed
 
 - **A client stall no longer leaves a stream of corrections behind it.** `Advance` discards
@@ -51,36 +53,6 @@
   `TickLineRestarts`. Calling `Reset()` on a session boundary is still the correct fix.
   `SessionBoundaryResetTests` fails before (`LastServerTick` 100236, expected 616).
 
-### Tests
-
-- 70 more headless tests (397 to 467, all passing). The Unity-free resolver,
-  interpolation-continuity and defer fixtures now also run headless. New fixtures:
-  - `ReplayHistoryStagingTests`: the staged replay of 0.48.0, which had no test of its own.
-  - `ServerStallRecoveryTests`
-  - `SessionBoundaryResetTests`
-  - `EntityLifecycleTests`
-  - `InterpolationScenarioTests`
-  - `KcpReliabilityTests`: loss, reorder, duplicates and a full receive window.
-  - `ClientHitchRecoveryTests`: a 0.5 s and a 2 s client stall, and a jitter guard.
-  - `SnapshotFreshnessTests`
-  - `ReconnectDecisionTableTests`: every disconnect cause against every close reason.
-  - `InterpolationConfigNormalizationTests`
-  - `PredictorResetHistoryTests`
-
-  `PredictionHarness` gains a client hitch, a server tick stall, frame jitter and a
-  per-reconcile correction log.
-
-### Documentation
-
-- `PREDICTION.md` and `INTERPOLATION.md` no longer name APIs that do not exist
-  (`PredictAndSend`, `RenderPosition`, `MaxSamples`, `ExtrapolationLimit`, the old
-  `InterpolationClock.Advance` signature). Their defaults, the staleness fit and which clock
-  it steers now match the code.
-
-## [0.48.0] - 2026-10-22
-
-### Fixed
-
 - **A correction made by the replay fallback is no longer applied a second time.** When a
   snapshot's tick had left the 256-tick history ring (after a long client stall), the reconcile
   replayed and moved the prediction correctly but recorded only the current tick; every older
@@ -125,6 +97,11 @@
 
 ### Added
 
+- `LocalMovePredictor.StallResyncs`: clock jumps made for a client stall (also counted in
+  `HardResyncs`).
+- `WorldState.StaleSnapshotsDropped`: snapshots dropped because their tick was below `Tick`.
+- `WorldViewBinder.TickLineRestarts`: times the world tick went backwards and the render
+  timeline restarted on the new tick line.
 - `LocalMovePredictor.UseServerTickRate(uint advertisedTickRate)`: adopts the server's advertised
   base-tick rate (`NetworkClient.TickRate` / `GameSessionClient.TickRate`). Call after every join,
   before the first reconcile, next to `UseServerProtocol`. The same rate changes nothing; a new
@@ -150,6 +127,32 @@
   cannot know the game's speeds.
 - The headless suite now compiles `InterpolationCoreTests`, `WithheldEntityDoesNotFreezeTests` and
   `StoppedEntityConvergesTests` (they are Unity-free).
+
+### Tests
+
+- 70 more headless tests (397 to 467, all passing). The Unity-free resolver,
+  interpolation-continuity and defer fixtures now also run headless. New fixtures:
+  - `ReplayHistoryStagingTests`: the staged replay of 0.48.0, which had no test of its own.
+  - `ServerStallRecoveryTests`
+  - `SessionBoundaryResetTests`
+  - `EntityLifecycleTests`
+  - `InterpolationScenarioTests`
+  - `KcpReliabilityTests`: loss, reorder, duplicates and a full receive window.
+  - `ClientHitchRecoveryTests`: a 0.5 s and a 2 s client stall, and a jitter guard.
+  - `SnapshotFreshnessTests`
+  - `ReconnectDecisionTableTests`: every disconnect cause against every close reason.
+  - `InterpolationConfigNormalizationTests`
+  - `PredictorResetHistoryTests`
+
+  `PredictionHarness` gains a client hitch, a server tick stall, frame jitter and a
+  per-reconcile correction log.
+
+### Documentation
+
+- `PREDICTION.md` and `INTERPOLATION.md` no longer name APIs that do not exist
+  (`PredictAndSend`, `RenderPosition`, `MaxSamples`, `ExtrapolationLimit`, the old
+  `InterpolationClock.Advance` signature). Their defaults, the staleness fit and which clock
+  it steers now match the code.
 
 ## [0.47.0] - 2026-10-09
 

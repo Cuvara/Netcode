@@ -64,7 +64,7 @@ cannot read managed assets):
 for which zero means something (`MaxExtrapolation`, `ExtrapolationHold`,
 `ExtrapolationSettle`, `MaxExtrapolationSpan`). A configured zero there is kept, and only a
 negative value or NaN takes the default. The all-zero `default(InterpolationConfig)` stands
-for "netcode's defaults": since 0.48.x it gets `Default`'s hold, settle and span. Its
+for "netcode's defaults": since 0.48.0 it gets `Default`'s hold, settle and span. Its
 `MaxExtrapolation` stays 0 (no extrapolation), as before.
 
 ### TargetDelay
@@ -97,7 +97,7 @@ its rate within `MaxClockRateAdjust`, so `RenderTick` strictly increases.
 `SnapshotStalenessEstimator` steers the prediction clock, not this one.
 
 **Session boundaries.** `RenderTick` lives in one server's tick space. Call
-`WorldViewBinder.Reset()` with `WorldState.Reset()` on every reconnect. Since 0.48.x, a binder
+`WorldViewBinder.Reset()` with `WorldState.Reset()` on every reconnect. Since 0.48.0, a binder
 that sees the world tick go backwards restarts its render clock, its sample rings and its
 estimators by itself, and counts it in `TickLineRestarts`. A server with a lower tick line is
 then interpolated at once. Reset is still the correct call.
