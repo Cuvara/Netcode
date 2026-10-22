@@ -119,8 +119,8 @@ namespace Cuvara.Netcode.Tests.Editor
 
             Assert.That(c.World.Entities.ContainsKey("a"), Is.False, "the old entity was not resurrected");
             Assert.That(c.World.Entities["c"].X, Is.EqualTo(55f), "handle 1 now names c");
-            Assert.That(c.View.Events, Has.Exactly(1).EqualTo("spawn a"));
-            Assert.That(c.View.Events, Has.Exactly(1).EqualTo("spawn c"));
+            Assert.That(c.View.Events.FindAll(e => e == "spawn a").Count, Is.EqualTo(1));
+            Assert.That(c.View.Events.FindAll(e => e == "spawn c").Count, Is.EqualTo(1));
         }
 
         [Test]
