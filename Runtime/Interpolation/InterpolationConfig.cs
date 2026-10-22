@@ -210,17 +210,36 @@ namespace Cuvara.Netcode.Interpolation
         /// This config with any non-positive field replaced by its default.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// <c>default(InterpolationConfig)</c> is all zeroes, and a zero
         /// <see cref="DefaultInterval"/> or <see cref="RingCapacity"/> would divide by zero
         /// or buffer nothing. A struct has no constructor that can be made mandatory, so
         /// the guard has to live somewhere the consumer calls; both consumers call this
         /// once at construction. <see cref="MaxExtrapolation"/> is exempt because zero is a
         /// meaningful choice there — it means "never extrapolate".
+        /// </para>
+        /// <para>
+        /// <see cref="ExtrapolationHold"/>, <see cref="ExtrapolationSettle"/> and
+        /// <see cref="MaxExtrapolationSpan"/> also mean something at zero (no hold, snap back,
+        /// no span check), so a configured value keeps a zero there and only a negative or NaN
+        /// takes the default. The one exception is the all-zero struct itself: a caller that
+        /// passes <c>default(InterpolationConfig)</c> asked for netcode's defaults
+        /// (<c>DotsNetcodeBootstrap.Install</c> documents exactly that), so it gets
+        /// <see cref="Default"/>'s values for these three. Every other field follows its own
+        /// rule above in both cases.
+        /// </para>
         /// </remarks>
         public InterpolationConfig Normalized()
         {
             var d = Default;
             var c = this;
+            if (c.Equals(default(InterpolationConfig)))
+            {
+                c.ExtrapolationHold = d.ExtrapolationHold;
+                c.ExtrapolationSettle = d.ExtrapolationSettle;
+                c.MaxExtrapolationSpan = d.MaxExtrapolationSpan;
+            }
+
             if (c.TargetDelay <= 0.0) c.TargetDelay = d.TargetDelay;
             if (c.MaxExtrapolation < 0.0) c.MaxExtrapolation = d.MaxExtrapolation;
             if (c.ExtrapolationHold < 0.0 || double.IsNaN(c.ExtrapolationHold)) c.ExtrapolationHold = d.ExtrapolationHold;
