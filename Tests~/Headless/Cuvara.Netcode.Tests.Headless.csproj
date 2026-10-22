@@ -133,6 +133,20 @@
     <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
   </ItemGroup>
 
+  <!--
+    Unity-free EditMode tests that used to run only inside the Editor: snapshot interning and
+    the abort-on-unknown-handle rule, the remote interpolation continuity and defer-until-
+    bracketed fixtures, and the per-entity counters. They compile against the same sources
+    as everything above, so the headless job is now their earliest gate too.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/SnapshotResolverInterningTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotSpeedTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldStateEntityCounterTests.cs" />
+    <Compile Include="../../Tests/Editor/RemoteInterpolationContinuityTests.cs" />
+    <Compile Include="../../Tests/Editor/DeferUntilBracketedTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="NUnit" Version="3.14.0" />
