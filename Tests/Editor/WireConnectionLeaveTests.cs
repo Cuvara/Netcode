@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
 using UnityEngine.TestTools;
@@ -71,8 +72,9 @@ namespace Cuvara.Netcode.Tests.Editor
             {
                 Events.Add("flush");
 
-                // An acknowledgement takes a little time on a real link.
-                await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                // An acknowledgement takes a little time on a real link. Task.Yield, not a
+                // player-loop yield: an edit-mode Editor pumps only the synchronization context.
+                await Task.Yield();
                 Events.Add(Acknowledge ? "acked" : "timeout");
                 return Acknowledge;
             }

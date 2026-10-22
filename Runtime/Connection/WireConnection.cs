@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
+using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
@@ -63,9 +64,11 @@ namespace Cuvara.Netcode.Connection
         // Set once the disconnect frame of a graceful leave is queued: nothing may follow it.
         private int _leaving;
 
-        // The body the write loop handed to the transport last, so a leave can tell when its
-        // disconnect frame has gone out.
-        private byte[] _lastWritten;
+        // The disconnect frame of a graceful leave, and the signal the write loop sets once it has
+        // handed that frame to the transport.
+        private byte[] _leaveFrame;
+        private readonly TaskCompletionSource<bool> _leaveFrameWritten =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _closeSignalled;
         private int _disposed;
         // Monotonic milliseconds (NetworkSettings.MonotonicClock), never wall
@@ -350,17 +353,19 @@ namespace Cuvara.Netcode.Connection
                 byte[] bye = Enqueue(MsgType.Disconnect, new DisconnectMessage { Reason = reason });
                 if (bye != null)
                 {
+                    // Set before the write loop can run: it resumes on the same context as this.
+                    Volatile.Write(ref _leaveFrame, bye);
                     try
                     {
-                        var waited = System.Diagnostics.Stopwatch.StartNew();
-                        while (!ReferenceEquals(Volatile.Read(ref _lastWritten), bye)
-                               && IsRunning
-                               && waited.ElapsedMilliseconds < LeaveWriteTimeoutMs)
-                        {
-                            await UniTask.Yield(PlayerLoopTiming.Update, _cts.Token);
-                        }
+                        // A Task timer rather than a player-loop delay, so the wait also ends in an
+                        // edit-mode Editor, where only the synchronization context is pumped.
+                        await Task.WhenAny(
+                                _leaveFrameWritten.Task,
+                                Task.Delay(LeaveWriteTimeoutMs, _cts.Token))
+                            .AsUniTask();
 
-                        if (ReferenceEquals(Volatile.Read(ref _lastWritten), bye)
+                        if (_leaveFrameWritten.Task.IsCompleted
+                            && IsRunning
                             && _transport is IFlushableTransport flushable)
                         {
                             LeaveAcknowledged = await flushable.FlushAsync(_cts.Token);
@@ -445,7 +450,10 @@ namespace Cuvara.Netcode.Connection
                     {
                         Interlocked.Decrement(ref _queueDepth);
                         await _transport.WriteFrameAsync(body, token);
-                        Volatile.Write(ref _lastWritten, body);
+                        if (ReferenceEquals(body, Volatile.Read(ref _leaveFrame)))
+                        {
+                            _leaveFrameWritten.TrySetResult(true);
+                        }
                     }
                 }
             }
