@@ -79,6 +79,50 @@ namespace Cuvara.Netcode.Tests.Editor
                 "the entity's newest state is tick 108's; tick 104's arrived late and must not replace it");
         }
 
+        [Test]
+        public void AnOlderSnapshot_IsCountedAsDropped()
+        {
+            var world = new WorldState();
+            world.Apply(Keyframe(100, At(1f)));
+            world.Apply(Delta(108, At(3f)));
+
+            world.Apply(Delta(104, At(2f)));
+
+            Assert.That(world.StaleSnapshotsDropped, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void AfterAReset_ANewSessionOnALowerTickLine_IsApplied()
+        {
+            // The guard must not freeze a reconnect to a server whose ticks restart lower:
+            // Reset returns the tick to zero, so the new session's first keyframe is newer.
+            var world = new WorldState();
+            world.Apply(Keyframe(100_000, At(1f)));
+            world.Apply(Delta(100_004, At(2f)));
+
+            world.Reset();
+            world.Apply(Keyframe(500, At(7f)));
+            world.Apply(Delta(504, At(8f)));
+
+            Assert.That(world.Tick, Is.EqualTo(504L));
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(8f));
+            Assert.That(world.StaleSnapshotsDropped, Is.Zero);
+        }
+
+        [Test]
+        public void WithoutAReset_ANewSessionOnALowerTickLine_IsDroppedAndCounted()
+        {
+            // The contract the guard relies on, pinned: a new session goes into a reset world.
+            // NetworkClient resets its World at the start of every connect and reconnect.
+            var world = new WorldState();
+            world.Apply(Keyframe(100_000, At(1f)));
+
+            world.Apply(Keyframe(500, At(7f)));
+
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(1f));
+            Assert.That(world.StaleSnapshotsDropped, Is.EqualTo(1));
+        }
+
         private sealed class RecordingView : IEntityView
         {
             public readonly Dictionary<string, float> X = new Dictionary<string, float>();

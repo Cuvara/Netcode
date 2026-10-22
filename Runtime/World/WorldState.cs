@@ -175,6 +175,24 @@ namespace Cuvara.Netcode.World
         /// </remarks>
         public void Apply(in ResolvedSnapshot snapshot)
         {
+            // OLDER THAN WHAT IS ALREADY MERGED: dropped whole. The shared merger keeps Tick and
+            // AckTick monotonic but merges the entities of any snapshot it is given, so a late
+            // one would put its stale states back over newer ones -- and an entity that has
+            // stopped since is then omitted by every delta until the next keyframe, drawn at the
+            // stale position for up to two seconds (SnapshotFreshnessTests). The wire is ordered
+            // (KCP), so this is not expected to fire; it is counted so that it is visible if it
+            // does.
+            //
+            // A new session starts from Reset(), which returns Tick to zero, so a server whose
+            // ticks restart lower is accepted from its first snapshot. NetworkClient resets this
+            // world at the start of every connect and reconnect. A caller that feeds a new
+            // session into an un-reset world will see it dropped here and counted.
+            if (snapshot.Tick < Tick)
+            {
+                StaleSnapshotsDropped++;
+                return;
+            }
+
             var entities = snapshot.Entities;
             EntitySnapshotData[] converted;
             if (entities == null || entities.Count == 0)
@@ -291,6 +309,14 @@ namespace Cuvara.Netcode.World
                 AckAppliedTick = snapshot.AckAppliedTick;
             }
         }
+
+        /// <summary>
+        /// Snapshots dropped because their tick was below <see cref="Tick"/>. Zero on an ordered
+        /// transport. Nonzero means either a reordering transport, or a new session fed into this
+        /// world without <see cref="Reset"/> (every one of its snapshots is then dropped until its
+        /// ticks pass the old session's).
+        /// </summary>
+        public int StaleSnapshotsDropped { get; private set; }
 
         /// <summary>Drop all reconstructed state — a new join or a map transfer.</summary>
         public void Reset()
