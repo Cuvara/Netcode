@@ -177,6 +177,60 @@ namespace Cuvara.Netcode.Tests.Editor
             // reaches it, in the loop above.
         }
 
+        /// <summary>
+        /// The stall in the client's own frame order: the stall-end frame samples and records its
+        /// input first (<c>DotsWorldBridge.Update</c>), and only then is the frame's snapshot
+        /// steered on and reconciled (<c>LocalPredictionSystem</c>). Both delivery shapes: the
+        /// whole backlog read in the stall-end frame (the transport since 0.48.0), and paced.
+        /// </summary>
+        /// <remarks>
+        /// The tests above record the input after the snapshot, so the jump always came first and
+        /// the stall-end input landed on the new tick line. Live, it is recorded on the old one, a
+        /// whole stall behind (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf): the first
+        /// reconcile replayed that input from its old tick on top of the server's position, which
+        /// moved the player 14 steps too far, and the next snapshot took 12 of them back. That made
+        /// two local corrections for one stall.
+        /// </remarks>
+        [TestCase(PredictionHarness.Motion.Circle, 0.5, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 0.5, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 2.0, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, false, 1.0 / 500.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, true, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 2.0, true, 1.0 / 120.0)]
+        public void AClientStall_WithTheInputSampledBeforeTheSnapshot_CostsAtMostOneCorrection(
+            PredictionHarness.Motion motion, double stallSeconds, bool pacedBacklog, double frameSeconds)
+        {
+            PredictionHarness.Config c = ServerStallRecoveryTests.Scenario(motion);
+            c.FrameSeconds = frameSeconds;
+            c.HitchAtSeconds = EventAt;
+            c.HitchSeconds = stallSeconds;
+            c.InputBeforeSnapshot = true;
+            c.MaxFrameDeltaSeconds = 1.0 / 3.0;
+            if (pacedBacklog) c.BacklogSpacingSeconds = 0.010;
+            PredictionHarness.Result r = PredictionHarness.Run(c);
+            TestContext.WriteLine($"{stallSeconds} s stall, input first, paced={pacedBacklog}, {frameSeconds * 1000.0:F1} ms frames: {r}");
+            Assume.That(r.Reconciles, Is.GreaterThan(250), "precondition: the run reconciled");
+
+            double drained = EventAt + stallSeconds + (pacedBacklog ? stallSeconds * 15.0 * 0.010 : 0.0) + 0.15;
+            foreach (var (at, correction, tickError) in r.CorrectionLog)
+            {
+                if (at < EventAt || at > drained + 2.0) continue;
+                if (correction >= r.StepLength * 0.999f || at < drained)
+                {
+                    TestContext.WriteLine($"  t={at:F3} correction={correction / r.StepLength:F2} steps tickError={tickError}");
+                }
+            }
+
+            // Over the stall's reach, for the reason the paced-backlog test above gives.
+            int large = CorrectionsBetween(r, EventAt, drained + 2.0, 2f);
+            Assert.That(large, Is.LessThanOrEqualTo(1),
+                $"one {stallSeconds} s stall, input sampled first: {large} corrections of two steps or more. {r}");
+            Assert.That(CorrectionsBetween(r, drained + 1.0, drained + 2.0, 2f), Is.Zero,
+                "a second after the stall nothing of it is left to correct. " + r);
+            Assert.That(r.StallResyncs, Is.EqualTo(1), "one stall, one clock jump. " + r);
+        }
+
         [TestCase(PredictionHarness.Motion.Circle)]
         [TestCase(PredictionHarness.Motion.StartStop)]
         public void OrdinaryJitter_NeverJumpsTheClock(PredictionHarness.Motion motion)

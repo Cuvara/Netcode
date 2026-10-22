@@ -151,6 +151,14 @@ namespace Cuvara.Netcode.Tests.Editor
             public double MaxFrameDeltaSeconds;
 
             /// <summary>
+            /// Record the frame's input before its snapshot is applied, as the client does: the
+            /// input is sampled and sent in <c>DotsWorldBridge.Update</c>, and the snapshot is
+            /// steered on and reconciled later in the frame by <c>LocalPredictionSystem</c>. False
+            /// keeps the harness's original order (snapshot first).
+            /// </summary>
+            public bool InputBeforeSnapshot;
+
+            /// <summary>
             /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
             /// of up to this much either way (an uneven frame rate).
             /// </summary>
@@ -400,6 +408,7 @@ namespace Cuvara.Netcode.Tests.Editor
                     ? c.FrameSeconds + Jitter(rng, c.FrameJitterSeconds)
                     : c.FrameSeconds;
                 bool hitchFrame = false;
+                bool moving = false;
                 if (c.HitchSeconds > 0.0 && !hitched && now >= c.HitchAtSeconds)
                 {
                     frame = c.HitchSeconds;
@@ -503,6 +512,33 @@ namespace Cuvara.Netcode.Tests.Editor
                     pacing = backlog.Count > 0;
                 }
 
+                // ── Live order: the input is sampled and recorded before the frame's snapshot ──
+                if (c.InputBeforeSnapshot)
+                {
+                    if (hitchFrame && nextSend < now)
+                    {
+                        // A stalled client sends nothing during the stall and then resumes its cadence
+                        // (InputCadence resynchronises rather than emitting the backlog at once).
+                        nextSend = now;
+                    }
+
+                    if (now >= nextSend)
+                    {
+                        nextSend += 1.0 / c.SendHz + Jitter(rng, c.SendJitterSeconds);
+                        Autopilot(c, now, out float mx, out float my);
+                        inputTick++;
+                        uplink.Add(new InFlightInput
+                        {
+                            Arrival = now + c.UplinkSeconds + Jitter(rng, c.NetworkJitterSeconds),
+                            Tick = inputTick,
+                            MoveX = mx,
+                            MoveY = my,
+                        });
+                        steering.NoteInputSent(inputTick, now);
+                        predictor.RecordInput(inputTick, mx, my);
+                    }
+                }
+
                 // ── Client: snapshots that have arrived, newest only (a binder merges them) ──
                 int newestIndex = -1;
                 for (int i = 0; i < downlink.Count; i++)
@@ -543,28 +579,30 @@ namespace Cuvara.Netcode.Tests.Editor
                 }
 
                 // ── Client: send an input on its own cadence ──
-                bool moving = false;
-                if (hitchFrame && nextSend < now)
+                if (!c.InputBeforeSnapshot)
                 {
-                    // A stalled client sends nothing during the stall and then resumes its cadence
-                    // (InputCadence resynchronises rather than emitting the backlog at once).
-                    nextSend = now;
-                }
-
-                if (now >= nextSend)
-                {
-                    nextSend += 1.0 / c.SendHz + Jitter(rng, c.SendJitterSeconds);
-                    Autopilot(c, now, out float mx, out float my);
-                    inputTick++;
-                    uplink.Add(new InFlightInput
+                    if (hitchFrame && nextSend < now)
                     {
-                        Arrival = now + c.UplinkSeconds + Jitter(rng, c.NetworkJitterSeconds),
-                        Tick = inputTick,
-                        MoveX = mx,
-                        MoveY = my,
-                    });
-                    steering.NoteInputSent(inputTick, now);
-                    predictor.RecordInput(inputTick, mx, my);
+                        // A stalled client sends nothing during the stall and then resumes its cadence
+                        // (InputCadence resynchronises rather than emitting the backlog at once).
+                        nextSend = now;
+                    }
+
+                    if (now >= nextSend)
+                    {
+                        nextSend += 1.0 / c.SendHz + Jitter(rng, c.SendJitterSeconds);
+                        Autopilot(c, now, out float mx, out float my);
+                        inputTick++;
+                        uplink.Add(new InFlightInput
+                        {
+                            Arrival = now + c.UplinkSeconds + Jitter(rng, c.NetworkJitterSeconds),
+                            Tick = inputTick,
+                            MoveX = mx,
+                            MoveY = my,
+                        });
+                        steering.NoteInputSent(inputTick, now);
+                        predictor.RecordInput(inputTick, mx, my);
+                    }
                 }
 
                 predictor.Advance((float)(c.MaxFrameDeltaSeconds > 0.0 && frame > c.MaxFrameDeltaSeconds
