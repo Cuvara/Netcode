@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-22
+
 ### Fixed
 
 - **A predictor registered before the join can now take the server's tick rate, so the local
