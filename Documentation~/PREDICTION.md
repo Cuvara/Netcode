@@ -270,9 +270,16 @@ arrival gap against its tick gap at the advertised rate (band 0.5x to 2x):
 
 `ClientHitchRecoveryTests` covers both shapes: the whole backlog handed over in the stall-end
 frame, and the backlog paced at 10 ms with the frame delta capped at 0.333 s, as Unity caps
-`Time.deltaTime`. In the paced shape the stall still costs one correction. The input recorded
-in the stall-end frame is stamped on the old tick line, because the jump only happens when the
-first snapshot after the stall is read.
+`Time.deltaTime`.
+
+**The stall-end input (0.48.0).** The client records a frame's input before the frame's
+snapshot is steered on (`DotsWorldBridge.Update` runs before `LocalPredictionSystem`). In the
+frame that ends a stall, that input is stamped on the old tick line. A forward jump therefore
+moves every input recorded since the last `Advance`, together with the hold and tick-start
+markers it set, onto the new line (`RestampedInputs`). Without that, the first reconcile
+replayed the input from a whole stall back, and the next one took the overshoot back: two
+corrections per stall (S13 run uwrf). `PredictionHarness.InputBeforeSnapshot` runs the harness
+in the client's order.
 
 ## TickRateEstimator
 

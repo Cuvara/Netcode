@@ -237,6 +237,13 @@ namespace Cuvara.Netcode.Prediction
         public const float OffsetDecayPerSecond = 1e-8f;
 
         private readonly PendingInput[] _pending = new PendingInput[Capacity];
+
+        // Per pending slot: the Advance count when the input was recorded. An input whose count
+        // equals _advanceCount was recorded after the last Advance, in the frame still running.
+        private readonly long[] _pendingAdvance = new long[Capacity];
+
+        // Calls to Advance that ran. See RestampInputsOfThisFrame.
+        private long _advanceCount;
         private PredictionSettings _settings; // the tick rate can be replaced by UseServerTickRate
         private float _speed;
         private float _dt;
@@ -975,9 +982,67 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         private void JumpClock(long delta)
         {
+            if (delta > 0)
+            {
+                RestampInputsOfThisFrame(delta);
+            }
+
             _baseTick += delta;
             _tickAccumulator = 0f;
             RecordHistory(_baseTick, _predicted);
+        }
+
+        /// <summary>
+        /// Inputs whose stamp was moved onto the jumped tick line because they were recorded in the
+        /// frame that ended the stall, before the jump. Lifetime total.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why.</b> The client records a frame's input before the frame's snapshot is steered
+        /// on (<c>DotsWorldBridge.Update</c> runs before <c>LocalPredictionSystem</c>). In the frame
+        /// that ends a stall, that input is therefore stamped on the old tick line, a whole stall
+        /// behind the tick it is really sent on. The first reconcile after the jump replayed it
+        /// from that old tick, on top of a server position that does not contain it yet. Live,
+        /// that moved the player 14 steps too far, and the next snapshot took 12 of them back: two
+        /// corrections for one stall (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf).
+        /// </para>
+        /// <para>
+        /// <b>What moves.</b> An input recorded since the last <see cref="Advance"/> was sampled
+        /// after the stall. It moves with the jump, together with the hold and tick-start markers
+        /// it set, so it sits at the current tick of the new line, where it was sent. Inputs
+        /// recorded before the stall keep their ticks, as <see cref="JumpClock"/> requires.
+        /// </para>
+        /// </remarks>
+        public int RestampedInputs { get; private set; }
+
+        private void RestampInputsOfThisFrame(long delta)
+        {
+            long from = _baseTick;
+            bool moved = false;
+            for (int i = 0; i < _count; i++)
+            {
+                int slot = (_head + i) % Capacity;
+                PendingInput input = _pending[slot];
+                if (_pendingAdvance[slot] != _advanceCount || input.BaseTick != from)
+                {
+                    continue;
+                }
+
+                _pending[slot] = new PendingInput(
+                    input.Tick, input.MoveX, input.MoveY, input.BaseTick + delta,
+                    input.LastMoveTickBefore, input.Jump);
+                RestampedInputs++;
+                moved = true;
+            }
+
+            if (!moved)
+            {
+                return;
+            }
+
+            if (_lastMoveTick == from) _lastMoveTick += delta;
+            if (_heldFrom == from) _heldFrom += delta;
+            if (_tickStartTick == from) _tickStartTick += delta;
         }
 
         /// <summary>
@@ -1066,6 +1131,7 @@ namespace Cuvara.Netcode.Prediction
                 // instead of converging: measured at 120 steps over 30 snapshots.
                 replacesHeldStep ? _tickStartLastMove : _lastMoveTick,
                 jump);
+            _pendingAdvance[slot] = _advanceCount;
             _count++;
 
             // Whatever of the previous step was still unshown would otherwise vanish
@@ -1817,6 +1883,7 @@ namespace Cuvara.Netcode.Prediction
             // the rendered position move between inputs at all.
             _sinceInput += deltaTime;
             _elapsed += deltaTime;
+            _advanceCount++;
 
             // Run whole base ticks. The server integrates the held direction once per
             // base tick whether or not a packet arrived (TickLoop calls ApplyHeldMovement

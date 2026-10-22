@@ -41,6 +41,18 @@
   `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
   `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
   before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **The input recorded in the frame that ends a stall moves with the jump.** The client
+  records a frame's input in `DotsWorldBridge.Update`, before `LocalPredictionSystem` steers on
+  and reconciles the frame's snapshot. In the frame that ends a stall, that input was therefore
+  stamped on the old tick line, a whole stall behind. The first reconcile replayed it from there,
+  on top of a server position that did not contain it yet. That moved the player 14 steps too
+  far, and the next snapshot took 12 of them back: two local corrections for one 2 s stall
+  (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf). A forward stall jump now moves the
+  inputs recorded since the last `Advance`, with the hold and tick-start markers they set, onto
+  the new line (`RestampedInputs`). Inputs recorded before the stall keep their ticks.
+  `PredictionHarness.InputBeforeSnapshot` reproduces the client's frame order.
+  `ClientHitchRecoveryTests.AClientStall_WithTheInputSampledBeforeTheSnapshot_*` fails before
+  (15 to 19 steps, then 16 back) and now passes.
 - **The render clock no longer races ahead after a stall.** `InterpolationClock` took the stall
   gap (0.5 s per tick) and every backlog arrival (about 2.5 ms per tick) as rate samples. After a
   2 s stall it measured about 3 ms per tick and ran 91 ticks past the newest snapshot. The 10 %
