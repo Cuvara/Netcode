@@ -95,6 +95,65 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(r.FinalTickError, Is.InRange(-2L, 2L), r.ToString());
         }
 
+        /// <summary>
+        /// The same stalls in the shape the live client sees them: the backlog is delivered oldest
+        /// first, one snapshot every 10 ms, not handed over whole in the stall-end frame, and the
+        /// frame time reaching the predictor is capped as Unity caps <c>Time.deltaTime</c>.
+        /// </summary>
+        /// <remarks>
+        /// The test above passed while the live client corrected the player 6 to 15 times for one
+        /// 2 s stall, every correction a multiple of 16 ticks (rpg-factory testlab S13, runs
+        /// 20261022T194438Z-S13-vdqw and 20261022T195013Z-S13-q3rr). The harness applied only the
+        /// newest of the arrived snapshots, so the first steer after the stall saw a current tick;
+        /// live, it saw the oldest snapshot of the backlog, and every later one was four ticks
+        /// newer while the clock had moved by less than one.
+        /// </remarks>
+        [TestCase(PredictionHarness.Motion.Circle, 0.5, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 0.5, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 2.0, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, 1.0 / 500.0)]
+        public void AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_CostsAtMostOneCorrection(
+            PredictionHarness.Motion motion, double stallSeconds, double frameSeconds)
+        {
+            PredictionHarness.Config c = ServerStallRecoveryTests.Scenario(motion);
+            c.FrameSeconds = frameSeconds;
+            c.HitchAtSeconds = EventAt;
+            c.HitchSeconds = stallSeconds;
+            c.BacklogSpacingSeconds = 0.010;
+            c.MaxFrameDeltaSeconds = 1.0 / 3.0;
+            PredictionHarness.Result r = PredictionHarness.Run(c);
+            TestContext.WriteLine($"{stallSeconds} s client stall, paced backlog, {frameSeconds * 1000.0:F1} ms frames: {r}");
+            Assume.That(r.Reconciles, Is.GreaterThan(250), "precondition: the run reconciled");
+
+            // The backlog is the stall's snapshots (15 a second) at 10 ms each; give it that and
+            // two snapshot intervals before the clock is judged.
+            double drained = EventAt + stallSeconds + stallSeconds * 15.0 * 0.010 + 0.15;
+            int k = 0;
+            foreach (var (at, correction, tickError) in r.CorrectionLog)
+            {
+                if (at < EventAt) continue;
+                if (k++ < 12)
+                {
+                    TestContext.WriteLine($"  after stall: t={at:F3} correction={correction / r.StepLength:F2} steps tickError={tickError}");
+                }
+
+                if (at >= drained && at < drained + 2.0)
+                {
+                    Assert.That(tickError, Is.InRange(-1L, 1L),
+                        $"t={at:F3}: once the backlog is in, the clock is within a tick of the server's line. {r}");
+                }
+            }
+
+            int large = CorrectionsFrom(r, EventAt, 2f);
+            Assert.That(large, Is.LessThanOrEqualTo(1),
+                $"after one {stallSeconds} s stall with a paced backlog the reconcile corrected by two steps or more {large} times. {r}");
+            Assert.That(CorrectionsFrom(r, drained + 1.0, 2f), Is.Zero,
+                "a second after the backlog nothing of the stall is left to correct. " + r);
+            Assert.That(r.StallResyncs, Is.EqualTo(1), "one stall, one clock jump. " + r);
+            Assert.That(r.FinalTickError, Is.InRange(-2L, 2L), r.ToString());
+        }
+
         [TestCase(PredictionHarness.Motion.Circle)]
         [TestCase(PredictionHarness.Motion.StartStop)]
         public void OrdinaryJitter_NeverJumpsTheClock(PredictionHarness.Motion motion)

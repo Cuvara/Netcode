@@ -130,6 +130,27 @@ namespace Cuvara.Netcode.Tests.Editor
             public double HitchSeconds;
 
             /// <summary>
+            /// When positive, the snapshots that arrived during the hitch are not all there when it
+            /// ends: they are delivered oldest first, one every this many seconds, and so is every
+            /// snapshot produced until the delivery has caught up. Zero hands the whole backlog over
+            /// in the hitched frame.
+            /// </summary>
+            /// <remarks>
+            /// The live shape. The client read one datagram per frame, so the backlog of a 2 s stall
+            /// reached the world as 32 snapshots over 315 to 353 ms, about one every 10 ms
+            /// (rpg-factory testlab S13, runs 20261022T194438Z-S13-vdqw and -q3rr,
+            /// <c>delivery.csv</c>). Requires <see cref="InOrderDownlink"/>.
+            /// </remarks>
+            public double BacklogSpacingSeconds;
+
+            /// <summary>
+            /// When positive, the frame time handed to the predictor is capped at this, as Unity
+            /// caps <c>Time.deltaTime</c> at <c>maximumDeltaTime</c> (0.333 s by default) for the
+            /// DOTS prediction system. Zero passes the real frame time.
+            /// </summary>
+            public double MaxFrameDeltaSeconds;
+
+            /// <summary>
             /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
             /// of up to this much either way (an uneven frame rate).
             /// </summary>
@@ -371,6 +392,7 @@ namespace Cuvara.Netcode.Tests.Editor
             Vec2 previous = default;
 
             bool hitched = false;
+            bool pacing = false;
 
             while (now < c.DurationSeconds)
             {
@@ -422,6 +444,18 @@ namespace Cuvara.Netcode.Tests.Editor
                         if (c.InOrderDownlink)
                         {
                             if (arrival < lastDownlinkArrival) arrival = lastDownlinkArrival;
+                            if (pacing)
+                            {
+                                if (arrival < lastDownlinkArrival + c.BacklogSpacingSeconds)
+                                {
+                                    arrival = lastDownlinkArrival + c.BacklogSpacingSeconds;
+                                }
+                                else
+                                {
+                                    pacing = false;
+                                }
+                            }
+
                             lastDownlinkArrival = arrival;
                         }
 
@@ -436,6 +470,37 @@ namespace Cuvara.Netcode.Tests.Editor
                     }
 
                     nextServerTick += serverPeriod;
+                }
+
+                // ── The backlog of a hitch, delivered at the transport's pace ──
+                if (hitchFrame && c.BacklogSpacingSeconds > 0.0)
+                {
+                    var backlog = downlink.FindAll(x => x.Arrival <= now);
+                    backlog.Sort((a, b) => a.Tick.CompareTo(b.Tick));
+                    double at = now;
+                    foreach (var held in backlog)
+                    {
+                        at += c.BacklogSpacingSeconds;
+                        int index = downlink.FindIndex(x => x.Tick == held.Tick);
+                        InFlightSnapshot restamped = downlink[index];
+                        restamped.Arrival = at;
+                        downlink[index] = restamped;
+                    }
+
+                    // Everything produced later queues behind the backlog, and is paced too until
+                    // the delivery has caught up with the server.
+                    for (int i = 0; i < downlink.Count; i++)
+                    {
+                        if (downlink[i].Arrival > at) continue;
+                        if (backlog.Exists(x => x.Tick == downlink[i].Tick)) continue;
+                        at += c.BacklogSpacingSeconds;
+                        InFlightSnapshot later = downlink[i];
+                        later.Arrival = at;
+                        downlink[i] = later;
+                    }
+
+                    lastDownlinkArrival = at;
+                    pacing = backlog.Count > 0;
                 }
 
                 // ── Client: snapshots that have arrived, newest only (a binder merges them) ──
@@ -502,7 +567,9 @@ namespace Cuvara.Netcode.Tests.Editor
                     predictor.RecordInput(inputTick, mx, my);
                 }
 
-                predictor.Advance((float)frame);
+                predictor.Advance((float)(c.MaxFrameDeltaSeconds > 0.0 && frame > c.MaxFrameDeltaSeconds
+                    ? c.MaxFrameDeltaSeconds
+                    : frame));
 
                 // ── What the player sees ──
                 Vec2 shown = predictor.Position;

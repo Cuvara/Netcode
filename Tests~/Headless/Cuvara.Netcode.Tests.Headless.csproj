@@ -155,6 +155,7 @@
     <Compile Include="../../Tests/Editor/InterpolationScenarioTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationConfigNormalizationTests.cs" />
     <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientStallInterpolationTests.cs" />
   </ItemGroup>
 
   <!--
