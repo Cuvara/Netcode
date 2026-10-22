@@ -18,6 +18,8 @@
 
 - `InterpolationConfig.ExtrapolationHold` (default 150 ms) and `ExtrapolationSettle` (default
   100 ms): after the cap, the entity is held, then eased (smoothstep) back onto its newest sample.
+  The ease is a bounded backward motion (at most the 50 ms cap distance, only after 200 ms of
+  silence), chosen over drawing a stopped entity past its stop forever.
   `ExtrapolationHold = double.PositiveInfinity` restores the old hold-at-the-cap behaviour.
 - `InterpolationConfig.MaxExtrapolationSpan` (default 250 ms): a last segment longer than this is
   not a velocity (the entity stood still in between) and is not carried.

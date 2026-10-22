@@ -169,6 +169,16 @@ namespace Cuvara.Netcode.Interpolation
         /// newest sample permanently. Holding at the cap forever drew it permanently past where
         /// it stopped (StoppedEntityConvergesTests).
         /// </para>
+        /// <para>
+        /// <b>The settle moves the rendered entity backward</b>, along the segment it was carried
+        /// on, onto the newest sample. That is a deliberate trade and not the backward step the
+        /// note above rules out: it happens only after the stream has been quiet for the cap plus
+        /// <see cref="InterpolationConfig.ExtrapolationHold"/> (200 ms by default), its distance
+        /// is bounded by the cap (speed x 50 ms, 0.125 units for an enemy), and it is eased over
+        /// <see cref="InterpolationConfig.ExtrapolationSettle"/> rather than stepped. The
+        /// alternative is the entity drawn permanently past where the server says it stopped.
+        /// An entity that resumes moving before the hold expires never settles.
+        /// </para>
         /// </remarks>
         private static void ExtrapolatePastNewest<TBuffer>(in TBuffer buffer, int count, double renderTick,
                                                            double secondsPerTick, in InterpolationConfig config,
