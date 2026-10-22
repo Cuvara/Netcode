@@ -340,13 +340,53 @@ namespace Cuvara.Netcode.Prediction
         /// corrected again — a correction that never converges, applied at the snapshot
         /// rate, which is exactly the artefact the history exists to remove.
         /// </remarks>
-        private void ShiftHistory(float dx, float dy, float dz)
+        private void ShiftHistory(float dx, float dy, float dz) => ShiftHistory(dx, dy, dz, long.MaxValue);
+
+        /// <summary>
+        /// As <see cref="ShiftHistory(float,float,float)"/>, for entries of ticks before
+        /// <paramref name="beforeTick"/> only: the replay path records the ticks it replayed
+        /// exactly and shifts the older ones.
+        /// </summary>
+        private void ShiftHistory(float dx, float dy, float dz, long beforeTick)
         {
             for (int i = 0; i < HistoryTicks; i++)
             {
-                if (_historyTick[i] == 0) continue;
+                if (_historyTick[i] == 0 || _historyTick[i] >= beforeTick) continue;
                 _history[i] = new Vec3(_history[i].X + dx, _history[i].Y + dy, _history[i].Z + dz);
             }
+        }
+
+        // Replayed positions, staged during a replay and written after the older entries are
+        // shifted (written in place first, they would be shifted too). Fixed size, no allocation.
+        private readonly Vec3[] _replayStage = new Vec3[HistoryTicks];
+        private readonly long[] _replayStageTick = new long[HistoryTicks];
+        private int _replayStageCount;
+
+        private void StageReplayedHistory(long tick, in Body body)
+        {
+            if (_replayStageCount == HistoryTicks)
+            {
+                // A replay longer than the ring: its oldest ticks would be overwritten anyway.
+                System.Array.Copy(_replayStage, 1, _replayStage, 0, HistoryTicks - 1);
+                System.Array.Copy(_replayStageTick, 1, _replayStageTick, 0, HistoryTicks - 1);
+                _replayStageCount--;
+            }
+
+            _replayStage[_replayStageCount] = body.Position;
+            _replayStageTick[_replayStageCount] = tick;
+            _replayStageCount++;
+        }
+
+        private void CommitReplayedHistory()
+        {
+            for (int k = 0; k < _replayStageCount; k++)
+            {
+                int i = (int)((_replayStageTick[k] % HistoryTicks + HistoryTicks) % HistoryTicks);
+                _history[i] = _replayStage[k];
+                _historyTick[i] = _replayStageTick[k];
+            }
+
+            _replayStageCount = 0;
         }
 
         /// <summary>Reconciles answered by comparing at the snapshot's own tick.</summary>
@@ -1439,6 +1479,11 @@ namespace Cuvara.Netcode.Prediction
             // a 15 Hz send rate against a 60 Hz base tick.
             Body replayed = authoritative;
 
+            // First tick the replay below re-simulates. Replayed ticks' history entries are
+            // staged and written with the replayed positions at the end of this method.
+            long replayFrom = _baseTick + 1;
+            _replayStageCount = 0;
+
             if (_count > 0)
             {
                 long heldFrom = 0;
@@ -1478,6 +1523,7 @@ namespace Cuvara.Netcode.Prediction
                     replayLastMove = serverBaseTick;
                 }
 
+                replayFrom = start;
                 for (long t = start; t <= _baseTick; t++)
                 {
                     // WHICH OF THE TWO GOT TO THIS TICK FIRST, live. Normally inputs step
@@ -1559,6 +1605,8 @@ namespace Cuvara.Netcode.Prediction
                     {
                         ReplayedSteps++;
                     }
+
+                    StageReplayedHistory(t, replayed);
                 }
             }
             else if (serverBaseTick != NoServerTick && serverBaseTick < _baseTick)
@@ -1582,12 +1630,15 @@ namespace Cuvara.Netcode.Prediction
                 // the hold window expires at the same place.
                 long replayLastMove = serverBaseTick;
 
+                replayFrom = serverBaseTick + 1;
                 for (long t = serverBaseTick + 1; t <= _baseTick; t++)
                 {
                     if (ApplyHeld(ref replayed, t, _heldFrom, _heldX, _heldY, ref replayLastMove))
                     {
                         ReplayedSteps++;
                     }
+
+                    StageReplayedHistory(t, replayed);
                 }
             }
 
@@ -1606,19 +1657,23 @@ namespace Cuvara.Netcode.Prediction
                     replayed.Z - _predicted.Z);
             }
 
-            // Carry the correction into the history, as the history path does (ShiftHistory).
-            // Recording only the current tick left every older entry on the uncorrected
-            // timeline, and the next snapshot acknowledging one of those ticks measured the same
-            // error again and applied it a second time: a respawn delivered after a 5 s client
-            // stall drew the local player 2.24 units past the server and back (rpg-factory
-            // testlab run 20261022T091437Z-S07-c5hc; ReplayRewindHistoryTests).
+            // Carry the correction into the history. Recording only the current tick left every
+            // older entry on the uncorrected timeline, and the next snapshot acknowledging one of
+            // those ticks measured the same error again and applied it a second time: a respawn
+            // delivered after a 5 s client stall drew the local player 2.24 units past the server
+            // and back (rpg-factory testlab run 20261022T091437Z-S07-c5hc;
+            // ReplayRewindHistoryTests). The replayed ticks get their replayed positions exactly;
+            // older entries, which a later snapshot normally does not acknowledge, are shifted by
+            // the correction as the history path shifts all of them.
             float hx = replayed.X - _predicted.X;
             float hy = replayed.Y - _predicted.Y;
             float hz = replayed.Z - _predicted.Z;
             if (hx != 0f || hy != 0f || hz != 0f)
             {
-                ShiftHistory(hx, hy, hz);
+                ShiftHistory(hx, hy, hz, replayFrom);
             }
+
+            CommitReplayedHistory();
 
             _predicted = replayed;
 
