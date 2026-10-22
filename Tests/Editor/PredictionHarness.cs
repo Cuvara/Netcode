@@ -119,6 +119,28 @@ namespace Cuvara.Netcode.Tests.Editor
             /// <summary>How long the first held snapshot is late.</summary>
             public double BurstDelaySeconds;
 
+            /// <summary>
+            /// When <see cref="HitchSeconds"/> is positive, the first client frame at or after this
+            /// time lasts <see cref="HitchSeconds"/> instead of <see cref="FrameSeconds"/>: a client
+            /// stall (a GC pause, a scene load, a window drag). The server keeps ticking through it.
+            /// </summary>
+            public double HitchAtSeconds;
+
+            /// <summary>Length of the one hitched frame. 0 = no hitch.</summary>
+            public double HitchSeconds;
+
+            /// <summary>
+            /// When <see cref="ServerStallSeconds"/> is positive, every server tick due in
+            /// [<see cref="ServerStallAtSeconds"/>, +<see cref="ServerStallSeconds"/>) runs at the
+            /// end of that window instead, back to back: a server stall (a GC pause, a blocked tick
+            /// thread) followed by its catch-up. Inputs queue meanwhile and the snapshots of the
+            /// stalled ticks leave together.
+            /// </summary>
+            public double ServerStallAtSeconds;
+
+            /// <summary>Length of the server stall. 0 = no stall.</summary>
+            public double ServerStallSeconds;
+
             public static Config Default => new Config
             {
                 ServerHz = 60.0,
@@ -168,6 +190,18 @@ namespace Cuvara.Netcode.Tests.Editor
 
             /// <summary>Counted corrections of at least four base steps -- one snapshot interval.</summary>
             public int CorrectionsAtLeastFourSteps;
+
+            /// <summary>Every counted reconcile in order: when it ran and how far it corrected.</summary>
+            public readonly List<(double At, float Correction)> CorrectionLog = new List<(double, float)>();
+
+            /// <summary>The predictor's clock-rate scale at the end of the run (1 = the server's rate).</summary>
+            public float FinalClockRateScale;
+
+            /// <summary>The staleness estimator's fitted skew at the end of the run, in ppm.</summary>
+            public double FinalSkewPpm;
+
+            /// <summary>Lead the steering was aiming for at the end of the run, in base ticks.</summary>
+            public long FinalTargetLeadTicks;
 
             public override string ToString() =>
                 $"reconciles={Reconciles} nonzero={NonzeroCorrections} mean={MeanCorrection:F5} " +
@@ -323,17 +357,29 @@ namespace Cuvara.Netcode.Tests.Editor
             bool havePrevious = false;
             Vec2 previous = default;
 
+            bool hitched = false;
+
             while (now < c.DurationSeconds)
             {
-                now += c.FrameSeconds;
+                double frame = c.FrameSeconds;
+                bool hitchFrame = false;
+                if (c.HitchSeconds > 0.0 && !hitched && now >= c.HitchAtSeconds)
+                {
+                    frame = c.HitchSeconds;
+                    hitched = true;
+                    hitchFrame = true;
+                }
+
+                now += frame;
 
                 // ── Server, on its own clock ──
-                while (nextServerTick <= now)
+                while (ServerRunsAt(c, nextServerTick) <= now)
                 {
+                    double runAt = ServerRunsAt(c, nextServerTick);
                     drained.Clear();
                     for (int i = uplink.Count - 1; i >= 0; i--)
                     {
-                        if (uplink[i].Arrival <= nextServerTick)
+                        if (uplink[i].Arrival <= runAt)
                         {
                             drained.Add(uplink[i]);
                             uplink.RemoveAt(i);
@@ -346,7 +392,7 @@ namespace Cuvara.Netcode.Tests.Editor
 
                     if (server.Tick % c.SnapshotEvery == 0)
                     {
-                        double arrival = nextServerTick + c.DownlinkSeconds + Jitter(rng, c.NetworkJitterSeconds);
+                        double arrival = runAt + c.DownlinkSeconds + Jitter(rng, c.NetworkJitterSeconds);
                         if (c.BurstAtSeconds > 0.0 && nextServerTick >= c.BurstAtSeconds && burstHeld < c.BurstSnapshots)
                         {
                             if (burstHeld == 0)
@@ -405,6 +451,7 @@ namespace Cuvara.Netcode.Tests.Editor
                             if (correction > result.MaxCorrection) result.MaxCorrection = correction;
                             if (correction >= result.StepLength) result.CorrectionsAtLeastOneStep++;
                             if (correction >= result.StepLength * 3.999f) result.CorrectionsAtLeastFourSteps++;
+                            result.CorrectionLog.Add((now, correction));
                             if (predictor.AckOffsetSamples > 0)
                             {
                                 long offset = predictor.AckTickOffset;
@@ -417,6 +464,13 @@ namespace Cuvara.Netcode.Tests.Editor
 
                 // ── Client: send an input on its own cadence ──
                 bool moving = false;
+                if (hitchFrame && nextSend < now)
+                {
+                    // A stalled client sends nothing during the stall and then resumes its cadence
+                    // (InputCadence resynchronises rather than emitting the backlog at once).
+                    nextSend = now;
+                }
+
                 if (now >= nextSend)
                 {
                     nextSend += 1.0 / c.SendHz + Jitter(rng, c.SendJitterSeconds);
@@ -433,13 +487,14 @@ namespace Cuvara.Netcode.Tests.Editor
                     predictor.RecordInput(inputTick, mx, my);
                 }
 
-                predictor.Advance((float)c.FrameSeconds);
+                predictor.Advance((float)frame);
 
                 // ── What the player sees ──
                 Vec2 shown = predictor.Position;
                 Autopilot(c, now, out float ax, out float ay);
                 moving = ax != 0f || ay != 0f;
-                if (havePrevious && now >= c.WarmupSeconds && moving)
+                // The hitched frame is excluded: time really passed, so the player really moved.
+                if (havePrevious && now >= c.WarmupSeconds && moving && !hitchFrame)
                 {
                     float dx = shown.X - previous.X, dy = shown.Y - previous.Y;
                     double motion = Math.Sqrt(dx * dx + dy * dy);
@@ -462,6 +517,9 @@ namespace Cuvara.Netcode.Tests.Editor
             result.HardResyncs = predictor.HardResyncs;
             result.Snaps = predictor.Snaps;
             result.HistoryMisses = predictor.HistoryMisses;
+            result.FinalClockRateScale = predictor.ClockRateScale;
+            result.FinalSkewPpm = steering.Staleness.SkewPpm;
+            result.FinalTargetLeadTicks = predictor.TickError + server.Tick - predictor.BaseTick;
             if (result.MinAckTickOffset == long.MaxValue) result.MinAckTickOffset = 0;
             if (result.MaxAckTickOffset == long.MinValue) result.MaxAckTickOffset = 0;
             return result;
@@ -528,6 +586,18 @@ namespace Cuvara.Netcode.Tests.Editor
             bool go = ((long)Math.Floor(now / c.StartStopPeriodSeconds) & 1L) == 0L;
             moveX = go ? 1f : 0f;
             moveY = 0f;
+        }
+
+        /// <summary>When the server tick due at <paramref name="due"/> actually runs.</summary>
+        private static double ServerRunsAt(Config c, double due)
+        {
+            if (c.ServerStallSeconds > 0.0 && due >= c.ServerStallAtSeconds
+                && due < c.ServerStallAtSeconds + c.ServerStallSeconds)
+            {
+                return c.ServerStallAtSeconds + c.ServerStallSeconds;
+            }
+
+            return due;
         }
 
         private static double Jitter(Random rng, double amplitude) =>
