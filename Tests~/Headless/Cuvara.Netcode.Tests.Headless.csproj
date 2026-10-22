@@ -149,6 +149,7 @@
     <Compile Include="../../Tests/Editor/RemoteInterpolationContinuityTests.cs" />
     <Compile Include="../../Tests/Editor/DeferUntilBracketedTests.cs" />
     <Compile Include="../../Tests/Editor/SnapshotFreshnessTests.cs" />
+    <Compile Include="../../Tests/Editor/SessionBoundaryResetTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
