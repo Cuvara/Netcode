@@ -65,6 +65,7 @@
     <Compile Include="../../Tests/Editor/KcpCryptoTests.cs" />
     <Compile Include="../../Tests/Editor/NetworkEndpointTests.cs" />
     <Compile Include="../../Tests/Editor/KcpGameplayTransportTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpReliabilityTests.cs" />
   </ItemGroup>
 
   <!--
