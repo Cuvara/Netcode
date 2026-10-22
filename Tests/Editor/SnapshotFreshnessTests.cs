@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using NUnit.Framework;
+using Cuvara.Netcode.Protocol.Messages;
 using Cuvara.Netcode.Snapshot;
 using Cuvara.Netcode.View;
 using Cuvara.Netcode.World;
@@ -49,6 +50,100 @@ namespace Cuvara.Netcode.Tests.Editor
 
             Assert.That(world.Tick, Is.EqualTo(104L));
             Assert.That(world.Entities[RemoteId].X, Is.EqualTo(2f));
+            Assert.That(world.Deltas, Is.EqualTo(1), "the repeat must not be merged");
+            Assert.That(world.StaleSnapshotsDropped, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ASecondSnapshotAtTheMergedTick_DoesNotOverwriteItsEntityState()
+        {
+            // The server stages at most one snapshot per connection per world tick, so a second
+            // one at the tick already merged is a replay, and a replay carries an older view.
+            var world = new WorldState();
+            world.Apply(Keyframe(100, At(1f)));
+            world.Apply(Delta(104, At(3f))); // the entity stops here; later deltas omit it
+
+            world.Apply(Delta(104, At(2f)));
+
+            world.Apply(Delta(108));
+            Assert.That(world.Tick, Is.EqualTo(108L));
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(3f),
+                "tick 104 was already merged; a second snapshot at tick 104 must not replace it");
+            Assert.That(world.StaleSnapshotsDropped, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ARepeatedKeyframeAtTheMergedTick_IsDroppedAndCounted()
+        {
+            var world = new WorldState();
+            world.Apply(Keyframe(100, At(1f)));
+
+            world.Apply(Keyframe(100, At(5f)));
+
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(1f));
+            Assert.That(world.Keyframes, Is.EqualTo(1));
+            Assert.That(world.StaleSnapshotsDropped, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void TheFirstSnapshot_IsAppliedEvenAtTickZero()
+        {
+            // "Already merged" is tracked, not inferred from Tick > 0: a fresh world, and a
+            // reset one, start at tick zero and must still take a first snapshot there.
+            var world = new WorldState();
+            world.Apply(Keyframe(0, At(1f)));
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(1f));
+
+            world.Reset();
+            world.Apply(Keyframe(0, At(4f)));
+
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(4f));
+            Assert.That(world.StaleSnapshotsDropped, Is.Zero);
+        }
+
+        private static SnapshotMessage WireSnapshot(long tick, bool full, params EntitySnapshot[] entities)
+        {
+            var m = new SnapshotMessage { Tick = tick, AckTick = 0, Full = full };
+            foreach (var e in entities) m.Entities.Add(e);
+            return m;
+        }
+
+        private static EntitySnapshot Introduce(uint handle, float x) =>
+            new EntitySnapshot { Id = RemoteId, Handle = handle, Type = "player", X = x, Hp = 100, MaxHp = 100 };
+
+        private static EntitySnapshot Interned(uint handle, float x) =>
+            new EntitySnapshot { Id = string.Empty, Handle = handle, Type = "player", X = x, Hp = 100, MaxHp = 100 };
+
+        // GameSessionClient's order: resolve, and merge only what resolved.
+        private static bool Receive(SnapshotResolver resolver, WorldState world, SnapshotMessage message)
+        {
+            if (!resolver.TryResolve(message, out var resolved)) return false;
+            world.Apply(resolved);
+            return true;
+        }
+
+        [TestCase(108L)]
+        [TestCase(112L)]
+        public void TheResyncKeyframe_AfterAnAbortedSnapshot_IsApplied(long keyframeTick)
+        {
+            // An unknown handle aborts the whole snapshot before it reaches the world, so the
+            // world's tick stays at the last merged one and the keyframe answering the resync is
+            // newer than it. The server sends that keyframe at a later tick; the aborted tick is
+            // covered too, so the guard cannot reject the repair on either.
+            var resolver = new SnapshotResolver();
+            var world = new WorldState();
+            Assert.That(Receive(resolver, world, WireSnapshot(100, true, Introduce(1, 1f))), Is.True);
+            Assert.That(Receive(resolver, world, WireSnapshot(104, false, Interned(1, 2f))), Is.True);
+
+            Assert.That(Receive(resolver, world, WireSnapshot(108, false, Interned(7, 9f))), Is.False,
+                "handle 7 was never introduced, so this snapshot must abort");
+            Assert.That(world.Tick, Is.EqualTo(104L));
+
+            Assert.That(Receive(resolver, world, WireSnapshot(keyframeTick, true, Introduce(1, 3f))), Is.True);
+
+            Assert.That(world.Tick, Is.EqualTo(keyframeTick));
+            Assert.That(world.Entities[RemoteId].X, Is.EqualTo(3f));
+            Assert.That(world.StaleSnapshotsDropped, Is.Zero);
         }
 
         [Test]

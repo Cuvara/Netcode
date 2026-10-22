@@ -41,6 +41,9 @@ namespace Cuvara.Netcode.World
         private EntitySnapshotData[] _entityBuffer;
         private string[] _removedBuffer;
 
+        // Whether any snapshot has been merged since construction or the last Reset. See Apply.
+        private bool _hasMerged;
+
         /// <summary>Server tick of the newest snapshot merged. Never moves backwards.</summary>
         public long Tick => (long)_merger.Tick;
 
@@ -175,19 +178,30 @@ namespace Cuvara.Netcode.World
         /// </remarks>
         public void Apply(in ResolvedSnapshot snapshot)
         {
-            // OLDER THAN WHAT IS ALREADY MERGED: dropped whole. The shared merger keeps Tick and
-            // AckTick monotonic but merges the entities of any snapshot it is given, so a late
+            // NOT NEWER THAN WHAT IS ALREADY MERGED: dropped whole. The shared merger keeps Tick
+            // and AckTick monotonic but merges the entities of any snapshot it is given, so a late
             // one would put its stale states back over newer ones -- and an entity that has
             // stopped since is then omitted by every delta until the next keyframe, drawn at the
             // stale position for up to two seconds (SnapshotFreshnessTests). The wire is ordered
             // (KCP), so this is not expected to fire; it is counted so that it is visible if it
             // does.
             //
+            // EQUAL counts as not newer, once a snapshot has been merged. The server stages at
+            // most one snapshot per connection per world tick and encodes each staging once:
+            // keyframe-or-delta is decided inside that one encode, a resync only promotes the
+            // NEXT staging (a later tick) to a keyframe, and coalescing replaces an unsent
+            // staging with the newer tick's. So a second snapshot carrying the tick already
+            // merged is a repeat, never new state, and merging it could only put older entity
+            // states back. A snapshot the resolver aborted (unknown handle) never reached this
+            // method, so the keyframe answering its resync is still newer than Tick and applies.
+            // The flag, not Tick > 0, decides "has merged": a fresh or reset world accepts a
+            // first snapshot at tick 0.
+            //
             // A new session starts from Reset(), which returns Tick to zero, so a server whose
             // ticks restart lower is accepted from its first snapshot. NetworkClient resets this
             // world at the start of every connect and reconnect. A caller that feeds a new
             // session into an un-reset world will see it dropped here and counted.
-            if (snapshot.Tick < Tick)
+            if (snapshot.Tick < Tick || (snapshot.Tick == Tick && _hasMerged))
             {
                 StaleSnapshotsDropped++;
                 return;
@@ -292,6 +306,7 @@ namespace Cuvara.Netcode.World
 
             long ackBefore = AckTick;
 
+            _hasMerged = true;
             _merger.Apply(new SnapshotData(
                 (ulong)snapshot.Tick,
                 (ulong)snapshot.AckTick,
@@ -311,8 +326,8 @@ namespace Cuvara.Netcode.World
         }
 
         /// <summary>
-        /// Snapshots dropped because their tick was below <see cref="Tick"/>. Zero on an ordered
-        /// transport. Nonzero means either a reordering transport, or a new session fed into this
+        /// Snapshots dropped because their tick was not above <see cref="Tick"/>: older, or a
+        /// repeat of the tick already merged. Zero on an ordered transport. Nonzero means either a reordering transport, or a new session fed into this
         /// world without <see cref="Reset"/> (every one of its snapshots is then dropped until its
         /// ticks pass the old session's).
         /// </summary>
@@ -322,6 +337,7 @@ namespace Cuvara.Netcode.World
         public void Reset()
         {
             _merger.Reset();
+            _hasMerged = false;
             AckAppliedTick = 0L;
         }
     }
