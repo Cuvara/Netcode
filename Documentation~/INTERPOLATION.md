@@ -44,11 +44,28 @@ Samples are keyed by server tick. A duplicate or reordered tick is rejected by
 Every tuning parameter in one blittable struct (not a ScriptableObject — Burst jobs
 cannot read managed assets):
 
-| Field | Default | Purpose |
+| Field | Default (`InterpolationConfig.Default`) | Purpose |
 |-------|---------|---------|
-| `TargetDelay` | 0.100s | Render delay behind newest tick (jitter buffer) |
-| `MaxSamples` | 8 | Ring buffer capacity per entity |
-| `ExtrapolationLimit` | 0.0s | Max time to extrapolate past the newest sample (0 = none) |
+| `TargetDelay` | 0.100 s | Render delay behind the newest tick (jitter buffer) |
+| `MaxExtrapolation` | 0.050 s | Longest extrapolation past the newest sample. 0 = never extrapolate |
+| `ExtrapolationHold` | 0.150 s | How long an extrapolated entity is held at the cap before it eases back. `+Infinity` = hold forever (pre-0.48.0) |
+| `ExtrapolationSettle` | 0.100 s | How long the ease back onto the newest sample takes. 0 = snap back |
+| `MaxExtrapolationSpeed` | 0 (off) | A last segment faster than this (units/s) is a teleport and is not carried |
+| `MaxExtrapolationSpan` | 0.250 s | A last segment longer than this is not a velocity and is not carried. 0 = no check |
+| `ClockCatchUpRate` | 1.0 | How fast the render clock closes on its target |
+| `MaxClockRateAdjust` | 0.10 | Largest dilation of the render clock (+/-10 %). It never jumps |
+| `MinInterval` / `MaxInterval` | 0.001 s / 0.500 s | Bounds on the measured seconds per tick |
+| `DefaultInterval` | 1/15 s | Snapshot interval assumed before one is measured |
+| `IntervalSmoothing` | 0.3 | Smoothing of the measured interval |
+| `RingCapacity` | 8 | Samples kept per entity |
+| `DeferUntilBracketed` | false | Hold back a new remote entity until it can be interpolated |
+
+`Normalized()` replaces a non-positive field with its default. The exceptions are the fields
+for which zero means something (`MaxExtrapolation`, `ExtrapolationHold`,
+`ExtrapolationSettle`, `MaxExtrapolationSpan`). A configured zero there is kept, and only a
+negative value or NaN takes the default. The all-zero `default(InterpolationConfig)` stands
+for "netcode's defaults": since 0.48.x it gets `Default`'s hold, settle and span. Its
+`MaxExtrapolation` stays 0 (no extrapolation), as before.
 
 ### TargetDelay
 
@@ -61,16 +78,29 @@ and are excluded from interpolation — their response to input is zero-latency.
 
 ## InterpolationClock
 
-Advances the render timeline once per frame:
+One per connection. `WorldViewBinder` drives it, and `InterpolationClockSystem` drives it in
+UnityDots:
 
 ```csharp
-clock.Advance(deltaTime, newestReceivedTick, secondsPerTick);
-float renderTick = clock.RenderTick;  // fractional tick to interpolate at
+// Each new snapshot:
+clock.NoteSnapshot(world.Tick, nowSeconds, tickRate.SnapshotTickGap, config);
+// Each rendered frame:
+clock.Advance(deltaSeconds, config);
+double renderTick = clock.RenderTick;  // fractional tick to interpolate at
+// A new session:
+clock.Reset();
 ```
 
-The clock steers toward `newestTick - TargetDelay/secondsPerTick`. When the client's
-clock drifts relative to the server (measured by `SnapshotStalenessEstimator`), the
-clock adjusts its advance rate to converge rather than jumping.
+The clock steers toward `newestTick - TargetDelay / secondsPerTick`. `secondsPerTick` is
+measured from the snapshot ticks and their arrival times. The clock never jumps. It dilates
+its rate within `MaxClockRateAdjust`, so `RenderTick` strictly increases.
+`SnapshotStalenessEstimator` steers the prediction clock, not this one.
+
+**Session boundaries.** `RenderTick` lives in one server's tick space. Call
+`WorldViewBinder.Reset()` with `WorldState.Reset()` on every reconnect. Since 0.48.x, a binder
+that sees the world tick go backwards restarts its render clock, its sample rings and its
+estimators by itself, and counts it in `TickLineRestarts`. A server with a lower tick line is
+then interpolated at once. Reset is still the correct call.
 
 ## Edge cases
 
@@ -81,14 +111,17 @@ clock adjusts its advance rate to converge rather than jumping.
 | Dropped snapshot | Interpolates across the gap at unchanged speed |
 | Early arrival | Sample waits in the buffer instead of displacing current segment |
 | Late arrival | Covered by the TargetDelay margin |
-| Reordered tick | Rejected by `InterpolationRing.Accepts` |
+| Reordered tick | Rejected by `InterpolationRing.Accepts`. `WorldState` itself still merges an older snapshot's entities (latent: KCP delivers in order; `SnapshotFreshnessTests`) |
+| Entity stops | The binder pushes no sample for an unchanged position. Past the newest sample the entity is extrapolated up to `MaxExtrapolation`, held for `ExtrapolationHold`, then eased back over `ExtrapolationSettle` |
+| Teleport / respawn | A last segment faster than `MaxExtrapolationSpeed` or longer than `MaxExtrapolationSpan` is not carried past the destination |
+| World tick goes backwards (new session) | The binder restarts its render timeline (`TickLineRestarts`) |
 
 ## Clock sync
 
-`SnapshotStalenessEstimator` fits the client/server clock ratio from snapshot
-arrival patterns alone — no NTP, no explicit clock exchange. It detects when the
-client's clock runs fast or slow relative to the server and reports the ratio so the
-interpolation clock can steer on it.
+`SnapshotStalenessEstimator` fits the client/server clock ratio from snapshot arrivals
+alone. There is no NTP and no explicit clock exchange. The ratio feeds the PREDICTION clock
+(`PredictionClockSteering`, see `PREDICTION.md`). The interpolation clock measures its own
+seconds per tick and needs no ratio.
 
-Clamped at +/-200,000 ppm to reject pathological readings (the development machine
-measured +110,000 ppm, which silently disabled the fit until 0.23.0).
+A fitted rate outside 0.75..1.33 is refused (`FitsRefused`). The development machine measured
++110,000 ppm, which silently disabled the fit until 0.23.0.

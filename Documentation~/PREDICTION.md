@@ -32,15 +32,33 @@ server refuses is worse than showing the hit late.
 
 ### Key methods
 
+The predictor does not send anything. The game sends its own `InputMessage` and records the
+same tick on the predictor. `WorldViewBinder` (GameObject path) and `LocalPredictionSystem`
+(UnityDots) run the per-snapshot and per-frame calls for you. A game that drives a predictor
+directly makes these calls:
+
 ```csharp
-// Called every frame with the local player's input
-predictor.PredictAndSend(moveX, moveY, attackTargetId);
+// After every join, before the first Reconcile:
+predictor.UseServerProtocol(session.ServerProtocolVersion);
+predictor.UseServerTickRate(session.TickRate);
 
-// Called when a snapshot arrives
-predictor.Reconcile(snapshot);
+// Each input the game sends, with the tick that input carries:
+predictor.RecordInput(inputTick, moveX, moveY);
+steering.NoteInputSent(inputTick, nowSeconds);   // PredictionClockSteering
 
-// The position to render (predicted + smoothing offset)
-Vector2 renderPos = predictor.RenderPosition;
+// Each NEW snapshot (world.Tick advanced), in this order:
+predictor.SeedBaseTick(world.Tick);              // once per session; later calls do nothing
+predictor.SetServerSpeed(entity.Speed);          // non-positive = not sent, ignored
+steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
+predictor.Reconcile(new Vec2(entity.X, entity.Y), world.AckTick, world.Tick, world.AckAppliedTick);
+
+// Each rendered frame:
+predictor.Advance(deltaTime);
+Vec2 renderPos = predictor.Position;             // predicted + decaying smoothing offset
+Vec2 simulated = predictor.SimulatedPosition;    // without the offset
+
+// On a session boundary (reconnect, map transfer):
+predictor.Reset();                               // also forgets the 256-tick history
 ```
 
 ### Replay through Shared.GameLogic
@@ -218,33 +236,40 @@ Every reconcile produces some position error:
 
 | Error magnitude | Behaviour |
 |----------------|-----------|
-| Below `SmoothingThreshold` (default 2.0 units) | Absorbed into a decaying render offset |
-| Above `SmoothingThreshold` | Offset dropped, avatar snaps to correct position |
+| Up to `LocalMovePredictor.SmoothingThreshold` (0.5 units) | Absorbed into a decaying render offset (`SmoothedCorrections`) |
+| Above `SmoothingThreshold` | Offset dropped, avatar snaps to the corrected position (`Snaps`) |
 
-The render position is always `predictedPosition + smoothingOffset`, where the offset
-decays exponentially each frame.
+The render position (`Position`) is always the simulated position plus the smoothing offset.
+The offset decays by `OffsetDecayPerSecond` raised to the frame time, so the same fraction is
+retired per second at any frame rate (about 99 % after 250 ms). Both values are constants on
+`LocalMovePredictor`, not settings.
 
 ## TickRateEstimator
 
-Measures the server's tick rate from snapshot arrivals. The server sends `tick_rate`
-in `JoinTokenResponse` (since #93), but the estimator validates it against what
-actually arrives. A mismatch is logged as a warning.
-
-The estimated tick rate drives `secondsPerTick` which the predictor uses to advance
-its internal tick counter.
+Measures the server's tick rate and the gap between snapshot ticks from snapshot
+arrivals. The server sends `tick_rate` in the join reply, and the predictor takes it through
+`UseServerTickRate`. The estimator does not set the predictor's timestep. It checks the rate
+(`PredictionClockSteering.PredictorRateDisagrees` reports a predictor that runs at another
+rate). Its `SnapshotTickGap` sets the hold window (`SetHoldTicks`) and seeds the
+interpolation clock. Its `EstimatedHz` converts the acknowledgement floor to ticks
+(`AckFloorConversionHz`).
 
 ## SnapshotStalenessEstimator
 
-Fits the client/server clock ratio from snapshot inter-arrival times. Reports how
-many ppm the client clock runs fast or slow relative to the server, so the prediction
-clock can adjust its advance rate to stay synchronized.
+Fits the client/server clock ratio from snapshot arrivals. It reports how many ppm the
+client clock runs fast or slow relative to the server (`SkewPpm`). When the rate is
+corroborated, `PredictionClockSteering` feeds it to the prediction clock
+(`SetClockRateScale`). The interpolation clock does not use it.
 
-**The fit is linear regression over a sliding window.** A single outlier (GC pause,
-radio wake) does not move the estimate; it takes sustained drift across the window.
+**The fit is a lower envelope, not a regression.** Each epoch keeps its lowest
+(least-delayed) sample. The line goes through two such anchors far apart in time. A late
+sample (GC pause, radio wake, a server stall) cannot pull the line, because it is never the
+lowest of its epoch.
 
-Clamped at +/-200,000 ppm. The development machine measured +110,000 ppm (host
-`CLOCK_REALTIME` running 11% fast against `CLOCK_MONOTONIC`), which silently disabled
-the fit until 0.23.0 added the clamp and the probe scene.
+A fitted rate outside `MinimumSkew`..`MaximumSkew` (0.75..1.33) is refused and counted
+(`FitsRefused`). The development machine measured +110,000 ppm (host `CLOCK_REALTIME`
+running 11 % fast against `CLOCK_MONOTONIC`), which silently disabled the fit until 0.23.0
+added the bounds and the probe scene.
 
 ### The warm-up window, and why the reading is offered in two strengths
 
@@ -610,11 +635,17 @@ so the two columns are comparable and a difference between them is itself a find
 
 ## PredictionSettings
 
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `SmoothingThreshold` | 2.0 | Error above this snaps instead of smoothing |
-| `SmoothingDecay` | 0.85 | Per-frame decay factor for the smoothing offset |
-| `MaxUnackedInputs` | 120 | Buffer size for unacknowledged inputs |
+`new PredictionSettings(tickRate, speed, bounds)`, or `PredictionSettings.FromServer(...)`.
+
+| Field | Purpose |
+|-------|---------|
+| `TickRate` | Base tick rate the predictor integrates at. 0 builds a refusing predictor. `UseServerTickRate` replaces it after the join. |
+| `Speed` | Fallback speed until a snapshot carries one (`SetServerSpeed`) |
+| `Bounds` | Map bounds, clamped exactly as the server clamps them |
+| `TickRateIsFallback` | True when the rate was not the server's own |
+
+The smoothing threshold (0.5 units), the decay (`OffsetDecayPerSecond`) and the input
+buffer (`Capacity`, 128 unacknowledged inputs) are constants on `LocalMovePredictor`.
 
 ## Debugging
 
