@@ -151,6 +151,7 @@
     <Compile Include="../../Tests/Editor/SnapshotFreshnessTests.cs" />
     <Compile Include="../../Tests/Editor/SessionBoundaryResetTests.cs" />
     <Compile Include="../../Tests/Editor/EntityLifecycleTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationScenarioTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationConfigNormalizationTests.cs" />
     <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />
   </ItemGroup>
