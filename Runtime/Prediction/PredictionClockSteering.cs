@@ -148,7 +148,8 @@ namespace Cuvara.Netcode.Prediction
         /// available. Counted so a fallback that never stops being one is visible.
         /// </summary>
         /// <remarks>
-        /// A handful at the start of a session is the normal case — the tick rate estimator
+        /// A lifetime total: <see cref="Reset"/> keeps it. A handful at the start of each session
+        /// is the normal case — the tick rate estimator
         /// needs snapshots before it can report. A count that keeps climbing means the estimator
         /// never reached an estimate, and every floor on that session was converted with a rate
         /// nobody measured.
@@ -534,14 +535,35 @@ namespace Cuvara.Netcode.Prediction
         }
 
         /// <summary>
-        /// Forgets the tick-rate and staleness measurements: they describe one route to one
-        /// server, and carrying them across a session boundary measures the new connection against
-        /// the old one's best case.
+        /// Forgets everything that describes the session: the tick-rate, staleness and
+        /// acknowledgement-latency measurements, the advertised tick rate and the round trip.
+        /// They describe one route to one server, and carrying them across a session boundary
+        /// measures the new connection against the old one's best case.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Session state, reset here.</b> <see cref="AckLatency"/> holds the sent-input
+        /// timestamps and the floor of the old route: kept, a new session's first
+        /// acknowledgements would be timed against inputs the old server received, and its lead
+        /// would carry the old floor until enough new samples displaced it. The advertised rate
+        /// is the old server's <c>tick_rate</c>; it returns to zero ("no predictor known") and
+        /// <see cref="OnSnapshot"/> sets it again from the predictor before the first
+        /// acknowledgement is converted. <see cref="RoundTripMs"/> is the old connection's; the
+        /// consumer sets the new one.
+        /// </para>
+        /// <para>
+        /// <b>Lifetime counters, kept.</b> <see cref="AckFloorRateFallbacks"/> is a total over
+        /// the life of this object, as a consumer reports it: a reset would hide the fallbacks of
+        /// every session but the last one.
+        /// </para>
+        /// </remarks>
         public void Reset()
         {
             TickRate.Reset();
             Staleness.Reset();
+            AckLatency.Reset();
+            _advertisedHz = 0f;
+            RoundTripMs = 0L;
         }
     }
 }

@@ -961,12 +961,13 @@ namespace Cuvara.Netcode.View
             _lastInterpAdvanceMs = -1.0;
             _explicitlyRemoved.Clear();
             _predictor?.Reset();
-            TickRate.Reset();
 
-            // The floor describes one route to one server; carrying it across a session
+            // The floors describe one route to one server; carrying them across a session
             // boundary measures the new connection against the old one's best case, and a
-            // best case that is no longer achievable reads as constant staleness.
-            Staleness.Reset();
+            // best case that is no longer achievable reads as constant staleness. The whole
+            // steering session goes -- tick rate, staleness, acknowledgement latency, advertised
+            // rate, round trip -- not only the first two (PredictionClockSteering.Reset).
+            _clockSteering.Reset();
             _localId = string.Empty;
             _localHp = 0;
             _localMaxHp = 0;

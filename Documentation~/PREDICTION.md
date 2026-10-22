@@ -373,7 +373,15 @@ steering.NoteInputSent(inputTick, nowSeconds);
 steering.SampleTickRate(world.Tick, nowSeconds);
 steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
 predictor.Reconcile(position, world.AckTick, world.Tick, world.AckAppliedTick);
+
+// on a session boundary (reconnect, map transfer), with predictor.Reset():
+steering.Reset();
 ```
+
+`Reset()` forgets the session: `TickRate`, `Staleness`, `AckLatency` (its sent-input timestamps
+and floor), the advertised tick rate and `RoundTripMs`. Kept, the new session's acknowledgements
+are timed against the old session's sends and its lead carries the old route's floor. The
+lifetime counter `AckFloorRateFallbacks` is kept. `WorldViewBinder.Reset()` calls it.
 
 ### The lead must cover the pipeline, not just the snapshot's age
 
