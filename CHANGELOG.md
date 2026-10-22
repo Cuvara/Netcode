@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`default(InterpolationConfig)` now normalises to the default extrapolation shaping.**
+  `Normalized()` filled `ExtrapolationHold`, `ExtrapolationSettle` and `MaxExtrapolationSpan`
+  only when negative, because zero is a meaningful explicit value for each. The all-zero struct
+  therefore got hold 0, settle 0 and span 0, while `WorldViewBinder` ran with
+  `InterpolationConfig.Default`'s 0.15 s, 0.10 s and 0.25 s. `DotsNetcodeBootstrap.Install`
+  passes `default` and promises netcode's defaults (UnityDots audit finding F4). The all-zero
+  struct now takes `Default`'s values for these three fields. A configured value keeps its
+  zeros, and every other field keeps its rule (`MaxExtrapolation` 0 still means "never
+  extrapolate"). `InterpolationConfigNormalizationTests` fails before (hold 0.0, expected 0.15).
+- **`LocalMovePredictor.Reset()` forgets the history ring.** It cleared pending inputs, seeding
+  and counters, but not the 256-tick history. After a reconnect to a server with overlapping
+  ticks, a reconcile that named a tick before the new session's seed could hit an entry that the
+  previous session wrote, and "correct" by the distance between two unrelated positions
+  (finding H5). `PredictorResetHistoryTests` fails before (a history hit on tick 4890 of the old
+  session).
+- **`WorldViewBinder` restarts its render timeline when the world tick goes backwards.** A
+  caller that reset the `WorldState` for a new join but not the binder (the client's reconnect
+  path, finding F2) left `_lastWorldTick` and the interpolation clock in the old session's tick
+  space. With a server whose ticks restart lower, no sample reached the interpolator until the
+  new ticks passed the old ones. Every remote was drawn at its raw snapshot position, and
+  `RenderTick` stayed about 100 000 ticks ahead. A backwards world tick now restarts the render
+  clock, the sample rings and the tick-rate and staleness estimators. It is counted in the new
+  `TickLineRestarts`. Calling `Reset()` on a session boundary is still the correct fix.
+  `SessionBoundaryResetTests` fails before (`LastServerTick` 100236, expected 616).
+
+### Tests
+
+- 65 more headless tests (397 to 462). The Unity-free resolver, interpolation-continuity and
+  defer fixtures now also run headless. New fixtures:
+  - `ReplayHistoryStagingTests`: the staged replay of 0.48.0, which had no test of its own.
+  - `ServerStallRecoveryTests`
+  - `SessionBoundaryResetTests`
+  - `EntityLifecycleTests`
+  - `InterpolationScenarioTests`
+  - `KcpReliabilityTests`: loss, reorder, duplicates and a full receive window.
+  - `ReconnectDecisionTableTests`: every disconnect cause against every close reason.
+  - `InterpolationConfigNormalizationTests`
+  - `PredictorResetHistoryTests`
+
+  `PredictionHarness` gains a client hitch, a server tick stall and a per-reconcile
+  correction log.
+- Two fixtures **fail on purpose**. They describe defects that this branch does not fix:
+  - `ClientHitchRecoveryTests`: after a 0.5 s or 2 s client stall, the reconcile corrects by a
+    whole step 16 to 80 times. After 2 s, the clock is still 30 ticks behind 12 s later.
+  - `SnapshotFreshnessTests`: `WorldState` merges an older snapshot's entities. This is latent,
+    because KCP delivers in order.
+
+### Documentation
+
+- `PREDICTION.md` and `INTERPOLATION.md` no longer name APIs that do not exist
+  (`PredictAndSend`, `RenderPosition`, `MaxSamples`, `ExtrapolationLimit`, the old
+  `InterpolationClock.Advance` signature). Their defaults, the staleness fit and which clock
+  it steers now match the code.
+
 ## [0.48.0] - 2026-10-22
 
 ### Fixed
