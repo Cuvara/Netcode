@@ -53,7 +53,7 @@ cannot read managed assets):
 | `MaxExtrapolationSpeed` | 0 (off) | A last segment faster than this (units/s) is a teleport and is not carried |
 | `MaxExtrapolationSpan` | 0.250 s | A last segment longer than this is not a velocity and is not carried. 0 = no check |
 | `ClockCatchUpRate` | 1.0 | How fast the render clock closes on its target |
-| `MaxClockRateAdjust` | 0.10 | Largest dilation of the render clock (+/-10 %). It never jumps |
+| `MaxClockRateAdjust` | 0.10 | Largest dilation of the render clock (+/-10 %). It jumps only forward, after a stall (see below) |
 | `MinInterval` / `MaxInterval` | 0.001 s / 0.500 s | Bounds on the measured seconds per tick |
 | `DefaultInterval` | 1/15 s | Snapshot interval assumed before one is measured |
 | `IntervalSmoothing` | 0.3 | Smoothing of the measured interval |
@@ -92,9 +92,32 @@ clock.Reset();
 ```
 
 The clock steers toward `newestTick - TargetDelay / secondsPerTick`. `secondsPerTick` is
-measured from the snapshot ticks and their arrival times. The clock never jumps. It dilates
-its rate within `MaxClockRateAdjust`, so `RenderTick` strictly increases.
+measured from the snapshot ticks and their arrival times. It dilates its rate within
+`MaxClockRateAdjust`, so `RenderTick` strictly increases.
 `SnapshotStalenessEstimator` steers the prediction clock, not this one.
+
+**After a stall (0.48.0).** A client stall is followed by its backlog: the snapshots sent
+meanwhile, delivered oldest first and close together. Before 0.48.0 the clock took the stall
+gap (0.5 s per tick) and every backlog arrival (about 2.5 ms per tick) as rate samples. After
+a 2 s stall it measured about 3 ms per tick, raced 91 ticks past the newest snapshot, and
+needed the 10 % cap's 15 s to come back. Meanwhile every remote was held and stepped once per
+snapshot (rpg-factory testlab S13). Now:
+
+- A rate sample is measured from the last accepted arrival. It is taken only when it is within
+  0.5x to 2x of the current estimate and the arrival itself came on cadence. Rejections are
+  counted in `RejectedIntervalSamples`. After `RelearnSeconds` (5 s) of continuous rejection
+  the rejected span is adopted, so a rate that really changed is still learned.
+- After an episode of off-cadence arrivals, the first arrival back on cadence may set the clock
+  forward. It does so when the clock is more than `ResyncBehindSeconds` (0.5 s) behind. This is
+  the DOTS path, which advances by `Time.deltaTime`, capped at 0.333 s by Unity. It is counted
+  in `ClockResyncs`.
+- While snapshots arrive on cadence and the clock is past the newest one by more than the
+  extrapolation hold window (`MaxExtrapolation + ExtrapolationHold`), it holds at the rate
+  floor (`AheadHoldFrames`). Every entity is drawn at its newest sample there anyway.
+
+Both exceptions are forward-only. Neither happens under jitter.
+`ClientStallInterpolationTests` covers the binder and the capped-delta clock with a paced
+backlog.
 
 **Session boundaries.** `RenderTick` lives in one server's tick space. Call
 `WorldViewBinder.Reset()` with `WorldState.Reset()` on every reconnect. Since 0.48.0, a binder

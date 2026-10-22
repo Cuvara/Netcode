@@ -20,6 +20,70 @@
   Ordinary jitter is steered as before. `ClientHitchRecoveryTests` fails before: the clock is
   still 15 or 105 ticks off at the second snapshot after the stall. Now the clock is within one
   tick, with at most one correction of two steps or more.
+- **The stall jump is made once, onto the server's real tick line, when the backlog is paced.**
+  Live, the snapshots sent during a stall arrive oldest first, about one every 10 ms. The jump
+  above was then decided against the oldest, stale snapshot. As the backlog kept coming, the
+  clock fell behind it and the jump fired again and again. A 2 s stall cost 6 to 15 corrections
+  of 16 ticks each (rpg-factory testlab S13, runs 20261022T194438Z-S13-vdqw and -q3rr).
+  `PredictionClockSteering.OnSnapshot` now compares each snapshot's arrival gap with its tick
+  gap at the advertised rate, within 0.5x to 2x:
+  - A **late** snapshot is steered to its tick plus the delay times the rate (the server's
+    current tick), so the jump happens on the first snapshot after the stall.
+  - A **bunched** snapshot behind a late one (the backlog) is not measured and not steered on.
+    Its reconcile is skipped, because its acknowledgement maps into the ticks the clock jumped
+    over.
+  - Late snapshots are not measured either: the staleness fit, the acknowledgement floor and
+    the rate scale describe the route, not a delivery stall.
+  - Early arrivals outside such an episode (jitter) are handled as before.
+
+  New counters: `LateSnapshots`, `BunchedSnapshots` and
+  `LocalMovePredictor.BunchedReconcilesSkipped`. `PredictionHarness` gains
+  `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
+  `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
+  before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **The render clock no longer races ahead after a stall.** `InterpolationClock` took the stall
+  gap (0.5 s per tick) and every backlog arrival (about 2.5 ms per tick) as rate samples. After a
+  2 s stall it measured about 3 ms per tick and ran 91 ticks past the newest snapshot. The 10 %
+  rate cap then needed about 15 s to bring it back, and every remote was held and stepped once
+  per snapshot meanwhile (S13: about 26 remote jumps a second, still 32 to 35 ticks ahead 12 s
+  later). Three changes:
+  - A rate sample is measured from the last accepted arrival, and is taken only within 0.5x to 2x
+    of the estimate when the arrival came on cadence. It relearns after 5 s of continuous
+    rejection.
+  - After an episode of arrivals off cadence, a clock more than 0.5 s behind is set forward once.
+    This is the DOTS path, whose frame delta Unity caps at 0.333 s.
+  - A clock past the newest sample by more than the extrapolation hold window, while snapshots
+    arrive on cadence, holds at the rate floor.
+
+  Both exceptions are forward-only. New counters: `RejectedIntervalSamples`, `ClockResyncs`,
+  `AheadHoldFrames` and `LastArrivalOnCadence`. `ClientStallInterpolationTests` fails before
+  (binder 105 ticks ahead after a 2 s stall, rate estimate 870 % off) and now passes.
+- **The KCP receive loop reads every queued datagram per wake.** It awaited one
+  `UdpClient.ReceiveAsync().AsUniTask()` per datagram, and that continues on Unity's main-thread
+  context: at most one datagram per frame. After a stall, the socket held the snapshots and the
+  server's retransmissions, and the 2 s backlog reached the world over 315 to 353 ms (S13). Now
+  `UdpDatagramDrain.Drain` reads the rest synchronously after each wake, bounded at 4096.
+  `TransportReceivePacingTests` reproduces the one-per-frame pacing headlessly, with a real
+  loopback socket and a frame-pumped synchronization context, and shows the drain reading the
+  backlog in one frame. New diagnostics: `KcpTransport.DatagramsRead`, `ReceiveWakeups` and
+  `MaxDatagramsPerWake`, surfaced as `GameSessionClient.TransportDatagramsRead`,
+  `TransportReceiveWakeups` and `TransportMaxDatagramsPerWake`.
+- **A graceful leave delivers its `disconnect` frame.** `WireConnection.Leave` queued the frame
+  and closed in the same call. The write loop was cancelled before it ran, and `NetworkClient`
+  disposed the socket right after. The game server noticed only on its KCP dead-link timeout
+  (rpg-factory testlab S08G). `LeaveAsync` now:
+  - sends the frame through the send queue (nothing queued after it is sent);
+  - waits for the write loop to write it, for at most 500 ms;
+  - waits for KCP to have it acknowledged, through the new `IFlushableTransport`, bounded by
+    `KcpClientSession.CloseFlushBudget` = `min(max(2 x RTO, 100 ms), 500 ms)`;
+  - then closes.
+
+  `Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
+  leave, which disposes it when done. `WireConnectionLeaveTests` (Editor) fails before: the
+  transport was closed without the frame being written. `KcpCloseFlushTests` (headless) pins the
+  KCP half: a frame whose first datagram is lost is acknowledged within the budget, and is lost
+  when the session is closed at once. New: `WireConnection.LeaveAcknowledged`,
+  `KcpClientSession.PendingSendSegments`, `Kcp.RtoMs`.
 - **`WorldState` drops a snapshot older than its tick.** The shared merger keeps `Tick`
   monotonic but merged the entities of a late snapshot over newer ones. A remote that had
   stopped since was then drawn at the stale position until the next keyframe. This is latent,

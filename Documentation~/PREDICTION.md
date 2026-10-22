@@ -253,6 +253,27 @@ server's tick line by the discarded time. `SteerToServerTick` does not walk that
 holds and the history are kept. Ordinary jitter never triggers a jump: it needs a clamped
 frame, or a clock that is behind by more than the catch-up budget.
 
+**The backlog after the stall (0.48.0).** The snapshots the server sent during the stall are
+not always all there when it ends. Before 0.48.0 the KCP receive loop read one datagram per
+frame, and a network can also deliver late and then in a burst. The live client applied the
+backlog of a 2 s stall oldest first, about one snapshot every 10 ms over 300 ms (rpg-factory
+testlab S13). The jump was then decided against the oldest, stale snapshot. The clock fell
+behind the backlog as it kept arriving, and the jump fired again and again, 6 to 15 corrections
+of 16 ticks each. `PredictionClockSteering.OnSnapshot` now classifies each snapshot by its
+arrival gap against its tick gap at the advertised rate (band 0.5x to 2x):
+
+| Delivery | What is done | Counter |
+|---|---|---|
+| **Late** (above the band) | steered to its tick plus the delay times the rate: the server's tick now. After a stall this is the first snapshot read, so the jump happens there, once. Not measured: its age is the delivery stall, not the route | `LateSnapshots` |
+| **Bunched** behind a late one (below the band) | the backlog: not measured, not steered on, and its reconcile is skipped, because its acknowledgement maps into the ticks the clock jumped over. `TickError` is still updated | `BunchedSnapshots`, `LocalMovePredictor.BunchedReconcilesSkipped` |
+| **On cadence**, or early outside such an episode (jitter) | measured and steered as before | |
+
+`ClientHitchRecoveryTests` covers both shapes: the whole backlog handed over in the stall-end
+frame, and the backlog paced at 10 ms with the frame delta capped at 0.333 s, as Unity caps
+`Time.deltaTime`. In the paced shape the stall still costs one correction. The input recorded
+in the stall-end frame is stamped on the old tick line, because the jump only happens when the
+first snapshot after the stall is read.
+
 ## TickRateEstimator
 
 Measures the server's tick rate and the gap between snapshot ticks from snapshot

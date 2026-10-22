@@ -280,6 +280,24 @@ shipping code.
 
 Both files run headlessly — see [Running the tests without Unity](#running-the-tests-without-unity).
 
+### KCP: one await per datagram (0.48.0)
+
+`KcpTransport`'s receive loop had the same shape for datagrams. It awaited one
+`UdpClient.ReceiveAsync().AsUniTask()` per datagram, and `AsUniTask` continues on the main-thread
+context, so it read at most one datagram per frame. That cost nothing at 15 snapshots a
+second. After a client stall, the socket held the stall's snapshots and the server's KCP
+retransmissions of them. The live client applied the 32-snapshot backlog of a 2 s stall over
+315 to 353 ms (rpg-factory testlab S13). At a vsynced 60 fps that would take seconds.
+
+After each wake the loop now reads every datagram already queued, synchronously
+(`UdpDatagramDrain.Drain`, bounded at 4096). A backlog therefore arrives in the frame the main
+thread wakes in. `TransportReceivePacingTests` reproduces the old pacing headlessly, with a real
+loopback socket continued through a frame-pumped synchronization context, and shows the drain
+reading the whole backlog in one frame. For the test lab, `KcpTransport.DatagramsRead`,
+`ReceiveWakeups` and `MaxDatagramsPerWake` are surfaced as `GameSessionClient.TransportDatagramsRead`,
+`TransportReceiveWakeups` and `TransportMaxDatagramsPerWake`. Sampled per frame, the difference
+of the first is the number of datagrams read that frame.
+
 ## Encoding: sniffed, not negotiated (ADR-9)
 
 The body is either Protobuf or legacy JSON, and the receiver tells them apart
@@ -577,6 +595,31 @@ eviction from a gateway build that predates `kick` — is reported as
 `DisconnectCause.ServerDisconnect` with its reason. `duplicate_login` and
 `server_shutdown` are the only reasons emitted today; anything else is handled
 generically.
+
+## Leaving: the disconnect frame is delivered (0.48.0)
+
+`WireConnection.Leave` used to queue the `disconnect` frame and close in the same call.
+Closing cancelled the write loop before it ran, so the frame was never written, and
+`NetworkClient` disposed the socket straight after. The game server only noticed on its KCP
+dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
+
+`LeaveAsync` now works in four steps:
+
+1. It sends the frame through the send queue, so the frame is sealed and written after
+   everything queued before it. Nothing queued after it is sent.
+2. It waits for the write loop to hand the frame to the transport, for at most
+   `LeaveWriteTimeoutMs` (500 ms).
+3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
+   acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
+   `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
+   acknowledgement, with a floor for the frame-bound ARQ timer and a cap so leaving never
+   waits on a bad link.
+4. It closes.
+
+`Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
+leave, which disposes it when done, so disposing the session no longer cuts it off.
+`LeaveAcknowledged` reports the outcome. TCP needs no flush: an orderly close sends what is
+queued before its FIN.
 
 ## Join tokens are single-use
 
