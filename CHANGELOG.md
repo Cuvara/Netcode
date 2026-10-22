@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A remote entity that stops, or is teleported and then stays, is drawn where the server says
+  it is.** `SnapshotInterpolation` held the extrapolation at its 50 ms cap forever once the render
+  clock passed an entity's newest sample - and an entity that stopped never gets a newer sample,
+  because `WorldViewBinder` pushes none for an unchanged position. Every enemy that reached its
+  target was drawn 0.125 units past it (2.5 u/s x 50 ms), and a respawned player was drawn several
+  units past its spawn for as long as it stood there. Found by the rpg-factory testlab (three
+  rendered clients against an isolated stack; scenarios S02/S05). Covered by
+  `StoppedEntityConvergesTests` and new `InterpolationCoreTests` cases; both repro tests failed
+  on 0.47.0 (0.125 and 0.234 units past the stop/destination).
+
+### Added
+
+- `InterpolationConfig.ExtrapolationHold` (default 150 ms) and `ExtrapolationSettle` (default
+  100 ms): after the cap, the entity is held, then eased (smoothstep) back onto its newest sample.
+  `ExtrapolationHold = double.PositiveInfinity` restores the old hold-at-the-cap behaviour.
+- `InterpolationConfig.MaxExtrapolationSpan` (default 250 ms): a last segment longer than this is
+  not a velocity (the entity stood still in between) and is not carried.
+- `InterpolationConfig.MaxExtrapolationSpeed` (default 0 = off): a last segment faster than this,
+  in world units per second, is a teleport and is not carried. Opt-in, because the evaluator
+  cannot know the game's speeds.
+- The headless suite now compiles `InterpolationCoreTests`, `WithheldEntityDoesNotFreezeTests` and
+  `StoppedEntityConvergesTests` (they are Unity-free).
+
 ## [0.47.0] - 2026-10-09
 
 **Realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, ADR-32 in

@@ -849,6 +849,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
@@ -950,6 +954,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |

@@ -63,6 +63,52 @@ namespace Cuvara.Netcode.Interpolation
         public double MaxExtrapolation;
 
         /// <summary>
+        /// Seconds an entity is held at the <see cref="MaxExtrapolation"/> cap before it is
+        /// eased back onto its newest confirmed position.
+        /// </summary>
+        /// <remarks>
+        /// Default 0.15 s. An entity is extrapolated only when no newer sample has arrived, and
+        /// the binder pushes no sample for an entity whose position did not change, so an entity
+        /// that STOPS sits past its newest sample for good. Without this it was drawn at the cap
+        /// forever: every enemy that reached its target 0.125 units past it, and a respawned
+        /// player several units past its spawn (found by the rpg-factory testlab, scenario S05).
+        /// The hold is longer than a withheld snapshot leaves the clock past the newest sample
+        /// (a 133 ms replication band against the 100 ms target delay), so an entity in a slow
+        /// band keeps moving smoothly instead of being pulled back between its updates.
+        /// <see cref="double.PositiveInfinity"/> restores the old hold-at-the-cap behaviour.
+        /// </remarks>
+        public double ExtrapolationHold;
+
+        /// <summary>Seconds over which a held extrapolation eases back to the newest sample.</summary>
+        /// <remarks>Default 0.10 s. Zero snaps back in one frame.</remarks>
+        public double ExtrapolationSettle;
+
+        /// <summary>
+        /// Fastest motion, in world units per second, that is extrapolated at all; a last segment
+        /// faster than this is a teleport (respawn, portal, server correction) and is held, not
+        /// carried. Zero (the default) disables the guard.
+        /// </summary>
+        /// <remarks>
+        /// Off by default because the evaluator works in the consumer's units and cannot know
+        /// what a plausible speed is; a game sets it from its own movement speeds. Carrying a
+        /// teleport's velocity past the destination draws the entity beyond where it landed.
+        /// </remarks>
+        public double MaxExtrapolationSpeed;
+
+        /// <summary>
+        /// Longest last segment, in seconds, whose motion is extrapolated. A longer one is not a
+        /// velocity: the entity stood still in between (no samples are pushed for an unchanged
+        /// position) and then moved or was teleported, and averaging that over the still period
+        /// invents a slow drift past the destination.
+        /// </summary>
+        /// <remarks>
+        /// Default 0.25 s: above two 15 Hz snapshot intervals plus the server's slowest
+        /// replication band (133 ms), so a withheld but moving entity is still carried.
+        /// Zero disables the check.
+        /// </remarks>
+        public double MaxExtrapolationSpan;
+
+        /// <summary>
         /// How hard the render clock is pulled toward its target: fractional rate change
         /// per second of clock error.
         /// </summary>
@@ -144,6 +190,10 @@ namespace Cuvara.Netcode.Interpolation
         {
             TargetDelay = 0.100,
             MaxExtrapolation = 0.050,
+            ExtrapolationHold = 0.150,
+            ExtrapolationSettle = 0.100,
+            MaxExtrapolationSpeed = 0.0,
+            MaxExtrapolationSpan = 0.250,
             ClockCatchUpRate = 1.0,
             MaxClockRateAdjust = 0.10,
             MinInterval = 0.001,
@@ -173,6 +223,10 @@ namespace Cuvara.Netcode.Interpolation
             var c = this;
             if (c.TargetDelay <= 0.0) c.TargetDelay = d.TargetDelay;
             if (c.MaxExtrapolation < 0.0) c.MaxExtrapolation = d.MaxExtrapolation;
+            if (c.ExtrapolationHold < 0.0 || double.IsNaN(c.ExtrapolationHold)) c.ExtrapolationHold = d.ExtrapolationHold;
+            if (c.ExtrapolationSettle < 0.0 || double.IsNaN(c.ExtrapolationSettle)) c.ExtrapolationSettle = d.ExtrapolationSettle;
+            if (c.MaxExtrapolationSpeed < 0.0 || double.IsNaN(c.MaxExtrapolationSpeed)) c.MaxExtrapolationSpeed = 0.0;
+            if (c.MaxExtrapolationSpan < 0.0 || double.IsNaN(c.MaxExtrapolationSpan)) c.MaxExtrapolationSpan = d.MaxExtrapolationSpan;
             if (c.ClockCatchUpRate <= 0.0) c.ClockCatchUpRate = d.ClockCatchUpRate;
             if (c.MaxClockRateAdjust <= 0.0) c.MaxClockRateAdjust = d.MaxClockRateAdjust;
             if (c.MinInterval <= 0.0) c.MinInterval = d.MinInterval;

@@ -118,6 +118,9 @@
     <Compile Include="../../Tests/Editor/WorldViewBinderLeadTests.cs" />
     <Compile Include="../../Tests/Editor/WorldViewBinderRateGateTests.cs" />
     <Compile Include="../../Tests/Editor/WorldViewBinderTests.cs" />
+    <Compile Include="../../Tests/Editor/StoppedEntityConvergesTests.cs" />
+    <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
     <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
     <Compile Include="../../Tests/Editor/AckFloorConversionRateTests.cs" />
     <Compile Include="../../Tests/Editor/AckLatencyEstimatorTests.cs" />
