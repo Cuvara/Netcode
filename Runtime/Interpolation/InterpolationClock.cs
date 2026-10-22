@@ -34,6 +34,13 @@ namespace Cuvara.Netcode.Interpolation
     /// function of a monotonic clock along a fixed path.
     /// </para>
     /// <para>
+    /// <b>Two exceptions, both after a stall and both still forward-only.</b> A clock left more
+    /// than <see cref="ResyncBehindSeconds"/> behind (a capped frame delta) is set forward once
+    /// the stream is back on its cadence; a clock more than the extrapolation hold window past
+    /// the newest sample while snapshots arrive on cadence is held at the rate floor. Neither
+    /// happens under jitter, and neither moves the clock backwards.
+    /// </para>
+    /// <para>
     /// Blittable: <c>bool</c>, <c>long</c> and <c>double</c> only. It is an
     /// <c>IComponentData</c> singleton on the ECS path and a field on
     /// <see cref="Cuvara.Netcode.View.WorldViewBinder"/> on the GameObject path.
@@ -67,8 +74,99 @@ namespace Cuvara.Netcode.Interpolation
         /// </summary>
         public double RenderTick;
 
+        /// <summary>
+        /// Band, as a ratio of the current <see cref="SecondsPerTick"/>, inside which a measured
+        /// interval is a rate sample at all. Also the band an arrival must fall in to count as
+        /// on the stream's cadence.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why there is a band.</b> An arrival gap over a tick gap is a rate only when the
+        /// snapshots left the server and reached the client at the same pace. After a client
+        /// stall that is false twice over: the first snapshot after it measures the stall (2 s
+        /// over 4 ticks, 0.5 s per tick), and the backlog behind it is delivered back to back
+        /// (10 ms over 4 ticks, 2.5 ms per tick). Both were accepted. Live, the backlog pulled
+        /// the estimate from 16.7 ms to about 3 ms per tick, the clock ran at about 300 ticks a
+        /// second and ended 91 ticks past the newest snapshot, and every remote was held and
+        /// stepped once per snapshot for the 12 s it took the 10 % rate cap to undo
+        /// (rpg-factory testlab S13, runs 20261022T194438Z-S13-vdqw and -q3rr).
+        /// </para>
+        /// <para>
+        /// Ordinary jitter stays inside it: 20 ms either way on a 66.7 ms snapshot interval is
+        /// a ratio of 0.4 to 1.6 per arrival, and a sample is measured from the last ACCEPTED
+        /// arrival, so the occasional early one is simply folded into the next. A dropped
+        /// snapshot doubles the tick gap with the arrival gap and does not move the ratio.
+        /// </para>
+        /// </remarks>
+        public const double MinSampleRatio = 0.5;
+
+        /// <summary>Upper end of the band; see <see cref="MinSampleRatio"/>.</summary>
+        public const double MaxSampleRatio = 2.0;
+
+        /// <summary>
+        /// Seconds of continuous rejection after which the rejected span is adopted as the rate.
+        /// </summary>
+        /// <remarks>
+        /// The band would otherwise lock in a wrong estimate forever, for instance a first
+        /// measurement taken off a burst. A backlog ends when it is drained, which takes a
+        /// fraction of a second once the transport reads every queued datagram per wake; a rate
+        /// that really is outside the band is still outside it five seconds later.
+        /// </remarks>
+        public const double RelearnSeconds = 5.0;
+
+        /// <summary>
+        /// Seconds behind <see cref="TargetTick"/> past which the clock is set forward rather than
+        /// dilated, once the stream is back on its cadence.
+        /// </summary>
+        /// <remarks>
+        /// Five jitter buffers. Ordinary jitter and the 10 % rate cap never leave the clock this
+        /// far behind; a frame whose delta the caller capped does: the DOTS path advances by
+        /// <c>Time.deltaTime</c>, which Unity limits to <c>maximumDeltaTime</c> (0.333 s by
+        /// default), so a 2 s stall leaves the clock 1.7 s behind, and dilation at 10 % would
+        /// take 17 s to close it. Setting it forward keeps <see cref="RenderTick"/> strictly
+        /// increasing.
+        /// </remarks>
+        public const double ResyncBehindSeconds = 0.5;
+
+        /// <summary>
+        /// Interval samples rejected by the band (<see cref="MinSampleRatio"/>). Lifetime total:
+        /// not cleared by <see cref="Reset"/>.
+        /// </summary>
+        public int RejectedIntervalSamples { get; private set; }
+
+        /// <summary>
+        /// Times the clock was set forward (<see cref="ResyncBehindSeconds"/>). Lifetime total.
+        /// </summary>
+        public int ClockResyncs { get; private set; }
+
+        /// <summary>
+        /// Frames the clock was held because it was past the newest sample by more than the
+        /// hold window while snapshots kept arriving on cadence. Lifetime total.
+        /// </summary>
+        public int AheadHoldFrames { get; private set; }
+
         private double _lastReceiveTime;
         private bool _hasMeasurement;
+
+        // The last ACCEPTED rate sample. Samples are measured from here rather than from the
+        // previous arrival, so a run of rejected arrivals (a stall gap, then a backlog delivered
+        // back to back) becomes one ordinary span once the stream is back on its cadence.
+        private long _anchorTick;
+        private double _anchorTime;
+
+        // A run of rejected samples, for RelearnSeconds.
+        private bool _inRejectStreak;
+        private long _streakTick;
+        private double _streakTime;
+
+        // Whether the newest arrival came on the stream's cadence, and the seconds the clock has
+        // advanced since it.
+        private bool _lastArrivalOnCadence;
+        private double _sinceArrival;
+
+        // Set by an arrival off cadence (a stall's late first snapshot, its backlog); cleared by
+        // the one forward-resync decision made once the stream is back on cadence.
+        private bool _recovering;
 
         /// <summary>
         /// Where <see cref="RenderTick"/> is heading: the newest tick, held back by
@@ -128,15 +226,31 @@ namespace Cuvara.Netcode.Interpolation
                 HasSamples = true;
                 NewestTick = tick;
                 _lastReceiveTime = receiveTimeSeconds;
+                _anchorTick = tick;
+                _anchorTime = receiveTimeSeconds;
+                _inRejectStreak = false;
+                _lastArrivalOnCadence = true;
+                _sinceArrival = 0.0;
+                _recovering = false;
                 return;
             }
 
-            long tickDelta = tick - NewestTick;
-            double secondsDelta = receiveTimeSeconds - _lastReceiveTime;
+            // Judged against the estimate as it stood before this arrival.
+            _lastArrivalOnCadence = OnCadence(tick - NewestTick, receiveTimeSeconds - _lastReceiveTime);
+            _sinceArrival = 0.0;
+            if (!_lastArrivalOnCadence) _recovering = true;
+
+            long tickDelta = tick - _anchorTick;
+            double secondsDelta = receiveTimeSeconds - _anchorTime;
             if (tickDelta > 0 && secondsDelta > 0.0)
             {
                 double perTick = secondsDelta / tickDelta;
-                if (perTick >= config.MinInterval && perTick <= config.MaxInterval)
+                bool sane = perTick >= config.MinInterval && perTick <= config.MaxInterval;
+                // Both conditions: the span since the last accepted sample is a plausible rate,
+                // AND this arrival itself came on cadence. Without the second, a span that ends
+                // inside a backlog (2.25 s over 88 ticks, live) passes the band and still reads
+                // a rate 50 % slow.
+                if (sane && (!_hasMeasurement || (InBand(perTick) && _lastArrivalOnCadence)))
                 {
                     // The first real measurement replaces the seed outright: the seed is a
                     // guess from a nominal rate and a tick gap that may not have been
@@ -148,12 +262,61 @@ namespace Cuvara.Netcode.Interpolation
                         : perTick;
                     _hasMeasurement = true;
                     ClampInterval(config);
+                    _anchorTick = tick;
+                    _anchorTime = receiveTimeSeconds;
+                    _inRejectStreak = false;
+                }
+                else if (_hasMeasurement)
+                {
+                    // A stall gap or a backlog: not a rate. The anchor stays, so the span is
+                    // measured whole once the stream is back on its cadence.
+                    RejectedIntervalSamples++;
+                    if (!_inRejectStreak)
+                    {
+                        _inRejectStreak = true;
+                        _streakTick = tick;
+                        _streakTime = receiveTimeSeconds;
+                    }
+                    else if (receiveTimeSeconds - _streakTime >= RelearnSeconds && tick > _streakTick)
+                    {
+                        // Still outside the band after RelearnSeconds: the rate really changed.
+                        // Measured from the first rejected arrival, so the gap that started the
+                        // streak is not part of it.
+                        double relearned = (receiveTimeSeconds - _streakTime) / (tick - _streakTick);
+                        if (relearned >= config.MinInterval && relearned <= config.MaxInterval)
+                        {
+                            SecondsPerTick = relearned;
+                            _anchorTick = tick;
+                            _anchorTime = receiveTimeSeconds;
+                            _inRejectStreak = false;
+                        }
+                    }
                 }
             }
 
             NewestTick = tick;
             _lastReceiveTime = receiveTimeSeconds;
         }
+
+        /// <summary>
+        /// Whether the newest arrival came on the stream's cadence: its arrival gap over its tick
+        /// gap inside the band (<see cref="MinSampleRatio"/>). False for the first snapshot after
+        /// a stall and for every snapshot of the backlog behind it.
+        /// </summary>
+        public bool LastArrivalOnCadence => _lastArrivalOnCadence;
+
+        private bool OnCadence(long tickDelta, double secondsDelta)
+        {
+            if (tickDelta <= 0 || secondsDelta <= 0.0 || SecondsPerTick <= 0.0)
+            {
+                return false;
+            }
+
+            return InBand(secondsDelta / tickDelta);
+        }
+
+        private bool InBand(double perTick) =>
+            perTick >= SecondsPerTick * MinSampleRatio && perTick <= SecondsPerTick * MaxSampleRatio;
 
         /// <summary>
         /// Advances the render clock by one frame. Call once per rendered frame, before
@@ -168,12 +331,45 @@ namespace Cuvara.Netcode.Interpolation
                 return;
             }
 
-            double errorSeconds = (TargetTick(config) - RenderTick) * SecondsPerTick;
+            _sinceArrival += deltaSeconds;
+            double target = TargetTick(config);
+            double errorSeconds = (target - RenderTick) * SecondsPerTick;
+
+            // BEHIND BY A STALL, AND THE STREAM IS BACK: set forward, once. Only after an episode
+            // of arrivals off cadence, and only when the stream is back on it, so a backlog still
+            // being delivered does not drag the clock through it in several jumps, and a clock
+            // that is merely behind (no stall) is dilated within the cap as it always was.
+            if (_recovering && _lastArrivalOnCadence)
+            {
+                _recovering = false;
+                if (errorSeconds > ResyncBehindSeconds)
+                {
+                    RenderTick = target;
+                    ClockResyncs++;
+                    return;
+                }
+            }
+
             double adjust = errorSeconds * config.ClockCatchUpRate;
             if (adjust > config.MaxClockRateAdjust) adjust = config.MaxClockRateAdjust;
             if (adjust < -config.MaxClockRateAdjust) adjust = -config.MaxClockRateAdjust;
 
             double rate = 1.0 + adjust;
+
+            // AHEAD OF EVERYTHING RECEIVED, WHILE SNAPSHOTS KEEP ARRIVING ON CADENCE: hold. Past
+            // the extrapolation cap and its hold every entity is already drawn at its newest
+            // sample, so holding the clock changes nothing on screen; it lets the newest tick
+            // catch up at the server's rate instead of the 10 % cap's. Not while the stream is
+            // silent (a server stall): there the clock runs on, as it always has, so the
+            // snapshots after the stall do not find it behind.
+            double aheadSeconds = (RenderTick - NewestTick) * SecondsPerTick;
+            if (_lastArrivalOnCadence
+                && _sinceArrival < config.MaxExtrapolationSpan
+                && aheadSeconds > config.MaxExtrapolation + config.ExtrapolationHold)
+            {
+                rate = 0.0;
+                AheadHoldFrames++;
+            }
 
             // Floored above zero unconditionally, whatever the config says. This is the
             // monotonicity invariant the continuity tests rest on: a clock that can stop
@@ -193,6 +389,14 @@ namespace Cuvara.Netcode.Interpolation
             RenderTick = 0.0;
             _lastReceiveTime = 0.0;
             _hasMeasurement = false;
+            _anchorTick = 0;
+            _anchorTime = 0.0;
+            _inRejectStreak = false;
+            _streakTick = 0;
+            _streakTime = 0.0;
+            _lastArrivalOnCadence = false;
+            _sinceArrival = 0.0;
+            _recovering = false;
         }
 
         private void ClampInterval(in InterpolationConfig config)

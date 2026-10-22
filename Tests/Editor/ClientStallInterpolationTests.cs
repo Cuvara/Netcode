@@ -313,7 +313,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 $"{path}: {RecoverWithinSeconds} s after the backlog the render clock must not be past the newest tick by more than the extrapolation cap");
             Assert.That(worstBehind, Is.LessThanOrEqualTo(hi),
                 $"{path}: {RecoverWithinSeconds} s after the backlog the render clock must be inside the delay window");
-            Assert.That(worstRate, Is.LessThanOrEqualTo(1.0 + config.MaxClockRateAdjust + 1e-6),
+            // Against the nominal 60 Hz: the clock's own seconds-per-tick is measured off 5 ms frames
+            // and carries a fraction of a percent of quantisation, which is not a rate violation.
+            Assert.That(worstRate, Is.LessThanOrEqualTo((1.0 + config.MaxClockRateAdjust) * 1.01),
                 $"{path}: after recovery the clock runs at the server's rate within the cap");
             if (judgeX)
             {
@@ -362,8 +364,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 worst = Math.Max(worst, Math.Abs(clock.SecondsPerTick * TickHz - 1.0));
             }
 
-            TestContext.WriteLine($"worst seconds-per-tick error {worst:P2}");
+            TestContext.WriteLine($"worst seconds-per-tick error {worst:P2}, rejected {clock.RejectedIntervalSamples}");
             Assert.That(worst, Is.LessThan(0.01), "neither the stall gap nor the backlog may move the rate");
+            Assert.That(clock.RejectedIntervalSamples, Is.EqualTo(30), "the stall gap and the 29 delivered behind it, each counted");
         }
 
         [TestCase(50.0)]  // 1.2x: inside the band, followed by the smoothing
@@ -380,7 +383,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 clock.NoteSnapshot(tick, now, 4, config);
             }
 
-            double end = now + 5.0 + 3.0; // InterpolationClock.RelearnSeconds, then three seconds
+            double end = now + InterpolationClock.RelearnSeconds + 3.0;
             while (now < end)
             {
                 tick += 4;
