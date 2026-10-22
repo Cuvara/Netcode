@@ -157,6 +157,20 @@
     <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />
   </ItemGroup>
 
+  <!--
+    The reconnect policy: a pure cause -> decision table (ReconnectPolicy) and the types it reads.
+    NetworkClient around it is UniTask-bound and stays Editor-only (ReconnectPolicyTests also
+    covers NetworkSettings, so it does too); ReconnectDecisionTableTests pins the table headless.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Client/ReconnectPolicy.cs" />
+    <Compile Include="../../Runtime/Client/NetworkException.cs" />
+    <Compile Include="../../Runtime/Client/SealedRefusalReason.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectCause.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectInfo.cs" />
+    <Compile Include="../../Tests/Editor/ReconnectDecisionTableTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="NUnit" Version="3.14.0" />
