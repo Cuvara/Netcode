@@ -135,6 +135,50 @@ namespace Cuvara.Netcode.Transport
         public int BufferedStreamBytes { get { lock (_lock) { return _streamEnd - _streamStart; } } }
 
         /// <summary>
+        /// Segments written but not yet acknowledged by the peer, queued or in flight. Zero means
+        /// everything written has arrived.
+        /// </summary>
+        public int PendingSendSegments { get { lock (_lock) { return _kcp.WaitSnd; } } }
+
+        /// <summary>Shortest wait a graceful close allows for its last frame to be acknowledged.</summary>
+        public const int MinCloseFlushMs = 100;
+
+        /// <summary>Longest wait a graceful close allows; see <see cref="CloseFlushBudgetMs"/>.</summary>
+        public const int MaxCloseFlushMs = 500;
+
+        /// <summary>
+        /// How long a graceful close waits for what it wrote to be acknowledged before it closes
+        /// the socket anyway: <see cref="CloseFlushBudget"/> of the current retransmission timeout.
+        /// </summary>
+        public int CloseFlushBudgetMs { get { lock (_lock) { return CloseFlushBudget((int)_kcp.RtoMs); } } }
+
+        /// <summary>
+        /// <c>min(max(2 x RTO, 100 ms), 500 ms)</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Two RTOs</b> cover the one loss worth waiting for: the frame goes out at once, a lost
+        /// datagram is resent when its RTO expires, and the acknowledgement of the resend needs
+        /// one round trip, which the RTO already exceeds. A second loss in a row is the link
+        /// failing, and the server's own timeout then releases the entity, as it did before.
+        /// </para>
+        /// <para>
+        /// <b>The floor</b> is for a fresh or fast link: the nodelay minimum RTO is 30 ms, and the
+        /// client's ARQ timer and its receive path both run on the player loop, so a resend and
+        /// the acknowledgement of it are each up to a frame late. <b>The ceiling</b> keeps a
+        /// leave on a bad link from holding the socket noticeably: RTO backs off into seconds,
+        /// and nothing about leaving should.
+        /// </para>
+        /// </remarks>
+        public static int CloseFlushBudget(int rtoMs)
+        {
+            int budget = 2 * rtoMs;
+            if (budget < MinCloseFlushMs) budget = MinCloseFlushMs;
+            if (budget > MaxCloseFlushMs) budget = MaxCloseFlushMs;
+            return budget;
+        }
+
+        /// <summary>
         /// A cryptographically random, non-zero conversation id. Per session, so a reconnect
         /// from the same endpoint is never mistaken for the old conversation and an off-path
         /// attacker cannot predict it from a process-wide counter.

@@ -62,6 +62,22 @@ namespace Cuvara.Netcode.Tests.Editor
             public void Dispose() { }
         }
 
+        /// <summary>Also records the flush that waits for the acknowledgement, as KCP does.</summary>
+        private sealed class FlushingTransport : RecordingTransport, IFlushableTransport
+        {
+            public bool Acknowledge = true;
+
+            public async UniTask<bool> FlushAsync(CancellationToken ct)
+            {
+                Events.Add("flush");
+
+                // An acknowledgement takes a little time on a real link.
+                await UniTask.Yield(PlayerLoopTiming.Update, ct);
+                Events.Add(Acknowledge ? "acked" : "timeout");
+                return Acknowledge;
+            }
+        }
+
         private sealed class SilentLog : INetLog
         {
             public void Info(string message) { }
@@ -98,6 +114,50 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "close" }),
                 "the disconnect frame reaches the transport, and only then is it closed");
             Assert.That(conn.CloseInfo?.Cause, Is.EqualTo(DisconnectCause.LocalClose));
+        }
+
+        [UnityTest]
+        public IEnumerator ALeave_WaitsForTheDisconnectToBeAcknowledged_ThenCloses()
+        {
+            var transport = new FlushingTransport();
+            var conn = Started(transport);
+
+            conn.Leave("bye");
+            yield return UntilClosed(transport);
+
+            TestContext.WriteLine(string.Join(" -> ", transport.Events));
+            Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "flush", "acked", "close" }),
+                "written, flushed to an acknowledgement, and only then closed");
+            Assert.That(conn.LeaveAcknowledged, Is.True);
+        }
+
+        [UnityTest]
+        public IEnumerator FramesQueuedBeforeTheLeave_GoFirst_AndNothingFollowsTheDisconnect()
+        {
+            var transport = new FlushingTransport();
+            var conn = Started(transport);
+
+            conn.Send(MsgType.Resync, new ResyncRequest());
+            conn.Leave("bye");
+            conn.Send(MsgType.Resync, new ResyncRequest()); // after the goodbye: dropped
+            yield return UntilClosed(transport);
+
+            TestContext.WriteLine(string.Join(" -> ", transport.Events));
+            Assert.That(transport.Events,
+                Is.EqualTo(new[] { "write:" + MsgType.Resync, "write:" + MsgType.Disconnect, "flush", "acked", "close" }));
+        }
+
+        [UnityTest]
+        public IEnumerator AnUnacknowledgedLeave_StillCloses()
+        {
+            var transport = new FlushingTransport { Acknowledge = false };
+            var conn = Started(transport);
+
+            conn.Leave("bye");
+            yield return UntilClosed(transport);
+
+            Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "flush", "timeout", "close" }));
+            Assert.That(conn.LeaveAcknowledged, Is.False);
         }
 
         [Test]

@@ -59,6 +59,13 @@ namespace Cuvara.Netcode.Connection
 
         private int _queueDepth;
         private int _started;
+
+        // Set once the disconnect frame of a graceful leave is queued: nothing may follow it.
+        private int _leaving;
+
+        // The body the write loop handed to the transport last, so a leave can tell when its
+        // disconnect frame has gone out.
+        private byte[] _lastWritten;
         private int _closeSignalled;
         private int _disposed;
         // Monotonic milliseconds (NetworkSettings.MonotonicClock), never wall
@@ -224,9 +231,22 @@ namespace Cuvara.Netcode.Connection
         /// </summary>
         public void Send(MsgType type, IWireMessage payload)
         {
+            if (Volatile.Read(ref _leaving) != 0)
+            {
+                // After the goodbye. The server stops reading this session at the disconnect
+                // frame, so anything queued behind it would only delay the acknowledgement.
+                return;
+            }
+
+            Enqueue(type, payload);
+        }
+
+        /// <summary>Encodes, seals and queues one frame; returns the queued body, or null.</summary>
+        private byte[] Enqueue(MsgType type, IWireMessage payload)
+        {
             if (Volatile.Read(ref _closeSignalled) != 0)
             {
-                return;
+                return null;
             }
 
             byte[] body;
@@ -239,7 +259,7 @@ namespace Cuvara.Netcode.Connection
                 // Our own message, so this is a bug on this side rather than a peer
                 // problem: log it and drop the frame rather than killing the session.
                 _log.Error($"{_name}: cannot encode {type}", ex);
-                return;
+                return null;
             }
 
             if (Interlocked.Increment(ref _queueDepth) > _settings.SendQueueCapacity &&
@@ -263,6 +283,8 @@ namespace Cuvara.Netcode.Connection
                 // Raced a Dispose(). The frame is simply never written, which is
                 // what "send on a closing connection" has to mean.
             }
+
+            return body;
         }
 
         /// <summary>
@@ -275,14 +297,84 @@ namespace Cuvara.Netcode.Connection
         }
 
         /// <summary>
-        /// Sends a polite <c>disconnect</c> and then closes. Best effort: the frame
-        /// is queued, so it only reaches the wire if the write loop is still alive.
+        /// Longest a leave waits for the write loop to hand its disconnect frame to the
+        /// transport. The loop resumes on the player loop, so this is normally one frame.
         /// </summary>
+        public const int LeaveWriteTimeoutMs = 500;
+
+        /// <summary>
+        /// Whether the last graceful leave's disconnect frame was acknowledged by the peer before
+        /// the connection closed: null until a leave has finished (or when the transport cannot
+        /// tell, as TCP cannot), true when it was, false when the bound ran out first.
+        /// </summary>
+        public bool? LeaveAcknowledged { get; private set; }
+
+        /// <summary>
+        /// Sends a polite <c>disconnect</c>, waits for it to be delivered, and then closes.
+        /// Returns at once; see <see cref="LeaveAsync"/>.
+        /// </summary>
+        /// <remarks>
+        /// The connection must not be disposed until the leave has finished, or the socket goes
+        /// with it: <c>GameSessionClient.Leave</c> hands the connection over for exactly that
+        /// reason.
+        /// </remarks>
         public void Leave(string reason = "")
         {
-            if (IsRunning)
+            LeaveAsync(reason).Forget();
+        }
+
+        /// <summary>
+        /// Sends a polite <c>disconnect</c>, waits until the transport has delivered it, then
+        /// closes. Bounded: at most <see cref="LeaveWriteTimeoutMs"/> for the write loop to take
+        /// the frame, then the transport's own flush budget (KCP:
+        /// <see cref="KcpClientSession.CloseFlushBudget"/>, at most 500 ms).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This used to queue the frame and close in the same call. Closing cancelled the write
+        /// loop before it ever ran, so the frame was never written, and on KCP even a written frame
+        /// needs the socket alive until it is acknowledged. The server therefore never saw a
+        /// graceful leave: both rpg-factory testlab S08G runs ended on the server's KCP dead-link
+        /// timeout instead.
+        /// </para>
+        /// <para>
+        /// The frame goes through the send queue rather than straight to the transport, so it is
+        /// sealed and written in order after everything queued before it. Nothing queued after it
+        /// is sent.
+        /// </para>
+        /// </remarks>
+        public async UniTask LeaveAsync(string reason = "")
+        {
+            if (IsRunning && Interlocked.Exchange(ref _leaving, 1) == 0)
             {
-                Send(MsgType.Disconnect, new DisconnectMessage { Reason = reason });
+                byte[] bye = Enqueue(MsgType.Disconnect, new DisconnectMessage { Reason = reason });
+                if (bye != null)
+                {
+                    try
+                    {
+                        var waited = System.Diagnostics.Stopwatch.StartNew();
+                        while (!ReferenceEquals(Volatile.Read(ref _lastWritten), bye)
+                               && IsRunning
+                               && waited.ElapsedMilliseconds < LeaveWriteTimeoutMs)
+                        {
+                            await UniTask.Yield(PlayerLoopTiming.Update, _cts.Token);
+                        }
+
+                        if (ReferenceEquals(Volatile.Read(ref _lastWritten), bye)
+                            && _transport is IFlushableTransport flushable)
+                        {
+                            LeaveAcknowledged = await flushable.FlushAsync(_cts.Token);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Closed or disposed meanwhile: nothing left to wait for.
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Warn($"{_name}: leave did not complete cleanly: {ex.Message}");
+                    }
+                }
             }
 
             Close(reason);
@@ -353,6 +445,7 @@ namespace Cuvara.Netcode.Connection
                     {
                         Interlocked.Decrement(ref _queueDepth);
                         await _transport.WriteFrameAsync(body, token);
+                        Volatile.Write(ref _lastWritten, body);
                     }
                 }
             }
