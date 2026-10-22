@@ -244,6 +244,15 @@ The offset decays by `OffsetDecayPerSecond` raised to the frame time, so the sam
 retired per second at any frame rate (about 99 % after 250 ms). Both values are constants on
 `LocalMovePredictor`, not settings.
 
+### After a client stall
+
+`Advance` never simulates more than `MaxCatchUpTicks` in one frame. The rest of a long frame
+is discarded (`ClampedFrames`, `DiscardedCatchUpSeconds`). The clock is then behind the
+server's tick line by the discarded time. `SteerToServerTick` does not walk that gap back at
+0.5 tick per snapshot. It jumps the clock onto the line (`StallResyncs`). Pending inputs,
+holds and the history are kept. Ordinary jitter never triggers a jump: it needs a clamped
+frame, or a clock that is behind by more than the catch-up budget.
+
 ## TickRateEstimator
 
 Measures the server's tick rate and the gap between snapshot ticks from snapshot

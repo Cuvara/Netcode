@@ -111,7 +111,7 @@ then interpolated at once. Reset is still the correct call.
 | Dropped snapshot | Interpolates across the gap at unchanged speed |
 | Early arrival | Sample waits in the buffer instead of displacing current segment |
 | Late arrival | Covered by the TargetDelay margin |
-| Reordered tick | Rejected by `InterpolationRing.Accepts`. `WorldState` itself still merges an older snapshot's entities (latent: KCP delivers in order; `SnapshotFreshnessTests`) |
+| Reordered tick | Rejected by `InterpolationRing.Accepts`. Upstream, `WorldState` drops a snapshot older than its tick and counts it (`StaleSnapshotsDropped`) |
 | Entity stops | The binder pushes no sample for an unchanged position. Past the newest sample the entity is extrapolated up to `MaxExtrapolation`, held for `ExtrapolationHold`, then eased back over `ExtrapolationSettle` |
 | Teleport / respawn | A last segment faster than `MaxExtrapolationSpeed` or longer than `MaxExtrapolationSpan` is not carried past the destination |
 | World tick goes backwards (new session) | The binder restarts its render timeline (`TickLineRestarts`) |

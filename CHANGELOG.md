@@ -4,6 +4,28 @@
 
 ### Fixed
 
+- **A client stall no longer leaves a stream of corrections behind it.** `Advance` discards
+  frame time beyond `MaxCatchUpTicks`. Before this fix, a 0.5 s or 2 s stall therefore left the
+  base tick 15 or 105 ticks behind the server. Below the 2 s `HardResyncTicks`,
+  `SteerToServerTick` closed that gap at 0.5 tick per snapshot, which took about 14 s for a 2 s
+  stall. Meanwhile the reconcile corrected the local player by a whole step 16 to 80 times.
+  This dates from 0.20.0. Now the steer jumps the clock onto the server's tick line in two
+  cases. The first is a clamped frame since the last steer with an error outside the 8-tick
+  steering band. The second is a clock that is behind by more than the catch-up budget before
+  the clamp, because the stalled frame's snapshot arrives before that frame's `Advance`. In the
+  second case the jump is credited against the coming `Advance`. Pending inputs, holds and the
+  history are kept. Each jump is counted in the new `StallResyncs`, and in `HardResyncs`.
+  Ordinary jitter is steered as before. `ClientHitchRecoveryTests` fails before: the clock is
+  still 15 or 105 ticks off at the second snapshot after the stall. Now the clock is within one
+  tick, with at most one correction of two steps or more.
+- **`WorldState` drops a snapshot older than its tick.** The shared merger keeps `Tick`
+  monotonic but merged the entities of a late snapshot over newer ones. A remote that had
+  stopped since was then drawn at the stale position until the next keyframe. This is latent,
+  because KCP delivers in order. Such a snapshot is now dropped and counted in the new
+  `StaleSnapshotsDropped`. A new session starts from `Reset()`, and `NetworkClient` resets its
+  world on every connect and reconnect, so a server with lower ticks is accepted.
+  `SnapshotFreshnessTests` fails before.
+
 - **`default(InterpolationConfig)` now normalises to the default extrapolation shaping.**
   `Normalized()` filled `ExtrapolationHold`, `ExtrapolationSettle` and `MaxExtrapolationSpan`
   only when negative, because zero is a meaningful explicit value for each. The all-zero struct
@@ -31,25 +53,22 @@
 
 ### Tests
 
-- 65 more headless tests (397 to 462). The Unity-free resolver, interpolation-continuity and
-  defer fixtures now also run headless. New fixtures:
+- 70 more headless tests (397 to 467, all passing). The Unity-free resolver,
+  interpolation-continuity and defer fixtures now also run headless. New fixtures:
   - `ReplayHistoryStagingTests`: the staged replay of 0.48.0, which had no test of its own.
   - `ServerStallRecoveryTests`
   - `SessionBoundaryResetTests`
   - `EntityLifecycleTests`
   - `InterpolationScenarioTests`
   - `KcpReliabilityTests`: loss, reorder, duplicates and a full receive window.
+  - `ClientHitchRecoveryTests`: a 0.5 s and a 2 s client stall, and a jitter guard.
+  - `SnapshotFreshnessTests`
   - `ReconnectDecisionTableTests`: every disconnect cause against every close reason.
   - `InterpolationConfigNormalizationTests`
   - `PredictorResetHistoryTests`
 
-  `PredictionHarness` gains a client hitch, a server tick stall and a per-reconcile
-  correction log.
-- Two fixtures **fail on purpose**. They describe defects that this branch does not fix:
-  - `ClientHitchRecoveryTests`: after a 0.5 s or 2 s client stall, the reconcile corrects by a
-    whole step 16 to 80 times. After 2 s, the clock is still 30 ticks behind 12 s later.
-  - `SnapshotFreshnessTests`: `WorldState` merges an older snapshot's entities. This is latent,
-    because KCP delivers in order.
+  `PredictionHarness` gains a client hitch, a server tick stall, frame jitter and a
+  per-reconcile correction log.
 
 ### Documentation
 
