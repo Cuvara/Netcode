@@ -1016,8 +1016,14 @@ any of this.**
 ### Wiring it up
 
 ```csharp
+// The tick rate is the server's BASE tick rate (60 Hz by default), not its 15 Hz
+// world/snapshot rate. Registered before the join, so a placeholder here...
 var predictor = new LocalMovePredictor(
-    new PredictionSettings(tickRate: 15, speed: 5f, MapBounds.Default));
+    new PredictionSettings(tickRate: 60, speed: 5f, MapBounds.Default));
+
+// ...replaced by the server's advertised rate after EVERY join, next to the model:
+predictor.UseServerProtocol(client.ServerProtocolVersion);
+predictor.UseServerTickRate(client.TickRate);
 
 var binder = new WorldViewBinder(view, predictor);
 
@@ -1035,6 +1041,28 @@ calls `SeedBaseTick` — **if you bind views yourself rather than through the bi
 call is yours to make**; see "The prediction contract you must not 'fix'" below. **You must
 call `AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
 renders at the newest received position, which is 0.4.0's behaviour.
+
+### The predictor's tick rate is the server's, adopted after the join
+
+`LocalMovePredictor` steps once per **base** tick and labels its history with base ticks in
+the server's tick space (snapshot `tick`, `ack_applied_tick`, `SeedBaseTick`). Its rate must be
+the rate the server simulates at — `GameSessionClient.TickRate` / `NetworkClient.TickRate`
+from the join reply — and a composition root that registers the predictor before any join
+cannot know it. **Call `UseServerTickRate(client.TickRate)` after every join, before the first
+reconcile**, next to `UseServerProtocol`. Same rate: nothing changes, so it is safe on every
+join. Different rate: the timestep, `MaxBankedTicks` and `MaxCatchUpTicks` are re-derived and the
+predictor is `Reset`. Zero ("not sent") keeps the constructed rate.
+
+**What skipping it costs, measured** (rpg-factory testlab run `20261022T042952Z-S09-h87z`): a
+game built its predictor with `GameConstants.DefaultTickRate` — **15**, the world rate —
+against a 60 Hz server. The 15 Hz clock, steered onto a 60 Hz tick line, fell 45 ticks a
+second behind and hard-resynchronised about once a second (dropping pending inputs and the
+hold); nearly every reconcile missed the history; corrections came in whole 15 Hz steps
+(`LastCorrection` **0.333** = four 60 Hz steps, on about half of all snapshots,
+`SmoothedCorrections` climbing at the snapshot rate); and a burst of late snapshots drew the
+local player **1.64 units in one frame**. No counter names that as a rate problem;
+`PredictionClockSteering.PredictorRateDisagrees` now does (the measured tick stream against
+`TickRateHz`, 15% tolerance). Pinned by `PredictorTickRateTests`.
 
 ### Why `AdvanceFrame` is not optional
 

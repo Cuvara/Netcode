@@ -237,9 +237,9 @@ namespace Cuvara.Netcode.Prediction
         public const float OffsetDecayPerSecond = 1e-8f;
 
         private readonly PendingInput[] _pending = new PendingInput[Capacity];
-        private readonly PredictionSettings _settings;
+        private PredictionSettings _settings; // the tick rate can be replaced by UseServerTickRate
         private float _speed;
-        private readonly float _dt;
+        private float _dt;
 
         private int _head;      // next write slot
         private int _count;     // live entries
@@ -275,7 +275,7 @@ namespace Cuvara.Netcode.Prediction
         // The simulated position as it stood BEFORE anything stepped the current base tick,
         // and the tick that snapshot belongs to. Used to re-take a tick's single step when a
         // real input turns up after the hold has already taken it -- see RecordInput.
-        private readonly int _maxCatchUpTicks;
+        private int _maxCatchUpTicks;
 
         /// <summary>
         /// Where the prediction stood at the end of each of the last <see cref="HistoryTicks"/>
@@ -471,7 +471,7 @@ namespace Cuvara.Netcode.Prediction
         /// approximate. An approximation drifts silently and reads as a network problem;
         /// an absence reads as "prediction is off", which is true and diagnosable.
         /// </remarks>
-        public bool IsEnabled { get; }
+        public bool IsEnabled { get; private set; }
 
         /// <summary>
         /// Position to render the local player at: the predicted position plus whatever
@@ -653,6 +653,72 @@ namespace Cuvara.Netcode.Prediction
             }
 
             _motor3D = motor;
+            Reset();
+        }
+
+        /// <summary>
+        /// Adopts the server's advertised base-tick rate (<c>GameSessionClient.TickRate</c> /
+        /// <c>NetworkClient.TickRate</c>, from the join reply) as this predictor's simulation rate.
+        /// </summary>
+        /// <param name="advertisedTickRate">
+        /// The rate the server simulates and stamps ticks at. Zero means "not sent" (a server
+        /// predating <c>tick_rate</c>) and changes nothing.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>Call it after every join, before the first <see cref="Reconcile(Vec2,long)"/></b>, next
+        /// to <see cref="UseServerProtocol"/>. The predictor is registered at the composition root,
+        /// before any join, so the rate it was constructed with is a guess; this replaces the guess
+        /// with the server's number. A call that keeps the rate changes nothing, so calling it on
+        /// every join is safe. A call that CHANGES the rate re-derives the timestep and everything
+        /// sized by it (<see cref="IntegrationTimestep"/>, <see cref="MaxBankedTicks"/>,
+        /// <see cref="MaxCatchUpTicks"/>) and <see cref="Reset"/>s -- state predicted on another
+        /// timestep, against base ticks seeded in another tick space, is not a starting point.
+        /// </para>
+        /// <para>
+        /// <b>What a wrong rate costs, measured</b> (rpg-factory testlab, run
+        /// 20261022T042952Z-S09-h87z). A game built its predictor with
+        /// <c>GameConstants.DefaultTickRate</c> -- 15, the old world rate -- against a server that
+        /// simulates at 60 Hz. Nothing could correct it after construction. The 15 Hz base clock,
+        /// steered onto the server's 60 Hz tick line, fell 45 ticks a second behind and was hard
+        /// resynchronised about once a second (each one dropping the pending inputs and the hold);
+        /// nearly every reconcile missed the history; every correction was a whole 15 Hz step --
+        /// <see cref="LastCorrection"/> 0.333, four 60 Hz steps, on about half of all snapshots --
+        /// and a late snapshot burst drew the local player up to 1.64 units in one frame. No
+        /// counter named the cause: a rate mismatch reads as network trouble.
+        /// </para>
+        /// </remarks>
+        public void UseServerTickRate(uint advertisedTickRate)
+        {
+            if (advertisedTickRate == 0u || advertisedTickRate > int.MaxValue)
+            {
+                return;
+            }
+
+            int rate = (int)advertisedTickRate;
+            if (rate == _settings.TickRate && !_settings.TickRateIsFallback)
+            {
+                return;
+            }
+
+            float dt = MovementSystem.DeltaTimeForTickRate(rate);
+            if (!(dt > 0f))
+            {
+                return;
+            }
+
+            bool changed = rate != _settings.TickRate;
+            _settings = PredictionSettings.FromServer(
+                advertisedTickRate, _settings.TickRate, _settings.Speed, _settings.Bounds);
+            if (!changed)
+            {
+                // Same number, now known to be the server's: only the fallback flag moves.
+                return;
+            }
+
+            _dt = dt;
+            _maxCatchUpTicks = GameConstants.MaxBankedMovementTicks(rate);
+            IsEnabled = _settings.IsUsable;
             Reset();
         }
 

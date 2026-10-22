@@ -87,6 +87,38 @@ namespace Cuvara.Netcode.Tests.Editor
             /// <summary>Seconds at the start of a run excluded from every statistic.</summary>
             public double WarmupSeconds;
 
+            /// <summary>
+            /// Tick rate the predictor is CONSTRUCTED with. 0 = the server's (60). A game that
+            /// registers its predictor before it has joined passes a constant here.
+            /// </summary>
+            public int PredictorTickRate;
+
+            /// <summary>
+            /// When nonzero, the client hands the predictor this advertised rate through
+            /// <see cref="LocalMovePredictor.UseServerTickRate"/> right after constructing it,
+            /// the way a game does once the join reply has arrived.
+            /// </summary>
+            public uint AdvertisedTickRate;
+
+            /// <summary>
+            /// Deliver snapshots in production order, as KCP does: a snapshot held back holds
+            /// back every later one with it (head-of-line blocking).
+            /// </summary>
+            public bool InOrderDownlink;
+
+            /// <summary>
+            /// When positive, the first <see cref="BurstSnapshots"/> snapshots produced at or after
+            /// this time are held until <see cref="BurstDelaySeconds"/> after the first of them
+            /// was produced (plus the downlink), and then delivered together.
+            /// </summary>
+            public double BurstAtSeconds;
+
+            /// <summary>How many consecutive snapshots the burst holds back.</summary>
+            public int BurstSnapshots;
+
+            /// <summary>How long the first held snapshot is late.</summary>
+            public double BurstDelaySeconds;
+
             public static Config Default => new Config
             {
                 ServerHz = 60.0,
@@ -128,9 +160,19 @@ namespace Cuvara.Netcode.Tests.Editor
             public int HardResyncs;
             public int Snaps;
 
+            /// <summary>Largest distance the rendered position moved in one moving frame, in units.</summary>
+            public double MaxFrameStep;
+
+            /// <summary>Reconciles the history could not answer (see LocalMovePredictor.HistoryMisses).</summary>
+            public int HistoryMisses;
+
+            /// <summary>Counted corrections of at least four base steps -- one snapshot interval.</summary>
+            public int CorrectionsAtLeastFourSteps;
+
             public override string ToString() =>
                 $"reconciles={Reconciles} nonzero={NonzeroCorrections} mean={MeanCorrection:F5} " +
-                $"max={MaxCorrection:F5} (>=1 step: {CorrectionsAtLeastOneStep}, step={StepLength:F4}) " +
+                $"max={MaxCorrection:F5} (>=1 step: {CorrectionsAtLeastOneStep}, >=4 steps: {CorrectionsAtLeastFourSteps}, " +
+                $"step={StepLength:F4}) misses={HistoryMisses} maxFrameStep={MaxFrameStep:F3} " +
                 $"frameMotion max={MaxFrameMotionRatio:F2}x over1.5x={FramesOverOneAndAHalf}/{MovingFrames} " +
                 $"offset final={FinalAckTickOffset} range=[{MinAckTickOffset},{MaxAckTickOffset}] " +
                 $"clientLead={FinalClientLeadTicks} " +
@@ -248,7 +290,13 @@ namespace Cuvara.Netcode.Tests.Editor
 
             var start = new Vec2(0f, 0f);
             var server = new ServerStub(NominalHz, c.Speed, start, startTick: 100_000);
-            var predictor = new LocalMovePredictor(new PredictionSettings(NominalHz, c.Speed, MapBounds.Default));
+            int constructedHz = c.PredictorTickRate > 0 ? c.PredictorTickRate : NominalHz;
+            var predictor = new LocalMovePredictor(new PredictionSettings(constructedHz, c.Speed, MapBounds.Default));
+            if (c.AdvertisedTickRate > 0u)
+            {
+                predictor.UseServerTickRate(c.AdvertisedTickRate);
+            }
+
             var steering = new PredictionClockSteering(predictor);
 
             result.StepLength = c.Speed / NominalHz;
@@ -261,6 +309,10 @@ namespace Cuvara.Netcode.Tests.Editor
             double nextServerTick = serverPeriod;
             double nextSend = 0.25;
             double now = 0.0;
+
+            double lastDownlinkArrival = 0.0;
+            int burstHeld = 0;
+            double burstRelease = 0.0;
 
             long inputTick = 0;
             long lastAppliedSnapshotTick = 0;
@@ -294,9 +346,27 @@ namespace Cuvara.Netcode.Tests.Editor
 
                     if (server.Tick % c.SnapshotEvery == 0)
                     {
+                        double arrival = nextServerTick + c.DownlinkSeconds + Jitter(rng, c.NetworkJitterSeconds);
+                        if (c.BurstAtSeconds > 0.0 && nextServerTick >= c.BurstAtSeconds && burstHeld < c.BurstSnapshots)
+                        {
+                            if (burstHeld == 0)
+                            {
+                                burstRelease = arrival + c.BurstDelaySeconds;
+                            }
+
+                            burstHeld++;
+                            if (arrival < burstRelease) arrival = burstRelease;
+                        }
+
+                        if (c.InOrderDownlink)
+                        {
+                            if (arrival < lastDownlinkArrival) arrival = lastDownlinkArrival;
+                            lastDownlinkArrival = arrival;
+                        }
+
                         downlink.Add(new InFlightSnapshot
                         {
-                            Arrival = nextServerTick + c.DownlinkSeconds + Jitter(rng, c.NetworkJitterSeconds),
+                            Arrival = arrival,
                             Tick = server.Tick,
                             AckTick = server.AckTick,
                             AckAppliedTick = server.AckAppliedTick,
@@ -334,6 +404,7 @@ namespace Cuvara.Netcode.Tests.Editor
                             correctionSum += correction;
                             if (correction > result.MaxCorrection) result.MaxCorrection = correction;
                             if (correction >= result.StepLength) result.CorrectionsAtLeastOneStep++;
+                            if (correction >= result.StepLength * 3.999f) result.CorrectionsAtLeastFourSteps++;
                             if (predictor.AckOffsetSamples > 0)
                             {
                                 long offset = predictor.AckTickOffset;
@@ -376,6 +447,7 @@ namespace Cuvara.Netcode.Tests.Editor
                     double ratio = motion / normal;
                     result.MovingFrames++;
                     if (ratio > result.MaxFrameMotionRatio) result.MaxFrameMotionRatio = ratio;
+                    if (motion > result.MaxFrameStep) result.MaxFrameStep = motion;
                     if (ratio > 1.5) result.FramesOverOneAndAHalf++;
                 }
 
@@ -389,6 +461,7 @@ namespace Cuvara.Netcode.Tests.Editor
             result.FinalClientLeadTicks = predictor.BaseTick - server.Tick;
             result.HardResyncs = predictor.HardResyncs;
             result.Snaps = predictor.Snaps;
+            result.HistoryMisses = predictor.HistoryMisses;
             if (result.MinAckTickOffset == long.MaxValue) result.MinAckTickOffset = 0;
             if (result.MaxAckTickOffset == long.MinValue) result.MaxAckTickOffset = 0;
             return result;

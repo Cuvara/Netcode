@@ -156,6 +156,22 @@ namespace Cuvara.Netcode.Prediction
         public int AckFloorRateFallbacks { get; private set; }
 
         /// <summary>
+        /// True when the rate the predictor simulates at (<see cref="LocalMovePredictor.TickRateHz"/>)
+        /// is contradicted by the server's tick stream measured off the wire
+        /// (<see cref="TickRateEstimator.Disagrees"/>, 15% tolerance). False until the estimator has
+        /// an estimate.
+        /// </summary>
+        /// <remarks>
+        /// Diagnostics, and deliberately nothing more: the measured rate is approximate and is never
+        /// adopted. True means the predictor was built at a rate that is not the server's and nobody
+        /// handed it the advertised one -- call <see cref="LocalMovePredictor.UseServerTickRate"/>
+        /// after the join. A predictor built at the 15 Hz world rate against a 60 Hz server reads
+        /// true within a second and corrects by a whole 15 Hz step (0.333 units at 5 u/s) on about
+        /// half of all snapshots.
+        /// </remarks>
+        public bool PredictorRateDisagrees => TickRate.Disagrees((int)_advertisedHz);
+
+        /// <summary>
         /// Records that an input has just been sent, so its acknowledgement can be timed.
         /// </summary>
         /// <param name="inputTick">The tick stamped on the input, as handed to <c>SendInput</c>.</param>

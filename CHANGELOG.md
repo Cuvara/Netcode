@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **A predictor registered before the join can now take the server's tick rate, so the local
+  player no longer corrects in whole 15 Hz steps against a 60 Hz server.** `LocalMovePredictor`'s
+  timestep was fixed at construction, and a game builds its one predictor at the composition
+  root - before any join - with a constant: the client used `GameConstants.DefaultTickRate`
+  (15, the world rate) against a server simulating at 60 Hz, and nothing could correct it after
+  the join. The 15 Hz base clock, steered onto the 60 Hz tick line, fell 45 ticks a second
+  behind and hard-resynchronised about once a second (dropping pending inputs and the hold),
+  nearly every reconcile missed the history, `LastCorrection` sat at 0.333 (one 15 Hz step =
+  four 60 Hz steps) on about half of all snapshots with `SmoothedCorrections` climbing at the
+  snapshot rate, and a late snapshot burst drew the local player 1.64 units in one frame. Found
+  by the rpg-factory testlab (run 20261022T042952Z-S09-h87z; a replay of its input and snapshot
+  timings through a 15 Hz predictor reproduced the live corrections and rendered positions
+  exactly, at 60 Hz it corrected nothing of the kind). New `UseServerTickRate` (below); the
+  consumer must call it after every join. Covered by `PredictorTickRateTests`: on a 60 Hz server
+  with 13 Hz sends, a 12 ms round trip and two snapshots delivered 160 ms late in a burst, a
+  predictor built at 15 Hz hard-resyncs 37 times in 30 s, corrects by four or more steps on 212
+  of 404 reconciles and moves the rendered player 9x its normal per-frame distance in one frame;
+  built at 15 and told 60 it is bit-identical to one built at 60 (0 resyncs, max correction one
+  step, max per-frame motion 1.19x). The `NETCODE.md` wiring example that showed
+  `tickRate: 15` now shows the base rate and the adoption call.
+
 - **A remote entity that stops, or is teleported and then stays, is drawn where the server says
   it is.** `SnapshotInterpolation` held the extrapolation at its 50 ms cap forever once the render
   clock passed an entity's newest sample - and an entity that stopped never gets a newer sample,
@@ -16,6 +37,18 @@
 
 ### Added
 
+- `LocalMovePredictor.UseServerTickRate(uint advertisedTickRate)`: adopts the server's advertised
+  base-tick rate (`NetworkClient.TickRate` / `GameSessionClient.TickRate`). Call after every join,
+  before the first reconcile, next to `UseServerProtocol`. The same rate changes nothing; a new
+  rate re-derives `IntegrationTimestep`, `MaxBankedTicks` and `MaxCatchUpTicks` and resets the
+  predictor; zero ("not sent") keeps the constructed rate. Additive: no existing signature
+  changes. `IsEnabled` now has a private setter so a predictor built with no rate is enabled by
+  the advertised one.
+- `PredictionClockSteering.PredictorRateDisagrees`: true when the measured tick stream contradicts
+  the predictor's rate by more than 15% - the mismatch above, named. Diagnostics only; the
+  measured rate is never adopted.
+- `PredictionHarness`: `PredictorTickRate`, `AdvertisedTickRate`, in-order downlink delivery and a
+  late-snapshot burst; `MaxFrameStep`, `HistoryMisses` and `CorrectionsAtLeastFourSteps` results.
 - `InterpolationConfig.ExtrapolationHold` (default 150 ms) and `ExtrapolationSettle` (default
   100 ms): after the cap, the entity is held, then eased (smoothstep) back onto its newest sample.
   The ease is a bounded backward motion (at most the 50 ms cap distance, only after 200 ms of

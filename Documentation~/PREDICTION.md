@@ -67,6 +67,7 @@ jump honoured only when grounded, step-up onto low boxes, a slope limit, and wal
 ```csharp
 // After every join, before the first Reconcile:
 predictor.UseServerProtocol(session.ServerProtocolVersion); // 3 -> motor, 2/0 -> planar
+predictor.UseServerTickRate(session.TickRate); // the server's BASE rate (60), not the 15 Hz world rate
 predictor.SetMapGeometry(mapGeometry);   // the SAME map file the server loaded; null = flat
 predictor.SetMotorParams(MotorParams.Default); // only if content overrides the defaults
 
@@ -84,6 +85,13 @@ Vec3 render = predictor.Position3; // server (x, y, z) -> Unity (x, z, y)
   for version 3 and the planar path for version 2 or an unversioned server. A call that changes
   the model resets the predictor; one that keeps it does nothing. The default is planar, so a
   consumer that never calls it behaves exactly as before.
+- **The tick rate is the server's, adopted the same way.** `UseServerTickRate` replaces the rate
+  the predictor was constructed with (a guess, at a composition root that runs before the join)
+  with the advertised one; a change re-derives the timestep and resets, the same rate or zero
+  changes nothing. A predictor left at the 15 Hz world rate against a 60 Hz server corrects by a
+  whole 15 Hz step (0.333) on about half of all snapshots and hard-resyncs its clock about once a
+  second; `PredictionClockSteering.PredictorRateDisagrees` reads true. See NETCODE.md "The
+  predictor's tick rate is the server's".
 - **The planar path is bit-identical to 0.45.0.** Under it height and vertical velocity stay 0,
   grounded stays true, and `jump` is ignored; every existing prediction test passes unchanged.
 - **Gravity does not wait for input.** The clock, rule 1, the hold window, the history
