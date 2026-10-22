@@ -28,6 +28,10 @@ namespace Cuvara.Netcode.Tests.Editor
         private const string RemoteId = "remote-user";
         private const double IntervalMs = 1000.0 / 15.0;
 
+        // The newest snapshot puts the remote at 12.25; the render clock runs the target delay
+        // behind it, so an interpolated remote is drawn short of it and a raw one exactly at it.
+        private const float InterpolatedBelow = 12.2f;
+
         private sealed class RecordingView : IEntityView
         {
             public readonly Dictionary<string, float> X = new Dictionary<string, float>();
@@ -101,7 +105,7 @@ namespace Cuvara.Netcode.Tests.Editor
             // Interpolated a little behind the newest snapshot (5 + 0.25 * 29 = 12.25), never at
             // the old session's positions and never frozen at the new session's first one.
             float remote = s.View.X[RemoteId];
-            Assert.That(remote, Is.InRange(11.0f, 12.25f), $"remote drawn at {remote}");
+            Assert.That(remote, Is.InRange(11.0f, InterpolatedBelow), $"remote drawn at {remote}");
         }
 
         [Test]
@@ -125,17 +129,28 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
-        public void Control_ResettingOnlyTheWorld_LeavesTheBinderOnTheOldTickLine()
+        public void WithoutTheBinderReset_ALowerTickLine_IsStillInterpolated()
         {
-            // What the binder reset is for: with the world reset alone, the binder's render
-            // clock is still ~100 000 ticks ahead of everything the new session sends.
+            // A caller that resets only the world (the client's reconnect path at 47ec933, UnityDots
+            // audit finding F2). The binder sees the world tick go backwards and treats it as the
+            // session boundary it is. Before this, nothing reached the interpolator until the new
+            // ticks passed the old ones: every remote was drawn at its raw snapshot position and
+            // RenderTick stayed in the old session's tick space (~100 000 here, ~216 000 after an
+            // hour at 60 Hz).
             var s = new Session();
             s.Play(firstTick: 100_000, count: 60, remoteFrom: -20f, localAt: -10f);
+            int boundaries = s.Binder.TickLineRestarts;
 
             s.World.Reset();
             s.Play(firstTick: 500, count: 30, remoteFrom: 5f, localAt: 8f);
 
-            Assert.That(s.Binder.RenderTick, Is.GreaterThan(100_000.0));
+            Assert.That(s.Binder.TickLineRestarts, Is.EqualTo(boundaries + 1));
+            Assert.That(s.Binder.LastServerTick, Is.EqualTo(500L + 4 * 29));
+            Assert.That(s.Binder.RenderTick, Is.LessThan(1000.0),
+                "the render clock belongs to the new session's tick line, not the old one's");
+            float remote = s.View.X[RemoteId];
+            Assert.That(remote, Is.InRange(11.0f, InterpolatedBelow),
+                $"remote drawn at {remote}: interpolated behind the newest snapshot (12.25), not at it");
         }
     }
 }

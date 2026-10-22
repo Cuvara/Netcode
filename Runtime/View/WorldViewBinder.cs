@@ -461,6 +461,13 @@ namespace Cuvara.Netcode.View
         public int Relocalizations { get; private set; }
 
         /// <summary>
+        /// Times the world's tick went backwards under this binder and the render timeline was
+        /// restarted on the new tick line. Nonzero means a session boundary was crossed without
+        /// <see cref="Reset"/> (the world was reset, the binder was not).
+        /// </summary>
+        public int TickLineRestarts { get; private set; }
+
+        /// <summary>
         /// Records ids a snapshot named in <c>removed</c>, so the next reconcile can
         /// attribute their despawn. Optional — call from a <c>SnapshotReceived</c> handler.
         /// </summary>
@@ -496,6 +503,17 @@ namespace Cuvara.Netcode.View
             }
 
             RelocalizeIfLocalIdChanged(localId);
+
+            // A world tick BELOW the newest one this binder has seen cannot happen within a
+            // session (WorldState.Tick never moves backwards), so it is a session boundary the
+            // caller did not report: the world was reset for a new join and this binder was not.
+            // Left alone, nothing reaches the interpolator until the new session's ticks pass the
+            // old ones -- remotes drawn at raw snapshot positions and RenderTick stuck in the old
+            // tick space, for as long as the old session ran (UnityDots audit finding F2).
+            if (world.Tick < _lastWorldTick)
+            {
+                RestartTickLine();
+            }
 
             double nowMs = _clock.NowMs;
             double nowSeconds = nowMs / 1000.0;
@@ -901,6 +919,28 @@ namespace Cuvara.Netcode.View
             _poseView?.SetPose(_localId, _localFacingBrad, _localAction, _localActionSeq);
         }
 
+        /// <summary>
+        /// Drops everything keyed to the old session's tick line: the render clock, the per-entity
+        /// sample rings (a lower tick would be rejected by every one of them) and the estimators
+        /// measured off those ticks. What is presented and the prediction stay; the next pass
+        /// re-samples every entity on the new tick line.
+        /// </summary>
+        private void RestartTickLine()
+        {
+            foreach (var kv in _interp)
+            {
+                Recycle(kv.Value.Ring);
+            }
+
+            _interp.Clear();
+            _interpClock.Reset();
+            _lastInterpAdvanceMs = -1.0;
+            _lastWorldTick = 0;
+            TickRate.Reset();
+            Staleness.Reset();
+            TickLineRestarts++;
+        }
+
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
         public void Reset()
         {
@@ -938,6 +978,7 @@ namespace Cuvara.Netcode.View
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
             Relocalizations = 0;
+            TickLineRestarts = 0;
         }
 
         /// <summary>
