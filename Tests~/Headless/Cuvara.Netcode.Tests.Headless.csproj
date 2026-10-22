@@ -123,6 +123,7 @@
     <Compile Include="../../Tests/Editor/ReplayRewindHistoryTests.cs" />
     <Compile Include="../../Tests/Editor/ReplayHistoryStagingTests.cs" />
     <Compile Include="../../Tests/Editor/ServerStallRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientHitchRecoveryTests.cs" />
     <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
     <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
