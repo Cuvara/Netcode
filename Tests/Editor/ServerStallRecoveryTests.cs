@@ -44,7 +44,7 @@ namespace Cuvara.Netcode.Tests.Editor
         internal static int StepCorrectionsFrom(PredictionHarness.Result r, double from)
         {
             int n = 0;
-            foreach (var (at, correction) in r.CorrectionLog)
+            foreach (var (at, correction, _) in r.CorrectionLog)
             {
                 if (at >= from && correction >= r.StepLength * 0.999f) n++;
             }

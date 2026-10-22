@@ -130,6 +130,12 @@ namespace Cuvara.Netcode.Tests.Editor
             public double HitchSeconds;
 
             /// <summary>
+            /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
+            /// of up to this much either way (an uneven frame rate).
+            /// </summary>
+            public double FrameJitterSeconds;
+
+            /// <summary>
             /// When <see cref="ServerStallSeconds"/> is positive, every server tick due in
             /// [<see cref="ServerStallAtSeconds"/>, +<see cref="ServerStallSeconds"/>) runs at the
             /// end of that window instead, back to back: a server stall (a GC pause, a blocked tick
@@ -191,8 +197,12 @@ namespace Cuvara.Netcode.Tests.Editor
             /// <summary>Counted corrections of at least four base steps -- one snapshot interval.</summary>
             public int CorrectionsAtLeastFourSteps;
 
-            /// <summary>Every counted reconcile in order: when it ran and how far it corrected.</summary>
-            public readonly List<(double At, float Correction)> CorrectionLog = new List<(double, float)>();
+            /// <summary>
+            /// Every counted reconcile in order: when it ran, how far it corrected, and the clock's
+            /// tick error at the steer that preceded it.
+            /// </summary>
+            public readonly List<(double At, float Correction, long TickError)> CorrectionLog =
+                new List<(double, float, long)>();
 
             /// <summary>The predictor's clock-rate scale at the end of the run (1 = the server's rate).</summary>
             public float FinalClockRateScale;
@@ -200,8 +210,11 @@ namespace Cuvara.Netcode.Tests.Editor
             /// <summary>The staleness estimator's fitted skew at the end of the run, in ppm.</summary>
             public double FinalSkewPpm;
 
-            /// <summary>Lead the steering was aiming for at the end of the run, in base ticks.</summary>
-            public long FinalTargetLeadTicks;
+            /// <summary>Frames whose time the predictor clamped (LocalMovePredictor.ClampedFrames).</summary>
+            public int ClampedFrames;
+
+            /// <summary>Clock jumps made for a stall (LocalMovePredictor.StallResyncs).</summary>
+            public int StallResyncs;
 
             public override string ToString() =>
                 $"reconciles={Reconciles} nonzero={NonzeroCorrections} mean={MeanCorrection:F5} " +
@@ -361,7 +374,9 @@ namespace Cuvara.Netcode.Tests.Editor
 
             while (now < c.DurationSeconds)
             {
-                double frame = c.FrameSeconds;
+                double frame = c.FrameJitterSeconds > 0.0
+                    ? c.FrameSeconds + Jitter(rng, c.FrameJitterSeconds)
+                    : c.FrameSeconds;
                 bool hitchFrame = false;
                 if (c.HitchSeconds > 0.0 && !hitched && now >= c.HitchAtSeconds)
                 {
@@ -451,7 +466,7 @@ namespace Cuvara.Netcode.Tests.Editor
                             if (correction > result.MaxCorrection) result.MaxCorrection = correction;
                             if (correction >= result.StepLength) result.CorrectionsAtLeastOneStep++;
                             if (correction >= result.StepLength * 3.999f) result.CorrectionsAtLeastFourSteps++;
-                            result.CorrectionLog.Add((now, correction));
+                            result.CorrectionLog.Add((now, correction, predictor.TickError));
                             if (predictor.AckOffsetSamples > 0)
                             {
                                 long offset = predictor.AckTickOffset;
@@ -518,8 +533,9 @@ namespace Cuvara.Netcode.Tests.Editor
             result.Snaps = predictor.Snaps;
             result.HistoryMisses = predictor.HistoryMisses;
             result.FinalClockRateScale = predictor.ClockRateScale;
+            result.ClampedFrames = predictor.ClampedFrames;
+            result.StallResyncs = predictor.StallResyncs;
             result.FinalSkewPpm = steering.Staleness.SkewPpm;
-            result.FinalTargetLeadTicks = predictor.TickError + server.Tick - predictor.BaseTick;
             if (result.MinAckTickOffset == long.MaxValue) result.MinAckTickOffset = 0;
             if (result.MaxAckTickOffset == long.MinValue) result.MaxAckTickOffset = 0;
             return result;

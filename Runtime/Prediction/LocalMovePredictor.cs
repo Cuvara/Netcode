@@ -937,6 +937,50 @@ namespace Cuvara.Netcode.Prediction
         public float DiscardedCatchUpSeconds { get; private set; }
 
         /// <summary>
+        /// Hard resynchronisations made because a clamped frame (a client stall) left the clock
+        /// behind the server's tick line. Counted in <see cref="HardResyncs"/> as well.
+        /// </summary>
+        /// <remarks>
+        /// The clamp discards the stalled time, so after a stall the base tick is behind by
+        /// whatever was discarded. Steering closes a gap at 0.5 tick per snapshot, about 7.5
+        /// ticks a second; a 2 s stall took ~14 s to close, and the reconcile corrected the local
+        /// player by a whole step on most snapshots until it had (ClientHitchRecoveryTests). The
+        /// first steer after a clamp therefore sets the clock instead, when the error is outside
+        /// the band ordinary steering works in. Without a clamp nothing changes: jitter is still
+        /// steered, never set.
+        /// </remarks>
+        public int StallResyncs { get; private set; }
+
+        // Set when Advance clamps a frame; read and cleared by the next SteerToServerTick.
+        private bool _clampedSinceSteer;
+
+        // Seconds of the next Advance already covered by a forward clock jump. Consumed by that
+        // one Advance; whatever it does not cover is dropped, so a jump that no long frame
+        // follows costs at most one frame of clock progress.
+        private float _jumpCredit;
+
+        /// <summary>
+        /// Moves the clock forward (or back) by <paramref name="delta"/> base ticks without
+        /// simulating them, after a stall left it behind the server's tick line.
+        /// </summary>
+        /// <remarks>
+        /// Only the clock moves. Inputs recorded before the stall were stamped on the right ticks
+        /// and keep them; the ticks jumped over carry no movement the client could have known
+        /// about, and replay integrates the hold across them with the same window rule the
+        /// server used, so a hold that expired during the stall expires in replay too. The ack
+        /// offsets and the history were measured on that same, correct alignment and stay. A hard
+        /// resync drops all of that instead, and the next reconcile then adopted the server's
+        /// position outright and rolled back everything predicted since: a second whole
+        /// correction for one stall.
+        /// </remarks>
+        private void JumpClock(long delta)
+        {
+            _baseTick += delta;
+            _tickAccumulator = 0f;
+            RecordHistory(_baseTick, _predicted);
+        }
+
+        /// <summary>
         /// Base ticks on which the held direction actually moved the entity.
         /// </summary>
         /// <remarks>
@@ -1781,7 +1825,14 @@ namespace Cuvara.Netcode.Prediction
                 // the RENDERING of a step against the real frame clock and are correct in
                 // client seconds; a few percent there is invisible, while a few percent here
                 // is a standing offset of whole ticks.
-                _tickAccumulator += deltaTime * _clockRateScale;
+                float scaled = deltaTime * _clockRateScale;
+                if (_jumpCredit > 0f)
+                {
+                    scaled -= System.Math.Min(_jumpCredit, scaled);
+                    _jumpCredit = 0f;
+                }
+
+                _tickAccumulator += scaled;
 
                 // A SINGLE FRAME MAY NOT MANUFACTURE AN UNBOUNDED NUMBER OF TICKS.
                 //
@@ -1811,6 +1862,7 @@ namespace Cuvara.Netcode.Prediction
                     DiscardedCatchUpSeconds += _tickAccumulator - maxAccumulated;
                     ClampedFrames++;
                     _tickAccumulator = maxAccumulated;
+                    _clampedSinceSteer = true;
                 }
 
                 while (_tickAccumulator >= _dt)
@@ -2031,8 +2083,38 @@ namespace Cuvara.Netcode.Prediction
             long error = _baseTick - target;
             TickError = error;
 
+            // A STALL IS A PHASE EVENT, NOT DRIFT: move the clock onto the server's tick line
+            // rather than walk it back at 0.5 tick per snapshot. See StallResyncs. Two ways to
+            // see one, and only these two -- ordinary jitter is steered exactly as before:
+            //
+            //  - a frame was clamped since the last steer, and the error is outside the band
+            //    steering works in: the clamp discarded the stalled time;
+            //  - the clock is BEHIND by more than the catch-up budget with no clamp yet: the
+            //    stalled frame's snapshot is being handled before that frame's Advance. Jumping
+            //    now gives the input this frame records the tick it really has; the jumped time
+            //    is then credited against the coming Advance, which would otherwise simulate it
+            //    a second time. Nothing else puts the clock that far behind -- Advance follows
+            //    real time, and a snapshot's jitter moves the target by a tick or two.
+            bool clamped = _clampedSinceSteer;
+            _clampedSinceSteer = false;
+            if (error <= HardResyncTicks && error >= -HardResyncTicks)
+            {
+                bool afterClamp = clamped
+                                  && (error > SteerIntegralBandTicks || error < -SteerIntegralBandTicks);
+                bool beforeClamp = !clamped && error < -_maxCatchUpTicks;
+                if (afterClamp || beforeClamp)
+                {
+                    JumpClock(-error);
+                    if (beforeClamp) _jumpCredit = -error * _dt;
+                    StallResyncs++;
+                    HardResyncs++;
+                    return;
+                }
+            }
+
             if (error > HardResyncTicks || error < -HardResyncTicks)
             {
+
                 // Too far to walk back. Steering out two seconds at the rate below would
                 // take a minute of visibly wrong speed, which is worse than one correction
                 // the reconcile is about to smooth anyway.
@@ -2349,6 +2431,8 @@ namespace Cuvara.Netcode.Prediction
             System.Array.Clear(_history, 0, HistoryTicks);
             System.Array.Clear(_historyTick, 0, HistoryTicks);
             _replayStageCount = 0;
+            _clampedSinceSteer = false;
+            _jumpCredit = 0f;
         }
 
 
