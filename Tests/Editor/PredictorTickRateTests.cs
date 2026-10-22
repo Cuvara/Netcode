@@ -174,6 +174,21 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void UseServerTickRate_ChangingTheRate_KeepsTheAdoptedServerSpeed()
+        {
+            // A rate change mid-session is not a new session: the server's speed for this entity,
+            // already adopted from a snapshot, must not fall back to the configured default.
+            LocalMovePredictor p = NewPredictor(WorldRateTheGameRegisters);
+            p.SetServerSpeed(7.5f);
+            Assume.That(p.EffectiveSpeed, Is.EqualTo(7.5f));
+
+            p.UseServerTickRate(ServerHz);
+
+            Assert.That(p.TickRateHz, Is.EqualTo(ServerHz));
+            Assert.That(p.EffectiveSpeed, Is.EqualTo(7.5f));
+        }
+
+        [Test]
         public void UseServerTickRate_TheSameRate_ChangesNothing()
         {
             // Safe to call after every join, including a reconnect to the same server.

@@ -43,7 +43,8 @@
   base-tick rate (`NetworkClient.TickRate` / `GameSessionClient.TickRate`). Call after every join,
   before the first reconcile, next to `UseServerProtocol`. The same rate changes nothing; a new
   rate re-derives `IntegrationTimestep`, `MaxBankedTicks` and `MaxCatchUpTicks` and resets the
-  predictor; zero ("not sent") keeps the constructed rate. Additive: no existing signature
+  predictor, keeping a server speed already adopted from a snapshot; zero ("not sent") keeps the
+  constructed rate. Additive: no existing signature
   changes. `IsEnabled` now has a private setter so a predictor built with no rate is enabled by
   the advertised one.
 - `PredictionClockSteering.PredictorRateDisagrees`: true when the measured tick stream contradicts

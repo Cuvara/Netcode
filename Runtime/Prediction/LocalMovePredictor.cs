@@ -719,7 +719,13 @@ namespace Cuvara.Netcode.Prediction
             _dt = dt;
             _maxCatchUpTicks = GameConstants.MaxBankedMovementTicks(rate);
             IsEnabled = _settings.IsUsable;
+
+            // Same session, same entity: a server speed already adopted from a snapshot stays.
+            // Reset() returns it to the configured fallback because it is also the new-session
+            // path; a rate change is not a new session.
+            float speed = _speed;
             Reset();
+            _speed = speed;
         }
 
         /// <summary>
