@@ -2340,6 +2340,15 @@ namespace Cuvara.Netcode.Prediction
             AckOffsetSamples = 0;
             AckOffsetChanges = 0;
             AckOffsetUnresolved = 0;
+
+            // The history belongs to the session that recorded it. Left in place, a new session
+            // whose ticks overlap the old one's -- a reconnect to a server that restarted, or one
+            // whose tick line happens to cross -- could have a reconcile naming a tick before its
+            // own first step answered by where the PREVIOUS player was, and "correct" by the
+            // distance between the two (PredictorResetHistoryTests).
+            System.Array.Clear(_history, 0, HistoryTicks);
+            System.Array.Clear(_historyTick, 0, HistoryTicks);
+            _replayStageCount = 0;
         }
 
 
