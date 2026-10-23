@@ -115,6 +115,12 @@ snapshot (rpg-factory testlab S13). Now:
   extrapolation hold window (`MaxExtrapolation + ExtrapolationHold`), it holds at the rate
   floor (`AheadHoldFrames`). Every entity is drawn at its newest sample there anyway.
 
+**The first measurement (0.48.0).** Until the rate is measured, the seed is
+`DefaultInterval` over the tick gap observed between snapshots. The first measurement is taken
+over at least `FirstMeasurementSeconds` (0.25 s) from the first snapshot. Before that, a
+bunched join pair (31 ms for two ticks of a 30 Hz server) became the rate, the band then refused
+the real one for 5 s, and the first joiner rendered at twice the server's rate (S12).
+
 Both exceptions are forward-only. Neither happens under jitter.
 `ClientStallInterpolationTests` covers the binder and the capped-delta clock with a paced
 backlog.

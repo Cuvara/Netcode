@@ -281,6 +281,11 @@ replayed the input from a whole stall back, and the next one took the overshoot 
 corrections per stall (S13 run uwrf). `PredictionHarness.InputBeforeSnapshot` runs the harness
 in the client's order.
 
+**Unity's late `deltaTime`.** `Time.deltaTime` reports the previous frame. A stall inside a
+frame therefore reaches `Advance` one frame after the jump made in it. The jump credit lasts for
+two `Advance` calls, so that next frame does not simulate the stall a second time
+(`JumpCreditSpentSeconds`). `PredictionHarness.DeltaTimeLagsOneFrame` models it.
+
 ## TickRateEstimator
 
 Measures the server's tick rate and the gap between snapshot ticks from snapshot

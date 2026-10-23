@@ -41,6 +41,29 @@
   `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
   `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
   before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **A stall jump's credit survives Unity's late `deltaTime`.** `Time.deltaTime` reports the
+  previous frame, so a stall inside a frame reaches `Advance` one frame later. The jump made in
+  the stall frame spent its credit on that frame's 1.3 ms delta and dropped the rest. The next
+  frame then simulated the capped 0.333 s again (15 clamped ticks): the player stepped about
+  1.25 u forward, the clock ran 15 ticks ahead, and the next snapshot took both back. Every
+  stall cost two corrections (rpg-factory testlab S13, runs 20261023T010311Z-S13-3zhl, -j8xw,
+  -9zy5). The credit now lasts for two `Advance` calls (`JumpCreditSpentSeconds`).
+  `PredictionHarness.DeltaTimeLagsOneFrame` reproduces Unity's timing.
+  `ClientHitchRecoveryTests.AClientStall_WithUnitysLateDeltaTime_*` fails before (14 steps,
+  the clock 13 to 15 ticks ahead, then 14 back) and now passes.
+- **A first joiner learns the server's rate through a bunched join.** The render clock took
+  its first two snapshots as the first rate measurement outright. Live, they arrived 31 ms apart
+  for two ticks of a 30 Hz server (15.5 ms per tick). The real 33 ms then sat outside the 2x
+  band and was refused until the 5 s relearn. The first joiner's clock ran at about 60 ticks a
+  second, 93 ticks past the newest snapshot, then froze for about 4.5 s (S12, run
+  20261023T010228Z-S12-qiaw). Two changes:
+  - Until the rate is measured, the seed is the nominal interval over the tick gap actually
+    observed.
+  - The first measurement spans at least `InterpolationClock.FirstMeasurementSeconds` (0.25 s)
+    from the first snapshot.
+
+  `ClientStallInterpolationTests.AFirstJoiner_LearnsTheServersRate_ThroughABunchedJoin` (30 Hz
+  and 60 Hz) fails before and now passes.
 - **The input recorded in the frame that ends a stall moves with the jump.** The client
   records a frame's input in `DotsWorldBridge.Update`, before `LocalPredictionSystem` steers on
   and reconciles the frame's snapshot. In the frame that ends a stall, that input was therefore
