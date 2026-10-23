@@ -115,6 +115,14 @@ namespace Cuvara.Netcode.Interpolation
         public const double RelearnSeconds = 5.0;
 
         /// <summary>
+        /// Shortest span, from the first snapshot, that the first rate measurement is taken over.
+        /// About four snapshot intervals at 15 Hz: long enough that the bunching of a join does not
+        /// set the rate, short enough that the seed (the nominal interval over the observed tick
+        /// gap) is used only briefly.
+        /// </summary>
+        public const double FirstMeasurementSeconds = 0.25;
+
+        /// <summary>
         /// Seconds behind <see cref="TargetTick"/> past which the clock is set forward rather than
         /// dilated, once the stream is back on its cadence.
         /// </summary>
@@ -240,8 +248,31 @@ namespace Cuvara.Netcode.Interpolation
             _sinceArrival = 0.0;
             if (!_lastArrivalOnCadence) _recovering = true;
 
+            // UNTIL MEASURED, THE SEED FOLLOWS THE TICK GAP. The seed assumes the nominal snapshot
+            // interval over a tick gap the caller may not know yet (the binder's is confirmed only
+            // on its second sighting, the DOTS path passes none), and a gap of one made it 15 ticks
+            // a second against a 30 Hz server. The gap between the first snapshots is a fact.
+            long arrivalTickDelta = tick - NewestTick;
+            if (!_hasMeasurement && arrivalTickDelta > 0 && arrivalTickDelta < 16)
+            {
+                SecondsPerTick = config.DefaultInterval / arrivalTickDelta;
+                ClampInterval(config);
+            }
+
             long tickDelta = tick - _anchorTick;
             double secondsDelta = receiveTimeSeconds - _anchorTime;
+
+            // THE FIRST MEASUREMENT SPANS AT LEAST FirstMeasurementSeconds. A join delivers its first
+            // snapshots close together: live, the first two of a 30 Hz server arrived 31 ms apart for
+            // two ticks. Taken as the rate (15.5 ms per tick) and then guarded by the band, the
+            // real 36 ms per tick sat at 2.3x and was refused for the whole RelearnSeconds, and the
+            // first joiner's render clock ran at about 60 ticks a second, 93 ticks past the newest
+            // snapshot, then froze (rpg-factory testlab S12, run 20261023T010228Z-S12-qiaw).
+            if (!_hasMeasurement && secondsDelta < FirstMeasurementSeconds)
+            {
+                tickDelta = 0;
+            }
+
             if (tickDelta > 0 && secondsDelta > 0.0)
             {
                 double perTick = secondsDelta / tickDelta;

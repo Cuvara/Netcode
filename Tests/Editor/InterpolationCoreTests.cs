@@ -115,7 +115,7 @@ namespace Cuvara.Netcode.Tests.Editor
             // first measurement waits for InterpolationClock.FirstMeasurementSeconds, so it is
             // taken over the span from the first snapshot (here 0.27 s, two ticks).
             clock.NoteSnapshot(1, 0.0, 1, config);
-            Assume.That(Nominal * 2.0 * 2.0, Is.GreaterThanOrEqualTo(0.25));
+            Assume.That(Nominal * 2.0 * 2.0, Is.GreaterThanOrEqualTo(InterpolationClock.FirstMeasurementSeconds));
             clock.NoteSnapshot(2, Nominal * 2.0, 1, config);
             clock.NoteSnapshot(3, Nominal * 2.0 * 2.0, 1, config);
 
