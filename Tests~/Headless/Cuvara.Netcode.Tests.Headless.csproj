@@ -69,6 +69,7 @@
     <Compile Include="../../Tests/Editor/KcpReliabilityTests.cs" />
     <Compile Include="../../Tests/Editor/TransportReceivePacingTests.cs" />
     <Compile Include="../../Tests/Editor/KcpCloseFlushTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpSilenceTests.cs" />
   </ItemGroup>
 
   <!--
@@ -157,6 +158,7 @@
     <Compile Include="../../Tests/Editor/SnapshotFreshnessTests.cs" />
     <Compile Include="../../Tests/Editor/SessionBoundaryResetTests.cs" />
     <Compile Include="../../Tests/Editor/EntityLifecycleTests.cs" />
+    <Compile Include="../../Tests/Editor/EntityReentryTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationScenarioTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationConfigNormalizationTests.cs" />
     <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />

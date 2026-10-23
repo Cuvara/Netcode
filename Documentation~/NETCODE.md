@@ -596,6 +596,27 @@ eviction from a gateway build that predates `kick` — is reported as
 `server_shutdown` are the only reasons emitted today; anything else is handled
 generically.
 
+## A dropped session is detected by silence (0.48.0)
+
+KCP's dead link (20 unacknowledged retransmissions) is not enough after a client freeze. An
+acknowledgement read on waking is timed as one long round trip, the RTO grows to seconds, and the
+20 retransmissions then take minutes. A client whose session the server had already dropped kept
+sending for 31 s, until its heartbeat timeout (S09 soak e26z).
+
+`KcpClientSession` therefore fails the session after `DefaultSilenceTimeoutMs` (5 s) without any
+datagram from the server. The failure is a `TransportError`, and `ReconnectPolicy` reconnects as for
+any transport error.
+
+- **What counts:** only time while the client runs. A `Tick` more than 250 ms after the previous
+  one is a freeze and is not counted, so the freeze itself never trips it. The backlog read on
+  waking resets the count.
+- **Why 5 s:**
+  - A live session hears a snapshot every world tick (66.7 ms) and a ping every 10 s.
+  - The server's own KCP gives up after 3.45 s at a 30 ms RTO, or 4.6 s at 40 ms.
+  - 5 s is past both, and it is 75 world intervals.
+- **Before any datagram has arrived:** the check is off. The join timeout and the 60 s idle
+  timeout cover that phase.
+
 ## Leaving: the disconnect frame is delivered (0.48.0)
 
 `WireConnection.Leave` used to queue the `disconnect` frame and close in the same call.

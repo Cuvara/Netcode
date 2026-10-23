@@ -303,6 +303,13 @@ namespace Cuvara.Netcode.World
             }
 
             LastAppliedRemovedCount = removed?.Length ?? 0;
+            if (_removedSinceTake != null && removed != null)
+            {
+                for (var i = 0; i < removed.Length; i++)
+                {
+                    if (!string.IsNullOrEmpty(removed[i])) _removedSinceTake.Add(removed[i]);
+                }
+            }
 
             long ackBefore = AckTick;
 
@@ -339,6 +346,42 @@ namespace Cuvara.Netcode.World
             _merger.Reset();
             _hasMerged = false;
             AckAppliedTick = 0L;
+            _removedSinceTake?.Clear();
+        }
+
+        // Ids named in `removed` since the last TakeRemovedIds; null until a consumer asks for them.
+        private HashSet<string> _removedSinceTake;
+
+        /// <summary>
+        /// Moves every id that a snapshot named as removed since the last call into
+        /// <paramref name="into"/>, which is cleared first. The first call turns the tracking on.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why.</b> A consumer that polls the merged world once per frame sees an id that was
+        /// removed and added again between two polls as one entity that never left. Its view entry,
+        /// interpolation samples included, then carries over from the old incarnation. That happens
+        /// whenever several snapshots merge in one frame, and a backlog read in one frame after a
+        /// client freeze does exactly that. Live, entities re-entering the area of interest were
+        /// first drawn 0.27 u from where they had left it, 4 u from where they really were
+        /// (rpg-factory testlab S09 soak 20261023T040945Z-S09-e26z, entity_lifecycle, all at the
+        /// freeze-resume frames). <see cref="View.WorldViewBinder"/> calls this every frame.
+        /// </para>
+        /// <para>
+        /// Off until first called, so a world nobody drains does not accumulate ids.
+        /// </para>
+        /// </remarks>
+        public void TakeRemovedIds(List<string> into)
+        {
+            into.Clear();
+            if (_removedSinceTake == null)
+            {
+                _removedSinceTake = new HashSet<string>();
+                return;
+            }
+
+            foreach (var id in _removedSinceTake) into.Add(id);
+            _removedSinceTake.Clear();
         }
     }
 }

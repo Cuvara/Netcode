@@ -162,6 +162,16 @@ namespace Cuvara.Netcode.View
         private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
+
+        // Ids the world reported removed since the previous Tick. See WorldState.TakeRemovedIds.
+        private readonly List<string> _removedThisTick = new List<string>();
+
+        /// <summary>
+        /// Entities removed and added again between two <see cref="Tick"/> calls, and respawned in
+        /// the view rather than continued: a re-entry into the area of interest or a reused id
+        /// whose removal and return merged into one frame. Diagnostics.
+        /// </summary>
+        public int RespawnsWithinAFrame { get; private set; }
         private readonly List<string> _gone = new List<string>();
 
         /// <summary>
@@ -503,6 +513,29 @@ namespace Cuvara.Netcode.View
             }
 
             RelocalizeIfLocalIdChanged(localId);
+
+            // REMOVED AND BACK WITHIN ONE FRAME: a new incarnation, not the same entity. Ended here
+            // so the loop below spawns it fresh, with an empty sample ring (see
+            // WorldState.TakeRemovedIds for the live failure this removes).
+            world.TakeRemovedIds(_removedThisTick);
+            for (var i = 0; i < _removedThisTick.Count; i++)
+            {
+                var removedId = _removedThisTick[i];
+                if (!_live.Contains(removedId))
+                {
+                    continue;
+                }
+
+                _explicitlyRemoved.Add(removedId);
+                if (world.EntityMap.ContainsKey(removedId))
+                {
+                    _live.Remove(removedId);
+                    ReleaseRing(removedId);
+                    _view.Despawn(removedId);
+                    _explicitlyRemoved.Remove(removedId);
+                    RespawnsWithinAFrame++;
+                }
+            }
 
             // A world tick BELOW the newest one this binder has seen cannot happen within a
             // session (WorldState.Tick never moves backwards), so it is a session boundary the

@@ -41,6 +41,31 @@
   `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
   `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
   before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **A client whose session the server dropped during a freeze reconnects within 5 s.** In the
+  S09 soak 20261023T040945Z-S09-e26z, three clients froze for about 4.5 s, and the server's KCP
+  dropped each session about 3.1 s in.
+  - Two clients failed on their own KCP dead-link counter about 3.5 s after waking.
+  - The third kept sending into the dropped session and reconnected only on its 40 s heartbeat
+    timeout (a 31.8 s snapshot gap). An acknowledgement read after a freeze is timed as one long
+    round trip, and the RTO went from 30 ms to seconds (`KcpSilenceTests`: 30 ms to 676 ms after a
+    0.6 s late read). The 20-retransmission dead link then takes minutes.
+  - Now `KcpClientSession` fails the session after `DefaultSilenceTimeoutMs` (5 s) without a
+    datagram, counted only while the client runs: a tick more than 250 ms after the previous one
+    is a freeze and is not counted. That fail is a `TransportError`, which reconnects as before.
+  - Why 5 s: the server sends a snapshot every 66.7 ms and pings every 10 s, and its own dead link
+    at the shared tuning is 3.45 to 4.6 s.
+  - New: `AwakeSilentMs`, `SilenceFailures` and `RtoMs` on `KcpClientSession`, and
+    `KcpTransport(…, silenceTimeoutMs)`.
+  - `KcpSilenceTests` fails before (still alive 6 s after waking).
+- **An entity removed and back within one frame is respawned, not interpolated from where it
+  left.** `WorldViewBinder` polls the world once per frame. When several snapshots merged in one
+  frame, which is what a backlog read after a freeze does, an id that left the area of interest
+  and came back was continued with its old sample ring. Live, such entities were first drawn
+  0.27 u from where they had left and about 4 u from where they were (S09 e26z
+  `entity_lifecycle`, all at the freeze-resume frames). `WorldState.TakeRemovedIds` now reports
+  the removals since the binder's last tick, and the binder despawns and respawns such an id
+  (`RespawnsWithinAFrame`). `EntityReentryTests` fails before (drawn from 9.40 after a return
+  at 40).
 - **A 500 ms stall costs one correction, not two.** The client uses a snapshot one frame after
   it arrives. A stall's backlog, read in the stall frame, was therefore reconciled in the next
   frame, after that frame's `Advance`. The restamp above took only inputs recorded since the last

@@ -64,6 +64,7 @@ namespace Cuvara.Netcode.Transport
 
         private readonly string _transportKey;
         private readonly int _idleTimeoutMs;
+        private readonly int _silenceTimeoutMs;
 
         private UdpClient _udp;
         private KcpClientSession _session;
@@ -123,13 +124,17 @@ namespace Cuvara.Netcode.Transport
         /// <see cref="KcpClientSession.DefaultIdleTimeoutMs"/> by default.
         /// </param>
         /// <exception cref="NotSupportedException">On WebGL, which has no UDP.</exception>
-        public KcpTransport(string transportKey = null, int idleTimeoutMs = KcpClientSession.DefaultIdleTimeoutMs)
+        public KcpTransport(
+            string transportKey = null,
+            int idleTimeoutMs = KcpClientSession.DefaultIdleTimeoutMs,
+            int silenceTimeoutMs = KcpClientSession.DefaultSilenceTimeoutMs)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
             throw new NotSupportedException(WebGlNotSupportedMessage);
 #else
             _transportKey = transportKey;
             _idleTimeoutMs = idleTimeoutMs;
+            _silenceTimeoutMs = silenceTimeoutMs;
 #endif
         }
 
@@ -203,7 +208,9 @@ namespace Cuvara.Netcode.Transport
                 SendDatagram,
                 NowMs,
                 $"{host}:{port} (udp {address})",
-                _idleTimeoutMs);
+                _idleTimeoutMs,
+                KcpClientSession.MaxStreamBytes,
+                _silenceTimeoutMs);
 
             _cts = new CancellationTokenSource();
             ReceiveLoopAsync(_cts.Token).Forget();

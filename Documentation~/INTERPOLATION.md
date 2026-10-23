@@ -115,6 +115,13 @@ snapshot (rpg-factory testlab S13). Now:
   extrapolation hold window (`MaxExtrapolation + ExtrapolationHold`), it holds at the rate
   floor (`AheadHoldFrames`). Every entity is drawn at its newest sample there anyway.
 
+**Removed and back within one frame (0.48.0).** The binder polls the merged world once per
+frame, so an id removed and added again by snapshots merged in the same frame looked like one
+entity that never left. Its old samples then pulled the new incarnation's first frames toward
+where the old one had been. `WorldState.TakeRemovedIds` reports the removals since the binder's
+last tick, and the binder despawns and respawns such an id with an empty ring
+(`RespawnsWithinAFrame`).
+
 **The first measurement (0.48.0).** Until the rate is measured, the seed is
 `DefaultInterval` over the tick gap observed between snapshots. The first measurement is taken
 over at least `FirstMeasurementSeconds` (0.25 s) from the first snapshot. Before that, a

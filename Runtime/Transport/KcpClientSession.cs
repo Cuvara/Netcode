@@ -49,6 +49,48 @@ namespace Cuvara.Netcode.Transport
         public const int DefaultIdleTimeoutMs = 60_000;
 
         /// <summary>
+        /// Silence from the server, counted only while this client was running, that fails the
+        /// session as dead. 0 disables the check.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why.</b> After a 4.5 s client freeze, the server's KCP declared the session dead
+        /// about 3.1 s into it and dropped it. Two clients failed on their own dead-link counter
+        /// about 3.5 s after waking up and reconnected. The third kept sending into the dropped
+        /// session for 31 s and reconnected only on its heartbeat timeout (rpg-factory testlab
+        /// S09 soak 20261023T040945Z-S09-e26z). An acknowledgement that arrives during a freeze
+        /// is timed as one long round trip, the retransmission timeout grows from 30 ms to
+        /// seconds, and the dead-link count of 20 retransmissions then takes minutes
+        /// (<c>KcpSilenceTests</c>).
+        /// </para>
+        /// <para>
+        /// <b>The number.</b> A live gameplay session is never silent:
+        /// <list type="bullet">
+        /// <item>the server sends a snapshot every world tick (15 Hz, 66.7 ms), empty or not, and
+        /// pings every 10 s;</item>
+        /// <item>the server's own KCP gives up on a peer after 20 unacknowledged retransmissions,
+        /// which at the shared tuning (nodelay, 30 ms minimum RTO, half-RTO backoff) is 3.45 s on
+        /// a LAN and 4.6 s at a 40 ms RTO.</item>
+        /// </list>
+        /// 5 s is past that horizon, so by then the server has dropped the session if it was alive,
+        /// and it is 75 world intervals, far past any jitter or server stall the lab has shown
+        /// (worst 1 s).
+        /// </para>
+        /// <para>
+        /// <b>Counted while running only.</b> A tick more than <see cref="MaxCountedTickGapMs"/>
+        /// after the previous one means the client itself was frozen. That time is not the
+        /// server's silence, and the backlog read on waking resets the count anyway.
+        /// </para>
+        /// </remarks>
+        public const int DefaultSilenceTimeoutMs = 5_000;
+
+        /// <summary>
+        /// Longest gap between two <see cref="Tick"/> calls that still counts towards silence.
+        /// Longer is a client freeze (or a frame of that length) and is not counted.
+        /// </summary>
+        public const int MaxCountedTickGapMs = 250;
+
+        /// <summary>
         /// Upper bound on reassembled-but-unparsed stream bytes: one maximum frame (header +
         /// 1 MiB body) plus one MTU of slack. Bytes are only drained from the ARQ while no
         /// complete frame is buffered, so a well-formed stream can never reach it; the rest
@@ -72,6 +114,9 @@ namespace Cuvara.Netcode.Transport
         private int _streamStart;
         private int _streamEnd;
         private long _lastInboundMs;
+        private readonly int _silenceTimeoutMs;
+        private long _awakeSilentMs;
+        private long _lastTickMs = -1;
         private long _datagramsReceived;
         private long _datagramsRejected;
         private string _failure;
@@ -90,7 +135,8 @@ namespace Cuvara.Netcode.Transport
             Func<long> clockMs,
             string remote,
             int idleTimeoutMs = DefaultIdleTimeoutMs,
-            int maxStreamBytes = MaxStreamBytes)
+            int maxStreamBytes = MaxStreamBytes,
+            int silenceTimeoutMs = DefaultSilenceTimeoutMs)
         {
             if (conv == 0)
             {
@@ -113,6 +159,7 @@ namespace Cuvara.Netcode.Transport
             _kcp.SetMtu(TuningMtu - _cryptoHeaderSize);
 
             _lastInboundMs = _clockMs();
+            _silenceTimeoutMs = silenceTimeoutMs;
         }
 
         public uint Conv => _kcp.Conv;
@@ -130,6 +177,18 @@ namespace Cuvara.Netcode.Transport
         public string FailureReason { get { lock (_lock) { return _failure; } } }
 
         public bool IsFailed => FailureReason != null;
+
+        /// <summary>
+        /// Milliseconds of server silence counted so far, while this client was running. See
+        /// <see cref="DefaultSilenceTimeoutMs"/>.
+        /// </summary>
+        public long AwakeSilentMs { get { lock (_lock) { return _awakeSilentMs; } } }
+
+        /// <summary>The ARQ's current retransmission timeout, in milliseconds. Diagnostics.</summary>
+        public uint RtoMs { get { lock (_lock) { return _kcp.RtoMs; } } }
+
+        /// <summary>Sessions this object failed for silence (0 or 1). Diagnostics.</summary>
+        public int SilenceFailures { get; private set; }
 
         /// <summary>Unparsed stream bytes held. Diagnostics and tests.</summary>
         public int BufferedStreamBytes { get { lock (_lock) { return _streamEnd - _streamStart; } } }
@@ -256,6 +315,7 @@ namespace Cuvara.Netcode.Transport
 
                 _datagramsReceived++;
                 _lastInboundMs = _clockMs();
+                _awakeSilentMs = 0;
             }
         }
 
@@ -281,7 +341,24 @@ namespace Cuvara.Netcode.Transport
                     return false;
                 }
 
-                var silentMs = _clockMs() - _lastInboundMs;
+                long now = _clockMs();
+                long sinceTick = _lastTickMs < 0 ? 0 : now - _lastTickMs;
+                _lastTickMs = now;
+                if (_datagramsReceived > 0 && sinceTick > 0 && sinceTick <= MaxCountedTickGapMs)
+                {
+                    _awakeSilentMs += sinceTick;
+                }
+
+                if (_silenceTimeoutMs > 0 && _awakeSilentMs >= _silenceTimeoutMs)
+                {
+                    SilenceFailures++;
+                    Fail($"KCP dead session: no datagram from {_remote} for {_awakeSilentMs / 1000.0:F1} s " +
+                         $"while this client was running (limit {_silenceTimeoutMs / 1000.0:F1} s); the server " +
+                         "has dropped this session");
+                    return false;
+                }
+
+                var silentMs = now - _lastInboundMs;
                 if (_idleTimeoutMs > 0 && silentMs >= _idleTimeoutMs)
                 {
                     Fail($"KCP idle timeout: no UDP datagram from {_remote} for {silentMs / 1000.0:F1} s " +
