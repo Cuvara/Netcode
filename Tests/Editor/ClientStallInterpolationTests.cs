@@ -340,6 +340,78 @@ namespace Cuvara.Netcode.Tests.Editor
             AssertRecovered(frames, drainEndedAt, $"capped delta, {stallSeconds} s stall", judgeX: false);
         }
 
+        /// <summary>
+        /// The first joiner of a 30 Hz server whose world rate is 15 Hz: two ticks per snapshot, and
+        /// the first two snapshots arrive bunched (31 ms apart, as the join frames delivered them
+        /// live). The render clock starts before anything about the rate is known.
+        /// </summary>
+        /// <remarks>
+        /// The clock took the bunched pair as its first measurement outright: 15.5 ms per tick.
+        /// The real 33 ms then sat at 2.15x and was refused by the 2x band until the 5 s relearn.
+        /// The first joiner's clock ran at about 60 ticks a second, 93 ticks past the newest
+        /// snapshot, and then froze for about 4.5 s (rpg-factory testlab S12, run
+        /// 20261023T010228Z-S12-qiaw; the rerun -m0zc joined differently and passed).
+        /// </remarks>
+        [TestCase(30.0, 2)]
+        [TestCase(60.0, 4)]
+        public void AFirstJoiner_LearnsTheServersRate_ThroughABunchedJoin(double serverHz, int ticksPerSnapshot)
+        {
+            var clock = new ManualClock();
+            var world = new WorldState();
+            var view = new RecordingView();
+            var binder = new WorldViewBinder(view, null, clock, InterpolationConfig.Default);
+            double interval = ticksPerSnapshot / serverHz;
+            long firstTick = 163;
+
+            var frames = new List<(double At, long Newest, double Render)>();
+            long next = firstTick;
+            double now = 4.0;
+            double nextArrival = 4.0864; // the first snapshot, as live
+            int k = 0;
+            while (now < 14.0)
+            {
+                now += 0.005;
+                if (now >= nextArrival)
+                {
+                    world.Apply(new ResolvedSnapshot(next, 0L, k == 0,
+                        new[] { new ResolvedEntity(RemoteId, "player", (float)(next / serverHz * Speed), 0f, 100, 100) },
+                        new string[0]));
+                    // The second snapshot is bunched onto the first (31 ms later), then the cadence.
+                    nextArrival = k == 0 ? nextArrival + 0.031 : nextArrival + interval;
+                    next += ticksPerSnapshot;
+                    k++;
+                }
+
+                clock.NowMs = now * 1000.0;
+                binder.Tick(world, LocalId);
+                frames.Add((now, world.Tick, binder.RenderTick));
+            }
+
+            var config = InterpolationConfig.Default;
+            double lo = -config.MaxExtrapolation * serverHz - 0.5;
+            double hi = (config.TargetDelay + interval) * serverHz + 2.0;
+            double worstAhead = double.NegativeInfinity, worstBehind = double.NegativeInfinity, worstRate = 0.0;
+            (double At, long Newest, double Render) last = default;
+            foreach (var f in frames)
+            {
+                if (f.At < 4.0864 + 1.5)
+                {
+                    last = f;
+                    continue;
+                }
+
+                worstAhead = Math.Max(worstAhead, f.Render - f.Newest);
+                worstBehind = Math.Max(worstBehind, f.Newest - f.Render);
+                worstRate = Math.Max(worstRate, (f.Render - last.Render) / ((f.At - last.At) * serverHz));
+                last = f;
+            }
+
+            TestContext.WriteLine($"{serverHz} Hz: ahead max {worstAhead:F2}, behind max {worstBehind:F2} (window {hi:F2}), rate max {worstRate:F3}x");
+            Assert.That(worstAhead, Is.LessThanOrEqualTo(-lo), "1.5 s after the join the clock is not past the newest snapshot");
+            Assert.That(worstBehind, Is.LessThanOrEqualTo(hi), "and it is inside the delay window");
+            Assert.That(worstRate, Is.LessThanOrEqualTo((1.0 + config.MaxClockRateAdjust) * 1.02), "running at the server's rate");
+        }
+
         [Test]
         public void ABacklogAndAStallGap_AreNotRateSamples()
         {

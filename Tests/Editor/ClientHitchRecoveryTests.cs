@@ -199,9 +199,38 @@ namespace Cuvara.Netcode.Tests.Editor
         [TestCase(PredictionHarness.Motion.Circle, 2.0, true, 1.0 / 120.0)]
         [TestCase(PredictionHarness.Motion.StartStop, 2.0, true, 1.0 / 120.0)]
         public void AClientStall_WithTheInputSampledBeforeTheSnapshot_CostsAtMostOneCorrection(
-            PredictionHarness.Motion motion, double stallSeconds, bool pacedBacklog, double frameSeconds)
+            PredictionHarness.Motion motion, double stallSeconds, bool pacedBacklog, double frameSeconds) =>
+            RunClientOrderStall(motion, stallSeconds, pacedBacklog, frameSeconds, deltaLags: false);
+
+        /// <summary>
+        /// The client's order with Unity's frame timing as well: <c>Time.deltaTime</c> reports the
+        /// previous frame, so the stall reaches <c>Advance</c> one frame after the stall-end frame
+        /// has recorded its input and applied the backlog.
+        /// </summary>
+        /// <remarks>
+        /// Live on 461be3a every stall cost two corrections (rpg-factory testlab S13, runs
+        /// 20261023T010311Z-S13-3zhl, -j8xw, -9zy5). In the stall frame the clock jumped onto the
+        /// server's line, and the jump credit was spent on that frame's 1.3 ms deltaTime. The next
+        /// frame then advanced the capped 0.333 s (15 ticks clamped): the player stepped about 1.25 u
+        /// forward, the clock ran 15 ticks ahead, and the next snapshot jumped it back and corrected
+        /// the player back.
+        /// </remarks>
+        [TestCase(PredictionHarness.Motion.Circle, 0.5, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 0.5, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 2.0, false, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, false, 1.0 / 500.0)]
+        [TestCase(PredictionHarness.Motion.Circle, 2.0, true, 1.0 / 120.0)]
+        [TestCase(PredictionHarness.Motion.StartStop, 0.5, true, 1.0 / 120.0)]
+        public void AClientStall_WithUnitysLateDeltaTime_CostsAtMostOneCorrection(
+            PredictionHarness.Motion motion, double stallSeconds, bool pacedBacklog, double frameSeconds) =>
+            RunClientOrderStall(motion, stallSeconds, pacedBacklog, frameSeconds, deltaLags: true);
+
+        private static void RunClientOrderStall(
+            PredictionHarness.Motion motion, double stallSeconds, bool pacedBacklog, double frameSeconds, bool deltaLags)
         {
             PredictionHarness.Config c = ServerStallRecoveryTests.Scenario(motion);
+            c.DeltaTimeLagsOneFrame = deltaLags;
             c.FrameSeconds = frameSeconds;
             c.HitchAtSeconds = EventAt;
             c.HitchSeconds = stallSeconds;
@@ -209,7 +238,7 @@ namespace Cuvara.Netcode.Tests.Editor
             c.MaxFrameDeltaSeconds = 1.0 / 3.0;
             if (pacedBacklog) c.BacklogSpacingSeconds = 0.010;
             PredictionHarness.Result r = PredictionHarness.Run(c);
-            TestContext.WriteLine($"{stallSeconds} s stall, input first, paced={pacedBacklog}, {frameSeconds * 1000.0:F1} ms frames: {r}");
+            TestContext.WriteLine($"{stallSeconds} s stall, input first, deltaLags={deltaLags}, paced={pacedBacklog}, {frameSeconds * 1000.0:F1} ms frames: {r}");
             Assume.That(r.Reconciles, Is.GreaterThan(250), "precondition: the run reconciled");
 
             double drained = EventAt + stallSeconds + (pacedBacklog ? stallSeconds * 15.0 * 0.010 : 0.0) + 0.15;

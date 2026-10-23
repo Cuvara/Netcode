@@ -159,6 +159,16 @@ namespace Cuvara.Netcode.Tests.Editor
             public bool InputBeforeSnapshot;
 
             /// <summary>
+            /// Hand the predictor each frame's duration one frame late, as Unity's
+            /// <c>Time.deltaTime</c> does: a frame reports how long the PREVIOUS frame took. A stall
+            /// inside a frame therefore reaches <c>Advance</c> only in the frame after it, after that
+            /// frame's input and snapshot have already been handled (rpg-factory testlab S13, run
+            /// 20261023T010610Z-S13-j8xw: the backlog was applied in the stall frame, f24528, and the
+            /// 2 s arrived as deltaTime in f24529).
+            /// </summary>
+            public bool DeltaTimeLagsOneFrame;
+
+            /// <summary>
             /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
             /// of up to this much either way (an uneven frame rate).
             /// </summary>
@@ -400,6 +410,7 @@ namespace Cuvara.Netcode.Tests.Editor
             Vec2 previous = default;
 
             bool hitched = false;
+            double previousFrame = c.FrameSeconds;
             bool pacing = false;
 
             while (now < c.DurationSeconds)
@@ -605,9 +616,11 @@ namespace Cuvara.Netcode.Tests.Editor
                     }
                 }
 
-                predictor.Advance((float)(c.MaxFrameDeltaSeconds > 0.0 && frame > c.MaxFrameDeltaSeconds
+                double reported = c.DeltaTimeLagsOneFrame ? previousFrame : frame;
+                previousFrame = frame;
+                predictor.Advance((float)(c.MaxFrameDeltaSeconds > 0.0 && reported > c.MaxFrameDeltaSeconds
                     ? c.MaxFrameDeltaSeconds
-                    : frame));
+                    : reported));
 
                 // ── What the player sees ──
                 Vec2 shown = predictor.Position;

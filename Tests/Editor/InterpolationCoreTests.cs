@@ -86,12 +86,15 @@ namespace Cuvara.Netcode.Tests.Editor
         public void ASkippedTickDoesNotChangeTheSecondsPerTickEstimate()
         {
             var clock = new InterpolationClock();
-            clock.NoteSnapshot(1, 0.0, 1, Config);
-            clock.NoteSnapshot(2, Nominal, 1, Config);
-            var settled = clock.SecondsPerTick;
 
-            // Tick 3's snapshot never arrives; tick 4 turns up at its own natural time.
-            clock.NoteSnapshot(4, Nominal * 3.0, 1, Config);
+            // Settled first: the first measurement spans InterpolationClock.FirstMeasurementSeconds.
+            long tick = 1;
+            for (; tick <= 8; tick++) clock.NoteSnapshot(tick, (tick - 1) * Nominal, 1, Config);
+            var settled = clock.SecondsPerTick;
+            Assume.That(settled, Is.EqualTo(Nominal).Within(1e-9), "precondition: measured");
+
+            // The next snapshot never arrives; the one after turns up at its own natural time.
+            clock.NoteSnapshot(tick + 1, tick * Nominal, 1, Config);
 
             Assert.That(clock.SecondsPerTick, Is.EqualTo(settled).Within(1e-9),
                 $"the estimate moved from {settled * 1000.0:F2} ms to " +
@@ -108,9 +111,13 @@ namespace Cuvara.Netcode.Tests.Editor
             var config = Config;
             var clock = new InterpolationClock();
 
-            // Seeded at the nominal rate, but the server is actually running at half of it.
+            // Seeded at the nominal rate, but the server is actually running at half of it. The
+            // first measurement waits for InterpolationClock.FirstMeasurementSeconds, so it is
+            // taken over the span from the first snapshot (here 0.27 s, two ticks).
             clock.NoteSnapshot(1, 0.0, 1, config);
+            Assume.That(Nominal * 2.0 * 2.0, Is.GreaterThanOrEqualTo(0.25));
             clock.NoteSnapshot(2, Nominal * 2.0, 1, config);
+            clock.NoteSnapshot(3, Nominal * 2.0 * 2.0, 1, config);
 
             Assert.That(clock.SecondsPerTick, Is.EqualTo(Nominal * 2.0).Within(1e-9),
                 "the seed is a guess from a nominal rate and a tick gap that may not be " +
@@ -118,8 +125,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 "at a wrong rate for seconds after every join");
 
             // And thereafter it smooths.
-            clock.NoteSnapshot(3, Nominal * 3.0, 1, config);
-            var expected = Nominal * 2.0 * (1.0 - config.IntervalSmoothing) + Nominal * config.IntervalSmoothing;
+            // 1.5x nominal: inside the band the estimate (2x nominal) accepts, not on its edge.
+            clock.NoteSnapshot(4, Nominal * 2.0 * 2.0 + Nominal * 1.5, 1, config);
+            var expected = Nominal * 2.0 * (1.0 - config.IntervalSmoothing) + Nominal * 1.5 * config.IntervalSmoothing;
             Assert.That(clock.SecondsPerTick, Is.EqualTo(expected).Within(1e-9),
                 "after the first measurement the estimate must be smoothed, not replaced, " +
                 "or one jittery arrival would set the whole render rate");
