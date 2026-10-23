@@ -289,6 +289,14 @@ tick or the one before it, and it skips inputs that reconcile's snapshot acknowl
 ticks is jumped. The 8-tick steering band is for jitter, and a stall slightly longer than the
 clamp left the clock 7 to 8 ticks behind.
 
+**The stall frame's own input (live trace replay, 0.48.0).** In the client, the frame that ends a
+stall records its input and then calls `Advance` with the stall as its delta. The clamp then runs
+15 ticks after an input that was really sampled at the end of them. A clamped `Advance` therefore
+moves the inputs recorded since the previous `Advance` to the clamp's end tick
+(`InputsMovedToClampEnd`), where the next jump's restamp finds them. This was found and verified by
+replaying recorded live traces (`LiveTraceReplayTests`, `Tests/Editor/Fixtures/S13Traces`), not by a
+model of the frame order.
+
 **Unity's late `deltaTime`.** `Time.deltaTime` reports the previous frame. A stall inside a
 frame therefore reaches `Advance` one frame after the jump made in it. The jump credit lasts for
 two `Advance` calls, so that next frame does not simulate the stall a second time

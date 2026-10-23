@@ -1060,6 +1060,67 @@ namespace Cuvara.Netcode.Prediction
         private long _restampDelta;
         private long _restampMinAdvance;
 
+        /// <summary>
+        /// Inputs moved to the end of a clamped frame because they were recorded in it, after the
+        /// stall and before its Advance. Lifetime total. See <see cref="RestampedInputs"/>.
+        /// </summary>
+        /// <remarks>
+        /// The client records the frame's input, then advances by the frame's delta. In the frame
+        /// that ends a stall that delta is the stall, so the input was stamped at the stall's first
+        /// tick and the clamped catch-up ran after it. The input was really sampled at the end of
+        /// that span. The next frame's jump moves the clock by the rest of the stall, and the
+        /// restamp moves inputs stamped on the clock's tick. An input left at the start of the
+        /// clamp was missed, and the reconcile replayed it from there, on top of a server position
+        /// that did not contain it yet: one correction forward, and one back on the next snapshot.
+        /// This happened at 5 of 6 stalls in rpg-factory testlab S13, runs 20261023T054339Z-S13-me2y
+        /// and 20261023T054440Z-S13-wqel, reproduced exactly by replaying their traces
+        /// (<c>LiveTraceReplayTests</c>).
+        /// </remarks>
+        public int InputsMovedToClampEnd { get; private set; }
+
+        /// <summary>
+        /// Whether <see cref="InputsMovedToClampEnd"/> applies. On by default. A replay turns it off
+        /// to reproduce a session recorded before it existed, bit for bit, which is what validates
+        /// the replay before it judges the change (<c>LiveTraceReplayTests</c>).
+        /// </summary>
+        internal bool MoveStallFrameInputs { get; set; } = true;
+
+        private void MoveThisFramesInputsToTheClampEnd(long clampFrom)
+        {
+            long to = _baseTick;
+            if (to == clampFrom)
+            {
+                return;
+            }
+
+            bool moved = false;
+            for (int i = 0; i < _count; i++)
+            {
+                int slot = (_head + i) % Capacity;
+                PendingInput input = _pending[slot];
+
+                // Recorded since the previous Advance (this Advance has already counted itself),
+                // on the tick the clamp started from.
+                if (_pendingAdvance[slot] != _advanceCount - 1 || input.BaseTick != clampFrom)
+                {
+                    continue;
+                }
+
+                _pending[slot] = new PendingInput(
+                    input.Tick, input.MoveX, input.MoveY, to, input.LastMoveTickBefore, input.Jump);
+                InputsMovedToClampEnd++;
+                moved = true;
+            }
+
+            if (!moved)
+            {
+                return;
+            }
+
+            if (_heldFrom == clampFrom) _heldFrom = to;
+            if (_tickStartTick == clampFrom) _tickStartTick = to;
+        }
+
         private void DeferRestamp(long delta)
         {
             _restampPending = true;
@@ -2039,12 +2100,14 @@ namespace Cuvara.Netcode.Prediction
                 // the budget is DISCARDED rather than carried -- carrying it is the same
                 // burst one frame later.
                 float maxAccumulated = _dt * _maxCatchUpTicks;
+                long clampFrom = -1;
                 if (_tickAccumulator > maxAccumulated)
                 {
                     DiscardedCatchUpSeconds += _tickAccumulator - maxAccumulated;
                     ClampedFrames++;
                     _tickAccumulator = maxAccumulated;
                     _clampedSinceSteer = true;
+                    clampFrom = _baseTick;
                 }
 
                 while (_tickAccumulator >= _dt)
@@ -2093,6 +2156,11 @@ namespace Cuvara.Netcode.Prediction
                     }
 
                     RecordHistory(_baseTick, _predicted);
+                }
+
+                if (clampFrom >= 0 && MoveStallFrameInputs)
+                {
+                    MoveThisFramesInputsToTheClampEnd(clampFrom);
                 }
             }
 

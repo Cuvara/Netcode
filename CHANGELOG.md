@@ -41,6 +41,24 @@
   `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
   `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
   before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **The input recorded in a stall frame is moved to the end of the clamp (live S13 replayed).**
+  The client records a frame's input and then advances by the frame's delta. In the frame that ends
+  a stall, that delta is the stall itself.
+  - The input was stamped on the stall's first tick, and the clamped catch-up then ran 15 ticks after
+    it.
+  - The next frame's jump restamps only inputs on the clock's current tick, so it missed this one.
+  - The reconcile then replayed the input from the start of the clamp, on top of a server position
+    that did not contain it yet. That was one correction forward, and one back on the next
+    snapshot: 1.0 to 1.33 u each, at 5 of 6 stalls (rpg-factory testlab S13, runs
+    20261023T054220Z-S13-2v6e, -me2y, -wqel).
+  - A clamped `Advance` now moves the inputs recorded since the previous `Advance` to the clamp's
+    end tick (`InputsMovedToClampEnd`).
+
+  `LiveTraceReplayTests` replays the three recorded traces. The fixtures are under
+  `Tests/Editor/Fixtures/S13Traces`, with their provenance and the dev_arena map. With the change
+  off, every reconcile matches the recording bit for bit. With it on, all six stalls have no snap,
+  against 2/2/2/2/2/0 live, and nothing changes outside the stalls. The synthetic harness never
+  showed this, because it does not put the stall's delta in the same frame as the stall-end input.
 - **A client whose session the server dropped during a freeze reconnects within 5 s.** In the
   S09 soak 20261023T040945Z-S09-e26z, three clients froze for about 4.5 s, and the server's KCP
   dropped each session about 3.1 s in.

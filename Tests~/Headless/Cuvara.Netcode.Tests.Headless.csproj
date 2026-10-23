@@ -131,6 +131,8 @@
     <Compile Include="../../Tests/Editor/ServerStallRecoveryTests.cs" />
     <Compile Include="../../Tests/Editor/ClientHitchRecoveryTests.cs" />
     <Compile Include="../../Tests/Editor/PredictorTraceTests.cs" />
+    <Compile Include="../../Tests/Editor/LiveTraceReplayTests.cs" />
+    <Compile Include="../../Runtime/Json/*.cs" />
     <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
     <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
