@@ -24,6 +24,9 @@ namespace Cuvara.Netcode.Client
     {
         private readonly NetworkSettings _settings;
         private readonly ITransportFactory _transports;
+
+        // The current connection's transport, for its diagnostics only.
+        private ITransport _transport;
         private readonly IWireCodec _codec;
         private readonly INetLog _log;
         private readonly SnapshotResolver _resolver = new SnapshotResolver();
@@ -145,6 +148,19 @@ namespace Cuvara.Netcode.Client
 
         public bool IsConnected => _connection != null && _connection.IsRunning;
 
+        /// <summary>
+        /// Datagrams the gameplay transport has read off its socket (<see cref="KcpTransport.DatagramsRead"/>),
+        /// or zero on any other transport. Sampled per frame, the difference is the datagrams read
+        /// that frame. Diagnostics, for the test lab.
+        /// </summary>
+        public long TransportDatagramsRead => (_transport as KcpTransport)?.DatagramsRead ?? 0L;
+
+        /// <summary>Wakes of the gameplay transport's receive loop (<see cref="KcpTransport.ReceiveWakeups"/>).</summary>
+        public long TransportReceiveWakeups => (_transport as KcpTransport)?.ReceiveWakeups ?? 0L;
+
+        /// <summary>The most datagrams one receive wake has read (<see cref="KcpTransport.MaxDatagramsPerWake"/>).</summary>
+        public int TransportMaxDatagramsPerWake => (_transport as KcpTransport)?.MaxDatagramsPerWake ?? 0;
+
         /// <summary>How the gameplay connection ended, once it has; null while it is up.</summary>
         public DisconnectInfo? CloseInfo => _connection?.CloseInfo;
 
@@ -202,6 +218,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var transport = _transports.Create(TransportKind.Kcp);
+            _transport = transport;
             var connection = new WireConnection("gameserver", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
@@ -601,10 +618,49 @@ namespace Cuvara.Netcode.Client
             _connection.Send(MsgType.Resync, new ResyncRequest());
         }
 
-        /// <summary>Leaves politely, then closes.</summary>
+        /// <summary>
+        /// Leaves politely, then closes: the disconnect frame is delivered before the socket goes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The connection is handed over to the leave, which closes and disposes it when the frame
+        /// has been acknowledged (or its bound has run out, at most about a second). From this
+        /// call on, this client no longer owns it: <see cref="Dispose"/> does not touch it, no
+        /// further frame or close is reported, and every command still in flight fails now with
+        /// <c>ConnectionClosed</c>.
+        /// </para>
+        /// <para>
+        /// The hand-over is the point. <c>NetworkClient</c> disposes the session straight after
+        /// leaving it, and disposing the connection closes the socket: the disconnect frame never
+        /// reached the server, which released the entity only on its KCP dead-link timeout
+        /// (rpg-factory testlab S08G).
+        /// </para>
+        /// </remarks>
         public void Leave()
         {
-            _connection?.Leave();
+            var connection = _connection;
+            if (connection == null)
+            {
+                return;
+            }
+
+            _connection = null;
+            _commands.FailAll(CommandChannelErrors.ConnectionClosed);
+            connection.Closed -= OnClosed;
+            connection.FrameReceived -= OnFrame;
+            LeaveAndReleaseAsync(connection).Forget();
+        }
+
+        private static async UniTaskVoid LeaveAndReleaseAsync(WireConnection connection)
+        {
+            try
+            {
+                await connection.LeaveAsync();
+            }
+            finally
+            {
+                connection.Dispose();
+            }
         }
 
         public void Dispose()

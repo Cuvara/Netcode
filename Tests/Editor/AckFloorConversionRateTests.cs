@@ -167,6 +167,72 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(binder.AckFloorRateIsFallback, Is.True);
         }
 
+        // ---- the session boundary ----
+
+        /// <summary>
+        /// <see cref="PredictionClockSteering.Reset"/> forgets the acknowledgement estimator, the
+        /// advertised rate and the round trip with the other session measurements, and keeps the
+        /// lifetime fallback counter.
+        /// </summary>
+        /// <remarks>
+        /// Before this, Reset cleared only the tick-rate and staleness estimators: a steering
+        /// reused across sessions kept the old route's floor in its lead, and the old session's
+        /// sent-input timestamps, until new samples displaced them.
+        /// </remarks>
+        [Test]
+        public void Reset_ForgetsTheSessionsEstimators_AndKeepsTheLifetimeCounter()
+        {
+            var (binder, _) = DriveASweptSession();
+            var steering = binder.ClockSteering;
+            steering.RoundTripMs = 80;
+
+            Assert.That(steering.AckLatency.HasEstimate, Is.True,
+                "precondition: the session must have produced a floor, or Reset has nothing to forget");
+            Assert.That(steering.AckLatency.Samples, Is.GreaterThan(0));
+            Assert.That(steering.TickRate.HasEstimate, Is.True);
+            int fallbacks = steering.AckFloorRateFallbacks;
+            Assert.That(fallbacks, Is.GreaterThan(0),
+                "precondition: the first acknowledgements, before the rate was measured, are counted");
+
+            steering.Reset();
+
+            Assert.That(steering.AckLatency.HasEstimate, Is.False, "the old route's floor must go");
+            Assert.That(steering.AckLatency.Samples, Is.Zero);
+            Assert.That(steering.AckLatency.FloorTicks, Is.Zero);
+            Assert.That(steering.TickRate.HasEstimate, Is.False);
+            Assert.That(steering.AckFloorConversionHz, Is.Zero,
+                "the old server's advertised rate must go; the next snapshot supplies the new one");
+            Assert.That(steering.RoundTripMs, Is.Zero, "the old connection's round trip must go");
+            Assert.That(steering.AckFloorRateFallbacks, Is.EqualTo(fallbacks),
+                "a lifetime total: a reset must not hide the fallbacks of the sessions before it");
+        }
+
+        /// <summary>
+        /// Across <see cref="WorldViewBinder.Reset"/>, an acknowledgement in the new session is not
+        /// timed against an input the old session sent, and the floor starts over.
+        /// </summary>
+        [Test]
+        public void AfterABinderReset_TheNewSessionsAcknowledgementsAreNotTimedAgainstTheOldInputs()
+        {
+            var (binder, _) = DriveASweptSession();
+            Assert.That(binder.AckLatency.HasEstimate, Is.True, "precondition");
+
+            binder.Reset();
+
+            // The new session acknowledges input tick 5, a tick the OLD session also sent. It has
+            // sent nothing itself yet, so there is nothing to time.
+            var world = new WorldState();
+            world.Apply(new ResolvedSnapshot(
+                40, 5, true, new[] { Entity(LocalId) }, Array.Empty<string>()));
+            binder.Tick(world, LocalId);
+
+            Assert.That(binder.AckLatency.Samples, Is.Zero,
+                "the new session's acknowledgement was timed against the old session's send");
+            Assert.That(binder.AckLatency.HasEstimate, Is.False);
+            Assert.That(binder.AckFloorConversionHz, Is.EqualTo((float)AdvertisedHz),
+                "the new session's first snapshot sets the advertised rate again");
+        }
+
         // ---- the session ----
 
         /// <summary>
