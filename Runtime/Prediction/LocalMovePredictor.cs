@@ -2279,8 +2279,13 @@ namespace Cuvara.Netcode.Prediction
             _clampedSinceSteer = false;
             if (error <= HardResyncTicks && error >= -HardResyncTicks)
             {
+                // After a clamp the error is stall residue, not jitter: a stall a little longer
+                // than the clamp (0.4 s against 0.25 s) left the clock 7 or 8 ticks behind, inside
+                // the 8-tick steering band, and steering it out at half a tick per snapshot cost
+                // three to five corrections (the 0.4 s paced-backlog sweep of T51). So after a
+                // clamp anything beyond StallJumpMinTicks is set, not steered.
                 bool afterClamp = clamped
-                                  && (error > SteerIntegralBandTicks || error < -SteerIntegralBandTicks);
+                                  && (error > StallJumpMinTicks || error < -StallJumpMinTicks);
                 bool beforeClamp = !clamped && error < -_maxCatchUpTicks;
                 if (afterClamp || beforeClamp)
                 {
@@ -2500,6 +2505,11 @@ namespace Cuvara.Netcode.Prediction
         /// wind up into an overshoot once the phase is walked back.
         /// </summary>
         private const long SteerIntegralBandTicks = 8;
+
+        // Smallest error, in base ticks, that a clamped frame turns into a clock jump rather than
+        // steering. Two: a tick or two is the input-cadence phase that exists without any stall
+        // (ClientHitchRecoveryTests remarks), anything more after a clamp is the stall.
+        private const long StallJumpMinTicks = 2;
 
         /// <summary>
         /// Integral of the fractional tick error, in base ticks per steering call. Persists
