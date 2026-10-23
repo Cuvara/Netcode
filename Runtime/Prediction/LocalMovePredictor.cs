@@ -998,7 +998,7 @@ namespace Cuvara.Netcode.Prediction
         {
             if (delta > 0)
             {
-                RestampInputsOfThisFrame(delta);
+                DeferRestamp(delta);
             }
 
             _baseTick += delta;
@@ -1021,42 +1021,84 @@ namespace Cuvara.Netcode.Prediction
         /// corrections for one stall (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf).
         /// </para>
         /// <para>
-        /// <b>What moves.</b> An input recorded since the last <see cref="Advance"/> was sampled
-        /// after the stall. It moves with the jump, together with the hold and tick-start markers
-        /// it set, so it sits at the current tick of the new line, where it was sent. Inputs
-        /// recorded before the stall keep their ticks, as <see cref="JumpClock"/> requires.
+        /// <b>What moves.</b> An input sampled after the stall, and not acknowledged by the
+        /// snapshot the next reconcile compares against, moves with the jump, together with the hold
+        /// and tick-start markers it set, so it sits on the new line where it was sent. Sampled after
+        /// the stall means recorded within the last two <see cref="Advance"/> windows on the stall
+        /// tick or the one before it. Two, because the client uses a snapshot one frame after it
+        /// arrives, so the jump comes one Advance after the stall frame's input (S13 runs
+        /// 20261023T014834Z-S13-bjzo, -82xx, -vf5j: the 500 ms stall still cost two corrections when
+        /// only the last window was taken). The move is made at that reconcile, which knows which
+        /// inputs were acknowledged; inputs recorded before the stall keep their ticks, as
+        /// <see cref="JumpClock"/> requires.
         /// </para>
         /// </remarks>
         public int RestampedInputs { get; private set; }
 
-        private void RestampInputsOfThisFrame(long delta)
+        // A forward jump's restamp, deferred to the next reconcile, which knows which inputs the
+        // snapshot acknowledged. See RestampedInputs.
+        private bool _restampPending;
+        private long _restampFrom;
+        private long _restampDelta;
+        private long _restampMinAdvance;
+
+        private void DeferRestamp(long delta)
         {
-            long from = _baseTick;
-            bool moved = false;
-            for (int i = 0; i < _count; i++)
-            {
-                int slot = (_head + i) % Capacity;
-                PendingInput input = _pending[slot];
-                if (_pendingAdvance[slot] != _advanceCount || input.BaseTick != from)
-                {
-                    continue;
-                }
+            _restampPending = true;
+            _restampFrom = _baseTick;
+            _restampDelta = delta;
 
-                _pending[slot] = new PendingInput(
-                    input.Tick, input.MoveX, input.MoveY, input.BaseTick + delta,
-                    input.LastMoveTickBefore, input.Jump);
-                RestampedInputs++;
-                moved = true;
-            }
+            // The input of the frame the stall ended in, and of the frame after it: the client uses
+            // a snapshot one frame after it arrives, so the jump can come one Advance after that
+            // input was recorded (S13 runs bjzo, 82xx, vf5j).
+            _restampMinAdvance = _advanceCount - 1;
+        }
 
-            if (!moved)
+        /// <summary>
+        /// Moves the inputs recorded around the end of the stall onto the jumped line: recorded within
+        /// the last two Advance windows, stamped on the stall tick or the one before it (the short
+        /// Advance in between may have crossed a tick), and NOT acknowledged by the snapshot being
+        /// reconciled. An acknowledged one reached the server before the stall ended, so it belongs
+        /// to the old line.
+        /// </summary>
+        private void ApplyDeferredRestamp(long ackTick)
+        {
+            if (!_restampPending)
             {
                 return;
             }
 
-            if (_lastMoveTick == from) _lastMoveTick += delta;
-            if (_heldFrom == from) _heldFrom += delta;
-            if (_tickStartTick == from) _tickStartTick += delta;
+            _restampPending = false;
+            long from = _restampFrom;
+            long delta = _restampDelta;
+            long lowest = long.MaxValue;
+            for (int i = 0; i < _count; i++)
+            {
+                int slot = (_head + i) % Capacity;
+                PendingInput input = _pending[slot];
+                if (input.Tick <= ackTick
+                    || _pendingAdvance[slot] < _restampMinAdvance
+                    || input.BaseTick > from
+                    || input.BaseTick < from - 1)
+                {
+                    continue;
+                }
+
+                if (input.BaseTick < lowest) lowest = input.BaseTick;
+                _pending[slot] = new PendingInput(
+                    input.Tick, input.MoveX, input.MoveY, input.BaseTick + delta,
+                    input.LastMoveTickBefore, input.Jump);
+                RestampedInputs++;
+            }
+
+            if (lowest == long.MaxValue)
+            {
+                return;
+            }
+
+            if (_lastMoveTick >= lowest && _lastMoveTick <= from) _lastMoveTick += delta;
+            if (_heldFrom >= lowest && _heldFrom <= from) _heldFrom += delta;
+            if (_tickStartTick >= lowest && _tickStartTick <= from) _tickStartTick += delta;
         }
 
         /// <summary>
@@ -1503,6 +1545,7 @@ namespace Cuvara.Netcode.Prediction
             // tick line when it did. Everything below -- the history comparison and both replay
             // fallbacks -- asks exactly that question, so mapping it once here is the whole fix.
             long serverBaseTick = ResolveAnchorTick(snapshotTick, ackTick, ackAppliedTick);
+            ApplyDeferredRestamp(ackTick);
 
             if (!IsEnabled)
             {
@@ -1899,6 +1942,9 @@ namespace Cuvara.Netcode.Prediction
             _elapsed += deltaTime;
             _advanceCount++;
 
+            // A jump no reconcile followed: nothing is known to be acknowledged.
+            ApplyDeferredRestamp(long.MinValue);
+
             // Run whole base ticks. The server integrates the held direction once per
             // base tick whether or not a packet arrived (TickLoop calls ApplyHeldMovement
             // on empty ticks too), so a client that only moves when it sends an input
@@ -2233,8 +2279,13 @@ namespace Cuvara.Netcode.Prediction
             _clampedSinceSteer = false;
             if (error <= HardResyncTicks && error >= -HardResyncTicks)
             {
+                // After a clamp the error is stall residue, not jitter: a stall a little longer
+                // than the clamp (0.4 s against 0.25 s) left the clock 7 or 8 ticks behind, inside
+                // the 8-tick steering band, and steering it out at half a tick per snapshot cost
+                // three to five corrections (the 0.4 s paced-backlog sweep of T51). So after a
+                // clamp anything beyond StallJumpMinTicks is set, not steered.
                 bool afterClamp = clamped
-                                  && (error > SteerIntegralBandTicks || error < -SteerIntegralBandTicks);
+                                  && (error > StallJumpMinTicks || error < -StallJumpMinTicks);
                 bool beforeClamp = !clamped && error < -_maxCatchUpTicks;
                 if (afterClamp || beforeClamp)
                 {
@@ -2455,6 +2506,11 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         private const long SteerIntegralBandTicks = 8;
 
+        // Smallest error, in base ticks, that a clamped frame turns into a clock jump rather than
+        // steering. Two: a tick or two is the input-cadence phase that exists without any stall
+        // (ClientHitchRecoveryTests remarks), anything more after a clamp is the stall.
+        private const long StallJumpMinTicks = 2;
+
         /// <summary>
         /// Integral of the fractional tick error, in base ticks per steering call. Persists
         /// across calls; cleared by a hard resync and by <see cref="Reset"/>.
@@ -2573,6 +2629,7 @@ namespace Cuvara.Netcode.Prediction
             _jumpCredit = 0f;
             _jumpCreditAdvances = 0;
             _bunchedSnapshotTick = 0;
+            _restampPending = false;
         }
 
 

@@ -281,6 +281,14 @@ replayed the input from a whole stall back, and the next one took the overshoot 
 corrections per stall (S13 run uwrf). `PredictionHarness.InputBeforeSnapshot` runs the harness
 in the client's order.
 
+**The snapshot is used one frame late.** The client reconciles a snapshot one frame after the
+transport applied it. The jump can therefore come one `Advance` after the stall frame's input. The
+restamp is deferred to the next reconcile. It covers the last two `Advance` windows and the stall
+tick or the one before it, and it skips inputs that reconcile's snapshot acknowledges
+(`PredictionHarness.SnapshotsVisibleNextFrame`). After a clamped frame, any clock error beyond 2
+ticks is jumped. The 8-tick steering band is for jitter, and a stall slightly longer than the
+clamp left the clock 7 to 8 ticks behind.
+
 **Unity's late `deltaTime`.** `Time.deltaTime` reports the previous frame. A stall inside a
 frame therefore reaches `Advance` one frame after the jump made in it. The jump credit lasts for
 two `Advance` calls, so that next frame does not simulate the stall a second time

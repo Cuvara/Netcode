@@ -41,6 +41,22 @@
   `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
   `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
   before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **A 500 ms stall costs one correction, not two.** The client uses a snapshot one frame after
+  it arrives. A stall's backlog, read in the stall frame, was therefore reconciled in the next
+  frame, after that frame's `Advance`. The restamp above took only inputs recorded since the last
+  `Advance`, so it missed the stall-end input. The first reconcile replayed that input from its
+  old tick, banked hold included: 17 steps forward, and the next snapshot took 15 back. That
+  happened in every 500 ms stall of three live runs (rpg-factory testlab S13, runs
+  20261023T014834Z-S13-bjzo, -82xx, -vf5j), while the 2 s stall was clean. Two changes:
+  - The restamp is deferred to the next reconcile. It covers the last two `Advance` windows and
+    the stall tick or the one before it, and it skips inputs the snapshot acknowledges.
+  - After a clamped frame, a clock error beyond 2 ticks is jumped rather than steered. A 0.4 s
+    stall left the clock 7 or 8 ticks behind, inside the 8-tick steering band, and steering it
+    out cost 3 to 5 corrections when the backlog was paced.
+
+  `PredictionHarness.SnapshotsVisibleNextFrame` reproduces the client's frame order.
+  `ClientHitchRecoveryTests.AClientStall_InTheClientsFullFrameOrder_*` (0.4 / 0.5 / 0.6 / 0.8 / 2 s)
+  fails before (about 28 steps, then 15 or 16 back) and now passes.
 - **A stall jump's credit survives Unity's late `deltaTime`.** `Time.deltaTime` reports the
   previous frame, so a stall inside a frame reaches `Advance` one frame later. The jump made in
   the stall frame spent its credit on that frame's 1.3 ms delta and dropped the rest. The next
