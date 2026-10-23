@@ -139,7 +139,25 @@ namespace Cuvara.Netcode.Prediction
         /// Set by the consumer; 0 until then, which makes the steering target degrade to one
         /// snapshot interval rather than to something invented.
         /// </remarks>
-        public long RoundTripMs { get; set; }
+        public long RoundTripMs
+        {
+            get => _roundTripMs;
+            set
+            {
+                Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringRoundTripMs, a: value));
+                _roundTripMs = value;
+            }
+        }
+
+        private long _roundTripMs;
+
+        /// <summary>
+        /// Receives this steering's inputs (<see cref="OnSnapshot"/> begin and end, sends, tick-rate
+        /// samples, the round trip, resets); null traces nothing. Set it to the same sink as the
+        /// predictor's <see cref="LocalMovePredictor.Trace"/> so one ordered record holds both. See
+        /// <see cref="PredictorTraceEvent"/>.
+        /// </summary>
+        public PredictorTraceSink Trace { get; set; }
 
         /// <summary>
         /// Measures how old the newest snapshot is by the time it is used. See
@@ -249,15 +267,21 @@ namespace Cuvara.Netcode.Prediction
         /// the reconcile returns one step of correction per base tick of it at every start and
         /// stop. Measured live at 2.00 steps against an acknowledgement floor of 1.28 ticks.
         /// </remarks>
-        public void NoteInputSent(long inputTick, double nowSeconds) =>
+        public void NoteInputSent(long inputTick, double nowSeconds)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringNoteInputSent, a: inputTick, t: nowSeconds));
             AckLatency.RecordSent(inputTick, nowSeconds);
+        }
 
         /// <summary>
         /// Folds a new snapshot's base tick into <see cref="TickRate"/>. Call once per new
         /// snapshot, before <see cref="OnSnapshot"/>.
         /// </summary>
-        public void SampleTickRate(long worldTick, double nowSeconds) =>
+        public void SampleTickRate(long worldTick, double nowSeconds)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringSampleTickRate, a: worldTick, t: nowSeconds));
             TickRate.Sample(worldTick, nowSeconds);
+        }
 
         /// <summary>
         /// Seeds, measures and steers <paramref name="predictor"/>'s clock for one new snapshot.
@@ -267,6 +291,26 @@ namespace Cuvara.Netcode.Prediction
         /// <param name="ackTick">The snapshot's acknowledgement (<c>WorldState.AckTick</c>).</param>
         /// <param name="nowSeconds">Now, in seconds, from the clock <see cref="NoteInputSent"/> uses.</param>
         public void OnSnapshot(LocalMovePredictor predictor, long worldTick, long ackTick, double nowSeconds)
+        {
+            var trace = Trace;
+            if (trace == null)
+            {
+                OnSnapshotBody(predictor, worldTick, ackTick, nowSeconds);
+                return;
+            }
+
+            trace(new PredictorTraceEvent(PredictorCall.SteeringOnSnapshotBegin, a: worldTick, b: ackTick, t: nowSeconds));
+            try
+            {
+                OnSnapshotBody(predictor, worldTick, ackTick, nowSeconds);
+            }
+            finally
+            {
+                trace(new PredictorTraceEvent(PredictorCall.SteeringOnSnapshotEnd, a: worldTick));
+            }
+        }
+
+        private void OnSnapshotBody(LocalMovePredictor predictor, long worldTick, long ackTick, double nowSeconds)
         {
             if (predictor == null || !predictor.IsEnabled)
             {
@@ -700,11 +744,12 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void Reset()
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringReset));
             TickRate.Reset();
             Staleness.Reset();
             AckLatency.Reset();
             _advertisedHz = 0f;
-            RoundTripMs = 0L;
+            _roundTripMs = 0L;
             _haveLastSnapshot = false;
             _lastSnapshotTick = 0;
             _lastSnapshotSeconds = 0.0;
