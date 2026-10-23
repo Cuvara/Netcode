@@ -958,13 +958,27 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int StallResyncs { get; private set; }
 
+        /// <summary>
+        /// Frame seconds not simulated because a forward stall jump had already covered them
+        /// (see <see cref="StallResyncs"/>). Lifetime total. Diagnostics.
+        /// </summary>
+        public float JumpCreditSpentSeconds { get; private set; }
+
         // Set when Advance clamps a frame; read and cleared by the next SteerToServerTick.
         private bool _clampedSinceSteer;
 
-        // Seconds of the next Advance already covered by a forward clock jump. Consumed by that
-        // one Advance; whatever it does not cover is dropped, so a jump that no long frame
-        // follows costs at most one frame of clock progress.
+        // Seconds of frame time already covered by a forward clock jump, and the Advance calls
+        // left that may still spend it. Two, not one: Unity's Time.deltaTime reports the PREVIOUS
+        // frame, so when the jump is made in the frame the stall happened in, that frame's Advance
+        // carries only the short frame before it, and the stall arrives as the next frame's delta.
+        // Spending the credit on the short frame and dropping the rest let that next frame simulate
+        // 15 clamped ticks the jump had already covered: the player stepped about 1.25 u forward,
+        // the clock ran 15 ticks ahead, and the next snapshot took both back, two corrections per
+        // stall (rpg-factory testlab S13, runs 20261023T010311Z-S13-3zhl, -j8xw, -9zy5). Whatever
+        // two Advances do not cover is dropped, so a jump that no long frame follows costs at most
+        // two frames of clock progress.
         private float _jumpCredit;
+        private int _jumpCreditAdvances;
 
         /// <summary>
         /// Moves the clock forward (or back) by <paramref name="delta"/> base ticks without
@@ -1904,8 +1918,11 @@ namespace Cuvara.Netcode.Prediction
                 float scaled = deltaTime * _clockRateScale;
                 if (_jumpCredit > 0f)
                 {
-                    scaled -= System.Math.Min(_jumpCredit, scaled);
-                    _jumpCredit = 0f;
+                    float spent = System.Math.Min(_jumpCredit, scaled);
+                    scaled -= spent;
+                    _jumpCredit -= spent;
+                    if (--_jumpCreditAdvances <= 0) _jumpCredit = 0f;
+                    JumpCreditSpentSeconds += spent;
                 }
 
                 _tickAccumulator += scaled;
@@ -2222,7 +2239,11 @@ namespace Cuvara.Netcode.Prediction
                 if (afterClamp || beforeClamp)
                 {
                     JumpClock(-error);
-                    if (beforeClamp) _jumpCredit = -error * _dt;
+                    if (beforeClamp)
+                    {
+                        _jumpCredit = -error * _dt;
+                        _jumpCreditAdvances = 2;
+                    }
                     StallResyncs++;
                     HardResyncs++;
                     return;
@@ -2550,6 +2571,7 @@ namespace Cuvara.Netcode.Prediction
             _replayStageCount = 0;
             _clampedSinceSteer = false;
             _jumpCredit = 0f;
+            _jumpCreditAdvances = 0;
             _bunchedSnapshotTick = 0;
         }
 
