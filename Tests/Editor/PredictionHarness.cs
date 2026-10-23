@@ -169,6 +169,17 @@ namespace Cuvara.Netcode.Tests.Editor
             public bool DeltaTimeLagsOneFrame;
 
             /// <summary>
+            /// A snapshot that arrives during a frame is used by the prediction only in the next
+            /// frame, as the client does: the transport applies it to the world late in the frame,
+            /// after <c>LocalPredictionSystem</c> has run. A stall's backlog, read in the stall
+            /// frame, is then reconciled one frame later, after that frame's input and its
+            /// <c>Advance</c> (rpg-factory testlab S13, run 20261023T014834Z-S13-bjzo: backlog
+            /// applied in f11811, reconciled in f11812, the next snapshot applied in f11814 and
+            /// reconciled in f11815).
+            /// </summary>
+            public bool SnapshotsVisibleNextFrame;
+
+            /// <summary>
             /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
             /// of up to this much either way (an uneven frame rate).
             /// </summary>
@@ -551,17 +562,18 @@ namespace Cuvara.Netcode.Tests.Editor
                 }
 
                 // ── Client: snapshots that have arrived, newest only (a binder merges them) ──
+                double visibleUntil = c.SnapshotsVisibleNextFrame ? now - frame : now;
                 int newestIndex = -1;
                 for (int i = 0; i < downlink.Count; i++)
                 {
-                    if (downlink[i].Arrival > now) continue;
+                    if (downlink[i].Arrival > visibleUntil) continue;
                     if (newestIndex < 0 || downlink[i].Tick > downlink[newestIndex].Tick) newestIndex = i;
                 }
 
                 if (newestIndex >= 0)
                 {
                     InFlightSnapshot s = downlink[newestIndex];
-                    downlink.RemoveAll(x => x.Arrival <= now);
+                    downlink.RemoveAll(x => x.Arrival <= visibleUntil);
 
                     if (s.Tick > lastAppliedSnapshotTick)
                     {
