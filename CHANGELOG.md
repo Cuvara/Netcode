@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The `com.cuvara.dots` compile gate now uses v0.32.0**, checking Netcode against the
+  released peer package in Compile samples CI.
+
 ## [0.48.0] - 2026-10-23
 
 ### Fixed
