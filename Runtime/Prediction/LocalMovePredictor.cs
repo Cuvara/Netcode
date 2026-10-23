@@ -692,6 +692,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void UseServerProtocol(uint serverProtocolVersion)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.UseServerProtocol, a: serverProtocolVersion));
             bool motor = Cuvara.Netcode.Protocol.WireProtocolVersion.Supports(
                 serverProtocolVersion, Cuvara.Netcode.Protocol.WireProtocolVersion.Motor3D);
             if (motor == _motor3D)
@@ -737,6 +738,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void UseServerTickRate(uint advertisedTickRate)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.UseServerTickRate, a: advertisedTickRate));
             if (advertisedTickRate == 0u || advertisedTickRate > int.MaxValue)
             {
                 return;
@@ -787,6 +789,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetMapGeometry(MapGeometry geometry)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetMapGeometry, flag: geometry != null));
             _geometry = geometry ?? MapGeometry.Flat(_settings.Bounds);
         }
 
@@ -797,6 +800,9 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         public void SetMotorParams(in MotorParams parameters)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetMotorParams,
+                x: parameters.Gravity, y: parameters.JumpSpeed, z: parameters.StepHeight,
+                w: parameters.MaxSlopeRise, u: parameters.CapsuleRadius, v: parameters.CapsuleHeight));
             _motorParams = parameters;
         }
 
@@ -957,6 +963,18 @@ namespace Cuvara.Netcode.Prediction
         /// steered, never set.
         /// </remarks>
         public int StallResyncs { get; private set; }
+
+        /// <summary>
+        /// Receives every call into this predictor, with its arguments, and the outcome of every
+        /// reconcile; null (the default) traces nothing. A debugging aid for replaying a live
+        /// session headless (<see cref="PredictorTraceReplayer"/>). See <see cref="PredictorTraceEvent"/>.
+        /// </summary>
+        /// <remarks>
+        /// Off, it costs one null check per call and allocates nothing. On, it builds one struct per
+        /// call and hands it to the sink by reference; formatting and storage are the sink's.
+        /// Tracing never changes what the predictor does (<c>PredictorTraceTests</c>).
+        /// </remarks>
+        public PredictorTraceSink Trace { get; set; }
 
         /// <summary>
         /// Frame seconds not simulated because a forward stall jump had already covered them
@@ -1149,6 +1167,7 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         public void RecordInput(long tick, float moveX, float moveY, bool jump)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.RecordInput, a: tick, x: moveX, y: moveY, flag: jump));
             if (!IsEnabled || !_seeded)
             {
                 return;
@@ -1529,6 +1548,29 @@ namespace Cuvara.Netcode.Prediction
         private const float SupportTolerance = 1e-3f;
 
         private void ReconcileCore(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
+        {
+            var trace = Trace;
+            if (trace == null)
+            {
+                ReconcileBody(authoritative, ackTick, snapshotTick, ackAppliedTick);
+                return;
+            }
+
+            trace(new PredictorTraceEvent(PredictorCall.Reconcile,
+                a: ackTick, b: snapshotTick, c: ackAppliedTick,
+                x: authoritative.X, y: authoritative.Y, z: authoritative.Z, w: authoritative.VelZ,
+                flag: authoritative.Grounded));
+            ReconcileBody(authoritative, ackTick, snapshotTick, ackAppliedTick);
+            trace(new PredictorTraceEvent(PredictorCall.ReconcileResult,
+                a: _baseTick, b: TickError, c: StallResyncs,
+                x: LastCorrection, y: _predicted.X, z: _predicted.Y, w: Snaps));
+        }
+
+        /// <summary>Replays a recorded <see cref="PredictorCall.Reconcile"/> exactly as it was received.</summary>
+        internal void ReplayReconcile(in PredictorTraceEvent e) =>
+            ReconcileCore(new Body(e.X, e.Y, e.Z, e.W, e.Flag), e.A, e.B, e.C);
+
+        private void ReconcileBody(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
         {
             // A snapshot of a stall's backlog (see SkipReconcileForBunchedSnapshot): skipped whole.
             if (_bunchedSnapshotTick != 0 && snapshotTick == _bunchedSnapshotTick)
@@ -1931,6 +1973,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void Advance(float deltaTime)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.Advance, x: deltaTime));
             if (!IsEnabled || deltaTime <= 0f)
             {
                 return;
@@ -2105,6 +2148,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetServerSpeed(float speed)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetServerSpeed, x: speed));
             if (speed > 0f && !float.IsNaN(speed) && !float.IsInfinity(speed))
             {
                 _speed = speed;
@@ -2144,6 +2188,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SeedBaseTick(long serverTick)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SeedBaseTick, a: serverTick));
             if (_baseTickSeeded || serverTick <= 0)
             {
                 return;
@@ -2194,6 +2239,7 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         internal void SkipReconcileForBunchedSnapshot(long snapshotTick, int targetLeadTicks)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SkipReconcileForBunchedSnapshot, a: snapshotTick, b: targetLeadTicks));
             _bunchedSnapshotTick = snapshotTick;
             if (_baseTickSeeded && snapshotTick > 0)
             {
@@ -2252,6 +2298,7 @@ namespace Cuvara.Netcode.Prediction
         /// </param>
         public void SteerToServerTick(long serverTick, int targetLeadTicks)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteerToServerTick, a: serverTick, b: targetLeadTicks));
             if (!IsEnabled || !_baseTickSeeded || serverTick <= 0)
             {
                 return;
@@ -2463,6 +2510,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetClockRateScale(float scale)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetClockRateScale, x: scale));
             if (!float.IsFinite(scale) || scale <= 0f)
             {
                 return;
@@ -2556,6 +2604,7 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Forgets all prediction state. For a new session or a map transfer.</summary>
         public void Reset()
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.Reset));
             _head = 0;
             _count = 0;
             _lastRecordedTick = 0;
@@ -2958,6 +3007,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetHoldTicks(int holdTicks)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetHoldTicks, a: holdTicks));
             if (holdTicks >= 1)
             {
                 HoldTicks = holdTicks;

@@ -228,6 +228,20 @@
 
 ### Added
 
+- **A call trace for replaying a live session headless.** It is a debugging aid, and it is opt-in.
+  - Set `LocalMovePredictor.Trace` and `PredictionClockSteering.Trace` to one `PredictorTraceSink`.
+    Every call is then reported with its arguments, in order, as a `PredictorTraceEvent`: the
+    reconciles as received, plus each reconcile's outcome, and the steering's snapshot, send,
+    tick-rate and round-trip inputs.
+  - `PredictorTraceReplayer` re-executes a recorded sequence. It can replay the predictor's calls
+    exactly, or replay the steering's inputs so that a steering change is judged.
+  - `AppendJson` / `TryParseJson` give one NDJSON line per event.
+  - Off, it costs a null check per call and allocates nothing. On, it builds one struct per call
+    and passes it by reference. Tracing never changes the outcome.
+  - `PredictorTraceTests` pins the record-then-replay identity (predictor and steering modes, and
+    through NDJSON), the on-versus-off identity, and the zero allocation.
+  - Why: three stall fixes passed the synthetic harness and not the live client (rpg-factory
+    testlab S13), because the harness modelled the client's frame order instead of recording it.
 - `LocalMovePredictor.StallResyncs`: clock jumps made for a client stall (also counted in
   `HardResyncs`).
 - `WorldState.StaleSnapshotsDropped`: snapshots dropped because their tick was not above `Tick`

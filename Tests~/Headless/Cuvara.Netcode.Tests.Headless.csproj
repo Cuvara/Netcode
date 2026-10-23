@@ -102,6 +102,7 @@
     <Compile Include="../../Runtime/Prediction/SnapshotStalenessEstimator.cs" />
     <Compile Include="../../Runtime/Prediction/AckLatencyEstimator.cs" />
     <Compile Include="../../Runtime/Prediction/InputCadence.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictorTrace.cs" />
     <Compile Include="../../Runtime/Protocol/*.cs" />
     <Compile Include="../../Runtime/Protocol/Messages/*.cs" />
     <Compile Include="../../Runtime/Snapshot/*.cs" />
@@ -128,6 +129,7 @@
     <Compile Include="../../Tests/Editor/ReplayHistoryStagingTests.cs" />
     <Compile Include="../../Tests/Editor/ServerStallRecoveryTests.cs" />
     <Compile Include="../../Tests/Editor/ClientHitchRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorTraceTests.cs" />
     <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
     <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
     <Compile Include="../../Tests/Editor/WorldStateTests.cs" />

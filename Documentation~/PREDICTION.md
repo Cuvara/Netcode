@@ -707,6 +707,36 @@ buffer (`Capacity`, 128 unacknowledged inputs) are constants on `LocalMovePredic
 
 ## Debugging
 
+### Replaying a live session: the call trace (0.48.0)
+
+The predictor is deterministic given its calls. The server's half (snapshots and
+acknowledgements) does not depend on what the client predicted. A recorded call sequence
+therefore replays a live session exactly, and a fix can be judged against what the client really
+did, not against a model of its frame order.
+
+```csharp
+PredictorTraceSink sink = (in PredictorTraceEvent e) => { sb.Clear(); e.AppendJson(sb); writer.WriteLine(sb); };
+predictor.Trace = sink;   // every call, with its arguments, plus each reconcile's outcome
+steering.Trace = sink;    // OnSnapshot begin/end, NoteInputSent, SampleTickRate, RoundTripMs, Reset
+
+// Headless, later:
+var replayer = new PredictorTraceReplayer(new LocalMovePredictor(sameSettings)) { Geometry = sameMap };
+foreach (var line in File.ReadLines(path))
+    if (PredictorTraceEvent.TryParseJson(line, out var e)) replayer.Apply(in e);
+```
+
+- **What the trace does not hold:**
+  - the `PredictionSettings` the predictor was built with (tick rate, speed, bounds);
+  - the map geometry, which is recorded only as "a geometry was set".
+  - Record both next to the trace.
+- **Modes:**
+  - `ReplaySteering = false` replays the predictor's own calls, the steering's effects included.
+  - `true` replays the steering's inputs and lets the steering decide again.
+- **Cost:** off, a null check per call. On, one struct per call, passed by reference: formatting
+  and storage are the sink's.
+- **Tests:** `PredictorTraceTests` pins the record-then-replay identity, the on-versus-off identity,
+  and the zero allocation.
+
 The DOTS sample's HUD shows:
 - `Predict … err 0.000` — the reconciliation error (should be near zero)
 - `ack` — the server's acknowledged input tick

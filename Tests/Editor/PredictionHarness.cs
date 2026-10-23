@@ -179,6 +179,9 @@ namespace Cuvara.Netcode.Tests.Editor
             /// </summary>
             public bool SnapshotsVisibleNextFrame;
 
+            /// <summary>When set, receives the predictor's and the steering's call trace.</summary>
+            public PredictorTraceSink Trace;
+
             /// <summary>
             /// When positive, every frame lasts <see cref="FrameSeconds"/> plus a uniform jitter
             /// of up to this much either way (an uneven frame rate).
@@ -389,12 +392,14 @@ namespace Cuvara.Netcode.Tests.Editor
             var server = new ServerStub(NominalHz, c.Speed, start, startTick: 100_000);
             int constructedHz = c.PredictorTickRate > 0 ? c.PredictorTickRate : NominalHz;
             var predictor = new LocalMovePredictor(new PredictionSettings(constructedHz, c.Speed, MapBounds.Default));
+            predictor.Trace = c.Trace;
             if (c.AdvertisedTickRate > 0u)
             {
                 predictor.UseServerTickRate(c.AdvertisedTickRate);
             }
 
             var steering = new PredictionClockSteering(predictor);
+            steering.Trace = c.Trace;
 
             result.StepLength = c.Speed / NominalHz;
 
