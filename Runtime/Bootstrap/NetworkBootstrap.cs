@@ -110,7 +110,8 @@ namespace Cuvara.Netcode.Bootstrap
             var settings = new NetworkSettings
             {
                 GatewayHost = config.GatewayHost,
-                GatewayPort = config.GatewayPort
+                GatewayPort = config.GatewayPort,
+                TransportKey = config.TransportKey
             };
 
             if (_injected != null)
@@ -121,7 +122,7 @@ namespace Cuvara.Netcode.Bootstrap
             else
             {
                 _owned = new NetworkClient(
-                    settings, new DefaultTransportFactory(), new JsonWireCodec(), new UnityNetLog());
+                    settings, new DefaultTransportFactory(settings.TransportKey), new JsonWireCodec(), new UnityNetLog());
                 _client = _owned;
                 Debug.Log("[bootstrap] no container found — constructed a NetworkClient locally. " +
                           "Register RegisterNetworking() in GameLifetimeScope for the real wiring.");

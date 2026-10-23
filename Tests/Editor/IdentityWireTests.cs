@@ -42,7 +42,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 {
                     ServerAddr = "10.0.0.5:7019",
                     JoinToken = "t",
-                    Transport = "tcp",
+                    Transport = "kcp",
                     ServerPublicKey = ByteString.CopyFrom(key),
                 }.ToByteString(),
             }.ToByteArray();

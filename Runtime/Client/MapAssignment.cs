@@ -39,7 +39,9 @@ namespace Cuvara.Netcode.Client
 
         /// <summary>
         /// The transport the <b>game server</b> speaks, which is unrelated to the
-        /// one used to reach the gateway.
+        /// one used to reach the gateway. Always <see cref="TransportKind.Kcp"/> when it
+        /// came from <c>enter_world_resp</c>: realtime gameplay is KCP/UDP only, and
+        /// <c>GameSessionClient</c> refuses any other value.
         /// </summary>
         public TransportKind Transport { get; }
 

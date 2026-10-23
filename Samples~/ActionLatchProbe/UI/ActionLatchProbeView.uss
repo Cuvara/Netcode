@@ -1,0 +1,140 @@
+/* Snapshot send-budget probe.
+ *
+ * Class names carry the cuvara- prefix, matching the convention com.cuvara.uitoolkit
+ * enforces on its own exported classes: USS class names are public API, and a scene that
+ * invents an unprefixed name collides with whatever a host project already calls that.
+ */
+
+.cuvara-probe {
+    flex-grow: 1;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+.cuvara-probe__panel {
+    width: 480px;
+    margin: 14px;
+    padding: 14px 16px;
+    background-color: rgba(20, 22, 27, 0.94);
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: rgb(46, 50, 58);
+}
+
+.cuvara-probe__title {
+    font-size: 18px;
+    -unity-font-style: bold;
+    color: rgb(233, 237, 243);
+}
+
+.cuvara-probe__subtitle {
+    font-size: 11px;
+    color: rgb(150, 158, 170);
+    white-space: normal;
+    margin-bottom: 8px;
+}
+
+.cuvara-probe__section {
+    font-size: 12px;
+    -unity-font-style: bold;
+    color: rgb(120, 190, 255);
+    margin-top: 10px;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__hint {
+    font-size: 10px;
+    color: rgb(130, 138, 150);
+    white-space: normal;
+    margin-bottom: 4px;
+}
+
+.cuvara-probe__slider {
+    margin-bottom: 2px;
+    color: rgb(210, 216, 224);
+}
+
+.cuvara-probe__row {
+    flex-direction: row;
+    margin-top: 6px;
+}
+
+.cuvara-probe__button {
+    flex-grow: 1;
+    height: 24px;
+    font-size: 11px;
+    margin-right: 4px;
+    background-color: rgb(38, 42, 50);
+    border-color: rgb(60, 66, 76);
+    color: rgb(220, 226, 234);
+}
+
+.cuvara-probe__readout {
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.cuvara-probe__stat {
+    width: 50%;
+    flex-direction: row;
+    justify-content: space-between;
+    padding: 1px 6px 1px 0;
+}
+
+.cuvara-probe__key {
+    font-size: 11px;
+    color: rgb(150, 158, 170);
+}
+
+.cuvara-probe__value {
+    font-size: 11px;
+    -unity-font-style: bold;
+    color: rgb(226, 232, 240);
+}
+
+/* The only value on this panel that is ever allowed to go red: a handle with no binding
+ * means the encoder shed an entity it had already recorded as sent. */
+.cuvara-probe__value--bad {
+    color: rgb(240, 100, 100);
+}
+
+.cuvara-probe__chart {
+    height: 84px;
+    margin-top: 4px;
+    background-color: rgb(14, 16, 20);
+    border-width: 1px;
+    border-color: rgb(46, 50, 58);
+}
+
+.cuvara-probe__histogram {
+    flex-grow: 1;
+    flex-direction: row;
+    align-items: flex-end;
+    padding: 2px;
+}
+
+.cuvara-probe__bar {
+    flex-grow: 1;
+    margin-right: 1px;
+    min-height: 1px;
+    background-color: rgb(92, 200, 140);
+}
+
+.cuvara-probe__bar--over {
+    background-color: rgb(240, 160, 70);
+}
+
+.cuvara-probe__budget-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-color: rgb(240, 100, 100);
+}
+
+.cuvara-probe__verdict {
+    font-size: 11px;
+    color: rgb(190, 198, 210);
+    white-space: normal;
+    margin-top: 8px;
+}

@@ -1770,7 +1770,7 @@ namespace Cuvara.Netcode.Tests.PlayMode
                     GatewayHost = LiveBackendConfig.GatewayHost,
                     GatewayPort = LiveBackendConfig.GatewayPort,
                 },
-                new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                new DefaultTransportFactory(LiveBackendConfig.TransportKey), new ProtobufWireCodec(), new UnityNetLog());
 
             // CONNECT FIRST. The prediction timestep comes from the server's join
             // response, so the predictor cannot exist until the join has happened.

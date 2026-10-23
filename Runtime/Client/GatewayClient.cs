@@ -71,7 +71,8 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("gateway client is already connected");
             }
 
-            // TLS is a property of the gateway deployment, known before the first byte,
+            // The gateway hop is TCP (optionally TLS) and never KCP; the gameplay hop is
+            // KCP and never TCP. TLS is a property of the gateway deployment, known before the first byte,
             // so the kind is chosen here rather than negotiated. The factory throws if it
             // was asked for TLS without options, instead of handing back cleartext.
             var transport = _transports.Create(
@@ -147,7 +148,25 @@ namespace Cuvara.Netcode.Client
         /// with <c>Token already used</c> rather than merely failing again.
         /// </remarks>
         public UniTask<MapAssignment> EnterWorldAsync(string mapId, CancellationToken cancellationToken) =>
-            EnterWorldAsync(mapId, null, cancellationToken);
+            EnterWorldCoreAsync(mapId, null, null, cancellationToken);
+
+        /// <summary>
+        /// Asks for a server for <paramref name="mapId"/> -- or, with a
+        /// <paramref name="partyId"/>, a dungeon instance of it -- playing
+        /// <paramref name="characterId"/>.
+        /// </summary>
+        /// <param name="mapId">The map to enter, or the dungeon content to instance.</param>
+        /// <param name="partyId">Null or empty for a map; a party id for a dungeon instance.</param>
+        /// <param name="characterId">
+        /// The roster character to play (ADR-31), or null/empty for the account's default. The
+        /// gateway refuses an id that differs from the <c>cid</c> claim of the token this
+        /// connection authenticated with, so the auth provider must have minted that token for
+        /// the same character.
+        /// </param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        public UniTask<MapAssignment> EnterWorldAsync(
+            string mapId, string partyId, string characterId, CancellationToken cancellationToken) =>
+            EnterWorldCoreAsync(mapId, partyId, characterId, cancellationToken);
 
         /// <summary>
         /// Asks for a DUNGEON INSTANCE of <paramref name="contentId"/> for
@@ -184,11 +203,11 @@ namespace Cuvara.Netcode.Client
                     nameof(partyId));
             }
 
-            return EnterWorldAsync(contentId, partyId, cancellationToken);
+            return EnterWorldCoreAsync(contentId, partyId, null, cancellationToken);
         }
 
-        private async UniTask<MapAssignment> EnterWorldAsync(
-            string mapId, string partyId, CancellationToken cancellationToken)
+        private async UniTask<MapAssignment> EnterWorldCoreAsync(
+            string mapId, string partyId, string characterId, CancellationToken cancellationToken)
         {
             var connection = RequireHandshakeConnection();
 
@@ -202,7 +221,12 @@ namespace Cuvara.Netcode.Client
 
                 await connection.SendFrameAsync(
                     MsgType.EnterWorld,
-                    new EnterWorldRequest { MapId = mapId, PartyId = partyId ?? string.Empty },
+                    new EnterWorldRequest
+                    {
+                        MapId = mapId,
+                        PartyId = partyId ?? string.Empty,
+                        CharacterId = characterId ?? string.Empty,
+                    },
                     timeout.Token);
 
                 var frame = await ReceiveAsync(connection, timeout.Token);
@@ -237,7 +261,13 @@ namespace Cuvara.Netcode.Client
                 // own loopback when the server advertises a listen-style address.
                 var endpoint = NetworkEndpoint.Parse(
                     response.ServerAddr, _settings.GatewayHost, out var normalised);
-                var transport = TransportKinds.Parse(response.Transport);
+                // Realtime gameplay is KCP/UDP only. Anything else -- including an empty
+                // field, which used to mean TCP -- is a gateway or game server this client
+                // cannot play on; refuse it by name rather than dial something else.
+                if (!TransportKinds.TryParseGameplay(response.Transport, out var transport, out var transportError))
+                {
+                    throw new NetworkException(transportError, TransportKinds.UnsupportedGameplayTransport);
+                }
 
                 if (normalised)
                 {
@@ -249,7 +279,7 @@ namespace Cuvara.Netcode.Client
                         "share a host.");
                 }
 
-                _log.Info($"map '{mapId}' assigned to {endpoint} over {transport}");
+                _log.Info($"map '{mapId}' assigned to {endpoint} over KCP/UDP");
                 // The hop is authenticated exactly when it is TLS: the transport has no
                 // accept-anything mode -- TlsOptions either pins a certificate or falls through
                 // to platform validation -- so there is no third state where the flag would be

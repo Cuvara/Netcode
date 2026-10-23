@@ -144,7 +144,7 @@ namespace Samples.WorldView
 
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
-                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                    new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), new ProtobufWireCodec(), new UnityNetLog());
 
                 // Diagnostics only: lets the binder attribute a despawn to an explicit
                 // `removed` id rather than to the entity merely ceasing to be listed.

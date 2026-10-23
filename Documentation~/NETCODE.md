@@ -28,6 +28,7 @@ The gateway is a redirector and is **never** in the gameplay data path (ADR-3).
 | | Gateway connection | Game-server connection |
 |---|---|---|
 | Purpose | auth + map assignment | the session |
+| Transport | TCP, optionally TLS (ADR-23) | **KCP over UDP only** — no TCP fallback |
 | Lifetime | can be dropped after step 2 | held for the whole time on that map |
 | Kept open by default? | yes, see below | yes |
 | Class | `Client/GatewayClient` | `Client/GameSessionClient` |
@@ -48,7 +49,7 @@ displaced by another login.
 | `Json/` | minimal JSON parser and writer | yes |
 | `Codec/` | encoding sniff, `IWireCodec`, the JSON codec | yes |
 | `Snapshot/` | handle table, snapshot resolution | yes |
-| `Transport/` | framing, `ITransport`, TCP implementation | framing/endpoint yes; TCP uses UniTask |
+| `Transport/` | framing, `ITransport`, TCP (gateway hop) and KCP (gameplay hop) implementations | framing/endpoint/`Kcp`/`KcpClientSession` yes; `TcpTransport`/`KcpTransport` use UniTask |
 | `Connection/` | `WireConnection` — loops, heartbeat, close semantics | UniTask |
 | `Client/` | `GatewayClient`, `GameSessionClient`, `NetworkClient`, settings | UniTask |
 | `Diagnostics/` | `INetLog` and its Unity implementation | `UnityNetLog` only |
@@ -151,11 +152,14 @@ about one hop and believed about all three.
 |---|---|---|
 | client ↔ **Nakama** (auth, meta) | TLS, terminated by Nakama | the URL scheme the game is built with — `http://` is plaintext no matter what else is set |
 | client ↔ **gateway** | TLS, terminated by the gateway (ADR-23) | `NetworkSettings.GatewayUseTls` |
-| client ↔ **game server** | sealed at the message layer (ADR-22) | `NetworkSettings.RequireSealedSession` |
+| client ↔ **game server** (KCP/UDP only) | sealed at the message layer (ADR-22); optional kcp-go AES datagram key | `NetworkSettings.RequireSealedSession`; `NetworkSettings.TransportKey` |
 
-The gameplay hop is deliberately *not* TLS. It is sealed per message —
-ChaCha20-Poly1305 over an authenticated X25519 exchange — so a KCP session gets the same
-guarantee as a TCP one, which TLS cannot give it.
+The gameplay hop is KCP over UDP and nothing else, so it cannot be TLS. It is sealed per
+message — ChaCha20-Poly1305 over an authenticated X25519 exchange — which gives a KCP session
+authenticated confidentiality that TLS could not. `NetworkSettings.TransportKey` (the server's
+`TRANSPORT_KEY`, 64 hex chars) additionally encrypts every datagram with kcp-go's AES-CFB +
+CRC scheme; that is confidentiality against a passive observer, not authentication, and empty
+means plaintext datagrams (dev).
 
 ### Turning on gateway TLS
 
@@ -173,9 +177,9 @@ transport factory for `TransportKind.TcpTls` instead of `TransportKind.Tcp`; the
 **throws** if it has no `TlsOptions`, rather than handing back a plaintext transport for a
 TLS request.
 
-`TransportKind.TcpTls` is client-side only. `TransportKinds.Parse` refuses it like any
-other unknown string, so a game server cannot ask the client to switch a hop's protection
-by putting a value in `enter_world_resp`.
+`TransportKind.Tcp` and `TransportKind.TcpTls` are gateway-hop kinds only.
+`TransportKinds.ParseGameplay` accepts `"kcp"` and nothing else, so a game server cannot ask
+the client to switch a hop's transport or protection by putting a value in `enter_world_resp`.
 
 ### There is no "skip validation" switch, and there should not be
 
@@ -231,6 +235,68 @@ actually happened rather than what was intended.
 `[4-byte big-endian length][body]`, body at most 1 MiB. A length of zero, a
 negative one (the high bit set) or one above the cap is a protocol error, not
 something to allocate for.
+
+## Transport throughput: the ceiling is awaits per frame
+
+`TcpTransport` buffers. `ReadFrameAsync` parses frames out of a 16 KiB receive buffer
+and only touches the socket when the bytes it needs are not already in hand, so one
+`await` can yield many frames.
+
+That is not an optimisation, it is the throughput rule. Every `await` in the transport
+goes through `Task.AsUniTask()`, which schedules its continuation on Unity's
+`SynchronizationContext` — drained **once per player-loop frame**, from a snapshot taken
+at the start of the drain. An await therefore costs a whole player-loop frame even when
+the bytes are already sitting in the socket buffer, and the read loop's ceiling is:
+
+```
+framesPerSecond = playerLoopHz / awaitsPerFrame
+```
+
+A reader that reads exactly the header and then exactly the body pays **two** awaits per
+frame and caps at half the frame rate: 15.0/s at 30 fps, 13.05 at 26, 10.0 at 20, 5.0 at
+10, with the socket backlog growing without bound below the knee. It is a cliff, not a
+gradient — injected frame-time jitter costs nothing while the mean rate stays above it.
+Harmless on a desktop; squarely in the way on Android, where 30 fps is a normal target
+and 30 fps is the knee.
+
+`WireConnection`'s read loop adds no await of its own: it is one `ReadFrameAsync` per
+frame and a synchronous `HandleFrame`, so awaits-per-frame is decided entirely inside the
+transport.
+
+### Where that decision lives, and how it is tested
+
+The decision — *can a frame be produced from bytes already held?* — is
+`Runtime/Transport/FrameBuffer.cs`. It is plain C#: no `UniTask`, no `UnityEngine`, no
+socket. `TcpTransport` owns one and does nothing else to the receive path.
+
+This split exists so the ceiling is measurable. `Tests/Editor/TransportReadPumpTests.cs`
+drives the real `FrameBuffer` through a model of the player loop's drain semantics — *at
+most one socket read per tick, unlimited synchronous frame extraction per tick* — against
+a virtual server writing at 15/s, and asserts the reader holds 15.0/s down to 5 fps. Its
+control, `ExactReadStrategy`, is the two-await shape kept permanently in the fixture: it
+reproduces 10.0/s at 20 fps and 5.0/s at 10 fps, which is what proves the harness can see
+the ceiling at all. What is modelled is the *scheduler*; the framing under test is the
+shipping code.
+
+Both files run headlessly — see [Running the tests without Unity](#running-the-tests-without-unity).
+
+### KCP: one await per datagram (0.48.0)
+
+`KcpTransport`'s receive loop had the same shape for datagrams. It awaited one
+`UdpClient.ReceiveAsync().AsUniTask()` per datagram, and `AsUniTask` continues on the main-thread
+context, so it read at most one datagram per frame. That cost nothing at 15 snapshots a
+second. After a client stall, the socket held the stall's snapshots and the server's KCP
+retransmissions of them. The live client applied the 32-snapshot backlog of a 2 s stall over
+315 to 353 ms (rpg-factory testlab S13). At a vsynced 60 fps that would take seconds.
+
+After each wake the loop now reads every datagram already queued, synchronously
+(`UdpDatagramDrain.Drain`, bounded at 4096). A backlog therefore arrives in the frame the main
+thread wakes in. `TransportReceivePacingTests` reproduces the old pacing headlessly, with a real
+loopback socket continued through a frame-pumped synchronization context, and shows the drain
+reading the whole backlog in one frame. For the test lab, `KcpTransport.DatagramsRead`,
+`ReceiveWakeups` and `MaxDatagramsPerWake` are surfaced as `GameSessionClient.TransportDatagramsRead`,
+`TransportReceiveWakeups` and `TransportMaxDatagramsPerWake`. Sampled per frame, the difference
+of the first is the number of datagrams read that frame.
 
 ## Encoding: sniffed, not negotiated (ADR-9)
 
@@ -327,6 +393,167 @@ does not stand alone, so the dependency is unavoidable rather than a preference.
 lives inside the package so the package remains importable on its own, and
 `Runtime/link.xml` preserves it from IL2CPP stripping.
 
+## Game events (0.40.0)
+
+`ResolvedSnapshot.Events` carries the edge-triggered occurrences a tick produced. They arrive
+on the existing `SnapshotReceived` callback; there is deliberately no second channel, because
+two ways to reach the same events is two ways to consume them twice.
+
+### Why they are not derivable
+
+Every other field on a snapshot is level-triggered STATE. State is the wrong shape for an
+occurrence: "took 12 damage" cannot be reconstructed from two HP values a tick apart. A heal
+and a hit in the same tick net out; a delta may omit the entity entirely if it regenerated
+back; an entity leaving the AOI mid-fight stops reporting altogether. A client inferring
+damage numbers from HP deltas is wrong in exactly the cases a player notices, and silently.
+
+`Death` is likewise not redundant with `EntityAction.Dead`: `Dead` persists as long as the
+corpse does, so a client arriving afterwards sees it and cannot tell the death just happened.
+
+### Consuming them
+
+- **Once.** Events are not state and are never re-sent. A keyframe restates the world, not
+  its history, so a consumer that re-reads an old snapshot would show a hit twice.
+- **Ignore an unrecognised `Type`.** Dropping an unknown event costs a missing number;
+  guessing costs a wrong one.
+- **`SourceId` empty is normal.** It means "no such participant, or not visible to you". A
+  player who sees the victim but not the attacker still gets the number — the alternative is
+  a health bar that drops with no explanation. An empty `TargetId` is the case to skip:
+  there is nowhere to draw it.
+
+### Unresolved participants do NOT force a resync
+
+`SnapshotResolver.UnresolvedEventParticipants` counts event handles with no binding. The
+snapshot still resolves. That is a deliberate asymmetry with an entity, where an unresolvable
+handle aborts the snapshot: a wrong entity state is a wrong world and must be repaired, while
+a keyframe costs every observer bandwidth exactly when the link is already struggling.
+Guessing remains forbidden — only the escalation is.
+
+## `action_seq` — retriggering an animation (0.40.0)
+
+`ResolvedEntity.ActionSeq` changes every time an entity ENTERS an action, including
+re-entering the one it is already in. `Action` is level-triggered, so two attacks in a row are
+identical bytes and an animator driven from it alone plays the swing once and holds. No
+client-side edge detection recovers that: the edge is genuinely not in the data, and only the
+server knows an action was re-entered.
+
+```csharp
+// Inequality, NEVER greater-than.
+if (entity.ActionSeq != 0 && entity.ActionSeq != _lastSeen)
+{
+    _lastSeen = entity.ActionSeq;
+    animator.SetTrigger("Attack");
+}
+```
+
+The counter wraps at 2³² and resets when the server restarts or the entity respawns, so a
+`>` test stops retriggering for four billion actions after a single wrap, with nothing
+reporting an error. Zero means the sender does not send a counter at all — keep the
+pre-existing behaviour rather than treating it as an edge, or an old server retriggers every
+animation on every snapshot.
+
+`Samples~/GameEventProbe` reproduces both failure modes on a button.
+
+## Ability input (0.40.0)
+
+`InputMessage.AbilityId` (0 = none), `AbilityTargetId`, `AimX`/`AimY`. The target is a
+server-side entity id, never a handle — interning is built by the server for its own outbound
+snapshots and it would not recognise one coming back. The aim is a POINT, unlike
+`MoveX`/`MoveY` which are a direction, and the world origin is a legitimate aim point so
+`(0,0)` does not mean "not aimed".
+
+**Abilities are not predicted, and a UI must not pretend otherwise.** Movement is a pure
+function of input the client already has; an ability outcome depends on cooldowns, content and
+other entities' state. Drive a cast animation and a cooldown sweep off the `AbilityCast`
+event, not off the input — a mispredicted ability is visible as a cast that plays and then
+un-happens, which is worse than one that starts a round trip late.
+
+## Wire protocol version 3 — "Core v3" (0.46.0)
+
+`WireProtocolVersion.Current` is **3** (ADR-28..31), in step with `WireProtocol.ProtocolVersion`
+(C# server) and `messages.WireProtocolVersion` (Go). **Requires `com.rpgmmo.shared-gamelogic`
+`sgl-v0.7.0`** — `CharacterMotor`, `ProjectileLogic`, `MapGeometry`, `Vec3`, the
+`EntitySnapshotData` v3 constructor and `StatValueData`/`StatusEffectData` do not exist in 0.6.0.
+
+### Version rule
+
+The client accepts a server echoing any version from `WireProtocolVersion.MinimumServerVersion`
+(2) to `Current` (3), or none (unversioned, admitted on trust as before); a server ahead of the
+client is still refused with `protocol_version_mismatch`. Features are gated on what the game
+server echoed in `JoinTokenResponse.protocol_version`, via `WireProtocolVersion.Supports(version,
+feature)`:
+
+| Feature | Constant | Below it |
+|---|---|---|
+| Command channel (MsgType 32-34) | `CommandChannel` = 3 | `SendCommandAsync` completes at once with `client_protocol_too_old`, nothing is sent |
+| 3D movement (`CharacterMotor`) | `Motor3D` = 3 | `LocalMovePredictor` stays on the planar `MovementSystem` path |
+
+An unversioned server supports no versioned feature. A version 2 server never sends any v3
+field, so every v3 property below reads as its "not sent" default against one.
+
+### Snapshot state (fields 14-24, mask bits `0x0200`-`0x2000`)
+
+`EntitySnapshot` gains `Z`, `VelX/VelY/VelZ`, `Owner` (handle) / `OwnerId` (JSON twin),
+`SpawnSeq`, `Stats` + `StatsRemoved`, `Statuses` + `StatusesRemoved`. `SnapshotResolver`
+resolves the two new entity references — a projectile's `owner` and a status's `source` —
+against the same handle table **after** the snapshot's own bindings land, like event
+participants. An unbound reference resolves to `null` and is counted in
+`UnresolvedEntityReferences`; it never aborts the snapshot or forces a resync, because the entity
+carrying it is still correctly identified. `ResolvedEntity` carries the v3 state (constructor
+taking `in ResolvedEntity core` plus every v3 field, mirroring Shared.GameLogic), and
+`WorldState.Apply` hands it to `EntitySnapshotData`'s v3 constructor; `SnapshotMerger` owns what a
+delta means for each bit (keep-last-known, stats/statuses upserted and removed by id).
+`ResolvedGameEvent.EffectId` carries the status id for `StatusApplied` (7), `StatusRemoved` (8)
+and periodic damage/heal; `ProjectileHit` (9) is the impact cue.
+
+### Input (fields 9-13)
+
+`InputMessage` gains `AimZ`, `RenderTick` + `RenderAlpha`, `Jump`, `SpawnSeq`.
+`InputMessage.SetRenderTime(binder.RenderTick)` fills the render pair from the interpolation
+clock (`WorldViewBinder.RenderTick`, i.e. `InterpolationClock.RenderTick`) — the instant remote
+entities were drawn at, which lag compensation rewinds hit targets to (ADR-29, capped at 200 ms).
+Send it with `GameSessionClient.SendInput(InputMessage)`. Every v3 field is elided at zero in
+both encodings, so an input that uses none of them is byte-identical to a version 2 input.
+
+### Command channel (MsgType 32-34, ADR-30)
+
+```csharp
+CommandResult r = await client.SendCommandAsync(GameplayOpcodes.X, payloadBytes, ct);
+if (!r.Ok) { /* r.Error: a server code, or a CommandChannelErrors name */ }
+client.ServerPushReceived += push => { /* decode push.Payload for push.Opcode */ };
+```
+
+- Netcode only moves bytes; payloads are encoded with Shared.GameLogic's gameplay codec.
+- `seq` is allocated per connection from 1 (0 is skipped on wrap) and results are matched by it,
+  in any order. Every result is also raised on `CommandResultReceived`, including one whose
+  caller cancelled — cancellation stops the wait, not the command.
+- **Never throws for a channel failure.** `client_not_connected`, `client_protocol_too_old`
+  (checked before anything is sent) and `client_connection_closed` (in flight when the
+  connection ended — a drop, kick, transfer, reconnect or disconnect) complete the task with
+  `Ok == false`. `CommandChannelErrors.IsLocal` tells them from server codes. A
+  `client_connection_closed` command may or may not have executed; retry only what is
+  idempotent. Opcode 0 throws `ArgumentOutOfRangeException` (a caller bug).
+- JSON carries `payload` as padded standard base64, as Go marshals `[]byte`.
+
+### Character slots (ADR-31)
+
+`NetworkClient.CharacterId` is the roster character the next connect, dungeon entry or transfer
+asks for (`EnterWorldRequest.character_id`; empty = the account's default and the pre-slot
+bytes). The gateway checks it against the `cid` claim Nakama put in the gateway token, so the JWT
+must be minted for the same character. A reconnect rejoins as the character the lost session
+played. The server's echo (`JoinTokenResponse.character_id`) is `GameSessionClient.CharacterId` /
+`NetworkClient.ActiveCharacterId` — bind the local view to that, not to the request.
+`GatewayClient.EnterWorldAsync(mapId, partyId, characterId, ct)` is the low-level form.
+
+### JSON names
+
+Every v3 field uses its `wire.proto` snake_case name, identical to the Go struct tags in
+`shared/messages`: `z`, `vel_x`, `vel_y`, `vel_z`, `owner`, `owner_id`, `spawn_seq`, `stats`
+(`stat_id`, `value`), `stats_removed`, `statuses` (`effect_id`, `stacks`, `expires_tick`,
+`source`), `statuses_removed`, `effect_id`, `aim_z`, `render_tick`, `render_alpha`, `jump`,
+`character_id`, `seq`, `opcode`, `payload`, `ok`, `error`. The JSON reader now also reads
+`changed_fields`.
+
 ## Heartbeat — implemented once
 
 Both hops ping every **10 s** and drop a peer after **30 s** without a pong, so
@@ -368,6 +595,52 @@ eviction from a gateway build that predates `kick` — is reported as
 `DisconnectCause.ServerDisconnect` with its reason. `duplicate_login` and
 `server_shutdown` are the only reasons emitted today; anything else is handled
 generically.
+
+## A dropped session is detected by silence (0.48.0)
+
+KCP's dead link (20 unacknowledged retransmissions) is not enough after a client freeze. An
+acknowledgement read on waking is timed as one long round trip, the RTO grows to seconds, and the
+20 retransmissions then take minutes. A client whose session the server had already dropped kept
+sending for 31 s, until its heartbeat timeout (S09 soak e26z).
+
+`KcpClientSession` therefore fails the session after `DefaultSilenceTimeoutMs` (5 s) without any
+datagram from the server. The failure is a `TransportError`, and `ReconnectPolicy` reconnects as for
+any transport error.
+
+- **What counts:** only time while the client runs. A `Tick` more than 250 ms after the previous
+  one is a freeze and is not counted, so the freeze itself never trips it. The backlog read on
+  waking resets the count.
+- **Why 5 s:**
+  - A live session hears a snapshot every world tick (66.7 ms) and a ping every 10 s.
+  - The server's own KCP gives up after 3.45 s at a 30 ms RTO, or 4.6 s at 40 ms.
+  - 5 s is past both, and it is 75 world intervals.
+- **Before any datagram has arrived:** the check is off. The join timeout and the 60 s idle
+  timeout cover that phase.
+
+## Leaving: the disconnect frame is delivered (0.48.0)
+
+`WireConnection.Leave` used to queue the `disconnect` frame and close in the same call.
+Closing cancelled the write loop before it ran, so the frame was never written, and
+`NetworkClient` disposed the socket straight after. The game server only noticed on its KCP
+dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
+
+`LeaveAsync` now works in four steps:
+
+1. It sends the frame through the send queue, so the frame is sealed and written after
+   everything queued before it. Nothing queued after it is sent.
+2. It waits for the write loop to hand the frame to the transport, for at most
+   `LeaveWriteTimeoutMs` (500 ms).
+3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
+   acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
+   `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
+   acknowledgement, with a floor for the frame-bound ARQ timer and a cap so leaving never
+   waits on a bad link.
+4. It closes.
+
+`Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
+leave, which disposes it when done, so disposing the session no longer cuts it off.
+`LeaveAcknowledged` reports the outcome. TCP needs no flush: an orderly close sends what is
+queued before its FIN.
 
 ## Join tokens are single-use
 
@@ -520,6 +793,83 @@ is `Shared.GameLogic.Systems.SnapshotMerger`'s job — the same code the server 
 diffed against. A second copy in the client is the divergence ADR-10 exists to
 prevent.
 
+### Buffer reuse on the receive path
+
+Decoding one snapshot used to build four copies of the entity list: the Protobuf
+objects the parser produces, the hand-written `Msg.EntitySnapshot` objects the
+codec converts them into, the resolver's `List<ResolvedEntity>`, and
+`WorldState`'s `EntitySnapshotData[]`. Two of those four are now reused
+(Cuvara/IndieRPGMMOAdventure#61), which is worth knowing about because both come
+with a contract.
+
+**`ProtobufWireCodec` can pool the decoded snapshot, and does not by default.**
+`ProtobufWireCodec.CreatePooled()` makes every snapshot decode return the *same*
+`SnapshotMessage` instance, refilled — so the previous decode's result is
+invalidated by the next one. `WireConnection` builds its inbound decoder that way,
+because its read loop raises `FrameReceived` synchronously and the only snapshot
+consumer, `GameSessionClient.OnFrame`, resolves the message and retains nothing
+from it. `new ProtobufWireCodec()` keeps the old behaviour, and that is the one to
+use anywhere two decoded snapshots are held at once — a test comparing a keyframe
+against a delta, for instance.
+
+It is a static factory that sets a field, rather than a constructor overload, and
+that is load-bearing. `RegisterNetworking` registers the type as
+`builder.Register<ProtobufWireCodec>(Lifetime.Singleton)`, and VContainer's
+`TypeAnalyzer` picks a constructor by reflection, takes the **greediest** one, and
+resolves its parameters out of the container. A `ProtobufWireCodec(bool)` overload
+therefore breaks `RegisterNetworking` at resolve time with
+
+```
+VContainerException : Failed to resolve Cuvara.Netcode.Codec.ProtobufWireCodec
+  : No such registration of type: System.Boolean
+```
+
+**Making that constructor `private` does not help** — VContainer reflects with
+`BindingFlags.NonPublic` included, so a private overload is still selected, and the
+identical failure comes back. So: **`ProtobufWireCodec` must have exactly one
+constructor, of any accessibility, and it must be parameterless.**
+`SnapshotPipelineReuseTests` asserts that by reflection, with `NonPublic` in the
+mask. Marking the constructor `[Inject]` would also fix it and is the wrong fix: it
+would make the Codec assembly depend on VContainer, which is optional here — the
+`no-vcontainer` install probe exists to keep it that way.
+
+Note that `WireConnection` builds its own inbound Protobuf codec even when the
+outbound codec is already Protobuf, rather than aliasing it. The outbound codec is
+registered as a DI **singleton** and is shared by the gateway and game-session
+connections, so a decode buffer living on it would be shared between two read
+loops.
+
+**`WorldState` reuses its conversion buffers only on an exact length match.**
+`SnapshotData` carries an array and no count, and `SnapshotMerger` iterates every
+element, so a buffer longer than the snapshot would replay its tail — real
+entities, at last tick's positions, resurrected after a despawn. Clearing the tail
+is no better, because a zeroed `EntitySnapshotData` has a null id and the merger
+would key its dictionary on it. So the reuse hits when the entity count repeats
+and not otherwise, which on a settled AOI is most ticks and on a churning one is
+few. The buffers never escape the class.
+
+Neither the resolver's entity list nor the transport's frame buffer is pooled.
+`ResolvedSnapshot` is published to `SnapshotReceived` subscribers this package
+does not control, and recycling a list handed to an unknown consumer is not a
+change that can be made from inside the package. The transport's per-frame
+`byte[]` (now `FrameBuffer.TryTakeFrame`) is poolable in principle — neither codec
+retains it — but `ITransport.ReadFrameAsync` returns a `byte[]` and no length, so
+pooling it means changing that signature and every implementation and caller.
+
+Measured on the decode→resolve→apply path, 50 entities per delta, allocations per
+snapshot: **18,208 B → 10,512 B** when the entity count is steady, and
+**10,025 B → 7,353 B** when it varies. `SnapshotPipelineReuseTests` guards the
+content, not the byte counts.
+
+Those tests are pure C# but they are **not** in `Tests~/Headless`, and cannot be
+until that project can resolve `Shared.GameLogic`. `WorldState`, `ResolvedEntity`
+and `Msg.EntitySnapshot` all name `Shared.GameLogic` types, and that assembly
+arrives as a UPM **git** dependency Unity resolves into `PackageCache` — there is
+nothing for `dotnet restore` to fetch. Adding them to the headless project fails
+to compile with `CS0246: The type or namespace name 'Shared' could not be found`.
+They run in the Editor suite, and in the scratch project below, which reaches the
+`PackageCache` copy.
+
 ## Remote entity interpolation
 
 Remote entities are not drawn where the newest snapshot put them. They are drawn where
@@ -563,6 +913,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
@@ -664,6 +1018,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
@@ -722,8 +1080,14 @@ any of this.**
 ### Wiring it up
 
 ```csharp
+// The tick rate is the server's BASE tick rate (60 Hz by default), not its 15 Hz
+// world/snapshot rate. Registered before the join, so a placeholder here...
 var predictor = new LocalMovePredictor(
-    new PredictionSettings(tickRate: 15, speed: 5f, MapBounds.Default));
+    new PredictionSettings(tickRate: 60, speed: 5f, MapBounds.Default));
+
+// ...replaced by the server's advertised rate after EVERY join, next to the model:
+predictor.UseServerProtocol(client.ServerProtocolVersion);
+predictor.UseServerTickRate(client.TickRate);
 
 var binder = new WorldViewBinder(view, predictor);
 
@@ -741,6 +1105,28 @@ calls `SeedBaseTick` — **if you bind views yourself rather than through the bi
 call is yours to make**; see "The prediction contract you must not 'fix'" below. **You must
 call `AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
 renders at the newest received position, which is 0.4.0's behaviour.
+
+### The predictor's tick rate is the server's, adopted after the join
+
+`LocalMovePredictor` steps once per **base** tick and labels its history with base ticks in
+the server's tick space (snapshot `tick`, `ack_applied_tick`, `SeedBaseTick`). Its rate must be
+the rate the server simulates at — `GameSessionClient.TickRate` / `NetworkClient.TickRate`
+from the join reply — and a composition root that registers the predictor before any join
+cannot know it. **Call `UseServerTickRate(client.TickRate)` after every join, before the first
+reconcile**, next to `UseServerProtocol`. Same rate: nothing changes, so it is safe on every
+join. Different rate: the timestep, `MaxBankedTicks` and `MaxCatchUpTicks` are re-derived and the
+predictor is `Reset`. Zero ("not sent") keeps the constructed rate.
+
+**What skipping it costs, measured** (rpg-factory testlab run `20261022T042952Z-S09-h87z`): a
+game built its predictor with `GameConstants.DefaultTickRate` — **15**, the world rate —
+against a 60 Hz server. The 15 Hz clock, steered onto a 60 Hz tick line, fell 45 ticks a
+second behind and hard-resynchronised about once a second (dropping pending inputs and the
+hold); nearly every reconcile missed the history; corrections came in whole 15 Hz steps
+(`LastCorrection` **0.333** = four 60 Hz steps, on about half of all snapshots,
+`SmoothedCorrections` climbing at the snapshot rate); and a burst of late snapshots drew the
+local player **1.64 units in one frame**. No counter names that as a rate problem;
+`PredictionClockSteering.PredictorRateDisagrees` now does (the measured tick stream against
+`TickRateHz`, 15% tolerance). Pinned by `PredictorTickRateTests`.
 
 ### Why `AdvanceFrame` is not optional
 
@@ -1247,9 +1633,45 @@ verifiable later. Do not infer behaviour from a pin diff in either direction: a 
 moved may change nothing, and a pin that did not move does not mean the server's input
 handling stood still.
 
-## Running the EditMode tests without Unity
+## Running the tests without Unity
 
-Most of `Tests/Editor/` is pure C# — the predictor, the estimators, the codec, the
+Part of this is now committed and runs in CI, and part of it is still scratch. They are
+different things and it matters which one you are looking at.
+
+### Committed: `Tests~/Headless` (runs on every PR)
+
+`Tests~/Headless/Cuvara.Netcode.Tests.Headless.csproj` is a `net10.0` test project that
+compiles a named list of package sources and **the same `Tests/Editor/` files the Editor
+suite runs** — listed, not copied, so there is one source of truth. `Tests~` ends in a
+tilde, so Unity never imports it and it needs no `.meta` files.
+
+```bash
+cd 'Tests~/Headless' && dotnet test
+```
+
+352 tests (2026-10-08), a few seconds. The CI job `Headless tests (dotnet)` runs it on every PR and
+fails on a run that executed zero tests, because `dotnet test` exits 0 when it matched
+nothing.
+
+It currently covers the transport's framing and read-loop throughput: `FrameBuffer`,
+`WireFraming`, `TransportException`, exercised by `FrameBufferTests` and
+`TransportReadPumpTests`; the KCP gameplay transport's Unity-free core (`Kcp`, `KcpCrypto`,
+`KcpClientSession`, `TransportKinds`, `NetworkEndpoint`), exercised by `KcpCoreTests`,
+`KcpCryptoTests`, `NetworkEndpointTests` and `KcpGameplayTransportTests` (which includes a
+real loopback UDP echo with and without a transport key); and the prediction suites. Adding a file to it is a deliberate act — `EnableDefaultCompileItems`
+is off — and a source that gains a `using UnityEngine` breaks the build here first.
+
+**What still needs Unity, and why.** `TcpTransport`, `KcpTransport` and `WireConnection` await through
+`UniTask`, and `UniTask` needs `UnityEngine`; so the awaiting itself, the TLS handshake,
+cancellation-by-socket-close, the player-loop scheduling and everything above it stay in
+the EditMode suite (`SealedTransportTests`, `GatewayTlsTests`, `WireConnectionDispatchTests`,
+`NetworkClientRecoveryTests`, `GameplayTransportPolicyTests`). That line is deliberate: the headless project does not stub
+`UniTask`, because a test against a stub measures the stub. What moved out is the one
+thing that governs throughput and never needed a scheduler to decide.
+
+### Scratch: a throwaway project over the whole suite
+
+Most of the rest of `Tests/Editor/` is pure C# — the predictor, the estimators, the codec, the
 interning — and runs under a throwaway `dotnet` project in a few seconds, which is worth
 having when the Editor is busy or unavailable. The project lives outside the package (it is
 scratch, not an artefact): a `net10.0` csproj with `EnableDefaultCompileItems` off, globbing
@@ -1346,29 +1768,71 @@ still: a suite reporting success while executing nothing is the failure mode thi
 repository has paid for repeatedly. **An Ignore with a reason is visible in the report and
 says what is missing**, which is the only honest option of the three.
 
-## KCP transport
+## KCP transport (the only gameplay transport)
+
+Realtime gameplay is **KCP over UDP only**. There is no TCP gameplay transport, no fallback and
+no setting that selects one; TCP (optionally TLS) is the gateway hop's transport and nothing
+else.
 
 `KcpTransport` implements `ITransport` over UDP using the same ARQ state machine the game
-server runs (ported from `GameServer.Net.Transport.Kcp`, itself a port of kcp-go v5).
+server runs (ported from `GameServer.Net.Transport.Kcp`, itself a port of kcp-go v5). The
+session state — ARQ, crypto, reassembly, idle timeout, dead link — lives in the Unity-free
+`KcpClientSession`, which is what the headless suite tests; `KcpTransport` is the
+socket + UniTask shell around it.
 
-**Stream mode** is on (`Kcp.Stream = 1`), so KCP delivers a byte stream — the same contract
-as TCP. The identical `[4-byte BE length][body]` framing sits on top, and nothing above
-`ITransport` knows which transport it is on. The framing is in `WireFraming`, shared by both
-transports.
+**Stream mode** is on (`Kcp.Stream = 1`), so KCP delivers a byte stream. The same
+`[4-byte BE length][body]` framing as the gateway hop sits on top (`WireFraming`), and nothing
+above `ITransport` knows which transport it is on.
 
-**Selection is server-driven.** The `enter_world_resp` carries a `transport` field (`"tcp"` or
-`"kcp"`); `TransportKinds.Parse` maps it to the enum; `DefaultTransportFactory.Create` builds
-the right transport. A server advertising KCP is not listening on TCP, so falling back would
-be a silent failure — this is why the factory threw before the transport existed.
+**The transport string is checked, never defaulted.** `enter_world_resp.transport` must be
+`"kcp"` (case-insensitive). `GatewayClient` parses it with `TransportKinds.TryParseGameplay`; an
+empty value, `"tcp"` or anything else fails the assignment with a `NetworkException` whose
+message names the value and whose `ServerError` is `unsupported_gameplay_transport` —
+permanent: not retried by the join loop, and it ends a reconnect at once. Empty no longer
+means TCP. `GameSessionClient.JoinAsync` refuses any `MapAssignment.Transport` but
+`TransportKind.Kcp` **before** it asks a factory for anything, so no factory can be talked into
+building a TCP gameplay link. `DefaultTransportFactory.CreateGateway(useTls)` builds only
+TCP/TLS; `CreateGameplay()` builds only `KcpTransport`.
+
+**No handshake, so a dead port is a timeout — reported as one.** KCP has no connect: the
+server creates the session when the first datagram from an unknown endpoint arrives, and
+adopts its conversation id. `ConnectAsync` sends nothing; the first datagram is the one
+carrying `join_token`. When no reply arrives inside `NetworkSettings.ConnectTimeout` and the
+transport received not one datagram, `JoinAsync` throws
+
+```
+KCP/UDP connect timeout to <host>:<port> after 10 s: no UDP datagram came back from the game
+server. Check the firewall and the UDP port mapping for udp/<port> (Docker '<port>:<port>/udp',
+Agones/k8s 'protocol: UDP'), and that -cuvara-transport-key matches the server's TRANSPORT_KEY
+```
+
+(a retryable `NetworkException`, not a bare cancellation).
+
+**Session hygiene.**
+
+| | Behaviour |
+|---|---|
+| Conversation id | cryptographically random and non-zero, per session (`KcpClientSession.NewConversationId`). It used to be a process-wide counter starting at 1. |
+| Address | the first IPv4 address the host resolves to, when there is one — the game server binds IPv4 Any, and `localhost` often resolves to `::1` first. |
+| Idle timeout | no inbound datagram for 60 s fails the session (`KCP idle timeout: no UDP datagram from <host:port> ...`); the read throws, so the connection closes with `TransportError` and the reason, and the reconnect policy treats it like any connection loss. The heartbeat (30 s pong timeout) usually ends a dead link first. |
+| Dead link | a segment retransmitted the maximum number of times fails the session the same way (it used to close silently, as if the peer had hung up). |
+| Receive bound | reassembled bytes are drained from the ARQ only while no complete frame is buffered, so the buffer holds at most one partial frame plus one segment; the rest waits in KCP's receive queue, whose window throttles the sender. The hard bound is `KcpClientSession.MaxStreamBytes` (4 + 1 MiB + one MTU); reaching it fails the session — bytes are never dropped. |
+| Send | `Kcp.Send` < 0 throws `TransportException` with the code; every write is flushed immediately (the server's `SetWriteDelay(false)`). |
 
 **Encryption** is optional. `KcpCrypto` implements kcp-go's AES-256-CFB per-packet encryption
-(nonce + CRC32 + payload, fixed IV). The key is passed through `DefaultTransportFactory`'s
-constructor; empty means plaintext (the dev default). Key derivation matches Go's
+(nonce + CRC32 + payload, fixed IV). The key is `NetworkSettings.TransportKey`, which
+`RegisterNetworking()` hands to `DefaultTransportFactory` (so do `NetworkBootstrap` and the DOTS
+Sample); empty means plaintext (the dev default). Key derivation matches Go's
 `backend/shared/transport/crypto.go` — 64 hex chars decoded verbatim, anything else stretched
-with HKDF-SHA256. A wrong key fails the CRC and the session never forms.
+with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
+is why the connect-timeout message names the key.
 
 **Tuning** matches `KcpTuning` in the server and `backend/shared/transport/transport.go`
 exactly: `NoDelay=1, Interval=10ms, FastResend=2, NoCongestion=1, Wnd=128, MTU=1350`.
+
+**WebGL.** Browsers have no UDP sockets. `new KcpTransport(...)` throws
+`NotSupportedException("KCP/UDP gameplay transport is not available on WebGL ...")` in a WebGL
+player; there is no fallback, so a WebGL build cannot play realtime gameplay.
 
 ## Map transfer
 
@@ -1391,7 +1855,7 @@ creates one from persistent state.
 
 | | Status |
 |---|---|
-| WebGL | `System.Net.Sockets` is unavailable there; needs a WebSocket `ITransport`, which the gateway does not speak today either |
+| WebGL | not supported for realtime play: gameplay is KCP/UDP only and browsers have no UDP (`KcpTransport` throws `NotSupportedException`); `System.Net.Sockets` is unavailable for the TCP gateway hop too |
 | Prediction of anything but movement | deliberate — see below |
 | Ability cast protocol | tracked as Cuvara/Netcode#85 |
 | Status effects in snapshot | tracked as Cuvara/Netcode#86 |
@@ -1685,7 +2149,7 @@ Observed end to end against the local Docker stack on 2026-08-11, gateway on
 [bootstrap]   → auth: sending the JWT to the gateway
 [Net] authenticated with the gateway as 'dev-player'
 [bootstrap] step 3/5 — enter_world 'map_01': asking the gateway which game server to dial
-[Net] map 'map_01' assigned to 127.0.0.1:9200 over Tcp
+[Net] map 'map_01' assigned to 127.0.0.1:9200 over KCP/UDP
 [bootstrap]   → dialing the game server directly and spending the join token
 [Net] joined 127.0.0.1:9200 as 'dev-player'
 [bootstrap]   → join accepted

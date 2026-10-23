@@ -50,10 +50,18 @@ namespace Cuvara.Netcode.Tests.Editor
         /// be made in all three. If this assertion fails, the other two need the same
         /// edit and the API doc's version table needs a new row.
         /// </summary>
+        /// <remarks>
+        /// Moved 1 -> 2 for field-level delta (<c>changed_fields</c>, wire field 13) in
+        /// #158. This test did its job on that change: the bump failed here first, which is
+        /// exactly the "make me deliberate" the pin exists for. The server had already moved
+        /// to 2, and because it refuses any inexact version match, a client left at 1 was
+        /// being refused at the handshake rather than served the older wire. Bumped to 3 in
+        /// 0.46.0 for ADR-28..31 (Core v3), in step with both servers.
+        /// </remarks>
         [Test]
         public void CurrentVersionIsPinned()
         {
-            Assert.That(WireProtocolVersion.Current, Is.EqualTo(1u),
+            Assert.That(WireProtocolVersion.Current, Is.EqualTo(3u),
                 "mirror any bump in shared/messages/messages.go and GameServer/Net/WireProtocol.cs");
         }
 
@@ -89,6 +97,9 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             Assert.That(WireProtocolVersion.IsCompatible(WireProtocolVersion.Current + 1), Is.False);
             Assert.That(WireProtocolVersion.IsCompatible(9999u), Is.False);
+            // Behind the supported range: version 1 predates field-level delta, which every
+            // snapshot merge now assumes.
+            Assert.That(WireProtocolVersion.IsCompatible(WireProtocolVersion.MinimumServerVersion - 1), Is.False);
         }
 
         // ---- The client sends its version by default -----------------------------
@@ -126,13 +137,19 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             var codec = new JsonWireCodec();
 
+            // Built from Current rather than written as a literal: the assertion is that
+            // the key is PRESENT and carries what this build speaks, not that the number
+            // is any particular value. CurrentVersionIsPinned is what makes the value
+            // deliberate, and duplicating the literal here only means two edits per bump.
+            var expected = $"\"protocol_version\":{WireProtocolVersion.Current}";
+
             var auth = System.Text.Encoding.UTF8.GetString(
                 codec.EncodeBody(MsgType.Auth, new AuthRequest { Token = "jwt" }));
-            Assert.That(auth, Does.Contain("\"protocol_version\":1"));
+            Assert.That(auth, Does.Contain(expected));
 
             var join = System.Text.Encoding.UTF8.GetString(
                 codec.EncodeBody(MsgType.JoinToken, new JoinTokenRequest { Token = "jt" }));
-            Assert.That(join, Does.Contain("\"protocol_version\":1"));
+            Assert.That(join, Does.Contain(expected));
         }
 
         /// <summary>

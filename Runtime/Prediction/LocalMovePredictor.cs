@@ -1,5 +1,6 @@
 using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
+using Shared.GameLogic.World;
 
 namespace Cuvara.Netcode.Prediction
 {
@@ -99,11 +100,60 @@ namespace Cuvara.Netcode.Prediction
     /// rather than change, and if one of them genuinely has to change, say so on the dots
     /// side before it lands, not after.</para>
     ///
+    /// <para><b>Two movement models, chosen by the server's protocol version.</b> Against a
+    /// protocol 2 server every step is <see cref="MovementSystem.TryMove"/> in the plane, exactly
+    /// as it always was. Against a protocol 3 server (ADR-28) every step is
+    /// <see cref="CharacterMotor.Step"/> over a <see cref="MapGeometry"/> the game supplies
+    /// (<see cref="SetMapGeometry"/>; <see cref="MapGeometry.Flat"/> of the settings' bounds by
+    /// default): gravity, jumping, step-up and walls, with the predicted state carrying height,
+    /// vertical velocity and grounded-ness. <see cref="UseServerProtocol"/> selects between them.
+    /// Everything else -- the base-tick clock, rule 1, the hold window, the history comparison,
+    /// replay and smoothing -- is the same code for both, so the planar path is bit-identical to
+    /// what it was. The one addition the motor needs is that <b>gravity does not wait for
+    /// input</b>: on a base tick that neither an input nor the hold steps, an AIRBORNE character
+    /// still takes one motor step with no horizontal input, so a jump released mid-air keeps
+    /// falling instead of hanging until the next keypress.</para>
+    ///
     /// <para>Not thread-safe. Drive it from the thread that sends input and consumes
     /// snapshots.</para>
     /// </remarks>
     public sealed class LocalMovePredictor
     {
+        /// <summary>
+        /// The simulated body: ground-plane position plus, for the 3D motor, height, vertical
+        /// velocity and whether it stands on support. Under the planar model Z and VelZ stay 0
+        /// and Grounded stays true, so every planar computation is the one it always was.
+        /// </summary>
+        private readonly struct Body
+        {
+            public readonly float X;
+            public readonly float Y;
+            public readonly float Z;
+            public readonly float VelZ;
+            public readonly bool Grounded;
+
+            public Body(float x, float y, float z, float velZ, bool grounded)
+            {
+                X = x;
+                Y = y;
+                Z = z;
+                VelZ = velZ;
+                Grounded = grounded;
+            }
+
+            public static Body Planar(in Vec2 position) => new Body(position.X, position.Y, 0f, 0f, true);
+
+            public Vec2 XY => new Vec2(X, Y);
+
+            public Vec3 Position => new Vec3(X, Y, Z);
+
+            public Body WithXY(in Vec2 position) => new Body(position.X, position.Y, Z, VelZ, Grounded);
+
+            public Body Shifted(float dx, float dy, float dz) => new Body(X + dx, Y + dy, Z + dz, VelZ, Grounded);
+
+            public bool SameAs(in Body other) =>
+                X == other.X && Y == other.Y && Z == other.Z && VelZ == other.VelZ && Grounded == other.Grounded;
+        }
         private readonly struct PendingInput
         {
             public readonly long Tick;
@@ -137,14 +187,18 @@ namespace Cuvara.Netcode.Prediction
             /// </remarks>
             public readonly long LastMoveTickBefore;
 
+            /// <summary>The input's jump request; only the 3D motor reads it.</summary>
+            public readonly bool Jump;
+
             public PendingInput(
-                long tick, float moveX, float moveY, long baseTick, long lastMoveTickBefore)
+                long tick, float moveX, float moveY, long baseTick, long lastMoveTickBefore, bool jump)
             {
                 Tick = tick;
                 MoveX = moveX;
                 MoveY = moveY;
                 BaseTick = baseTick;
                 LastMoveTickBefore = lastMoveTickBefore;
+                Jump = jump;
             }
         }
 
@@ -183,17 +237,31 @@ namespace Cuvara.Netcode.Prediction
         public const float OffsetDecayPerSecond = 1e-8f;
 
         private readonly PendingInput[] _pending = new PendingInput[Capacity];
-        private readonly PredictionSettings _settings;
+
+        // Per pending slot: the Advance count when the input was recorded. An input whose count
+        // equals _advanceCount was recorded after the last Advance, in the frame still running.
+        private readonly long[] _pendingAdvance = new long[Capacity];
+
+        // Calls to Advance that ran. See RestampInputsOfThisFrame.
+        private long _advanceCount;
+        private PredictionSettings _settings; // the tick rate can be replaced by UseServerTickRate
         private float _speed;
-        private readonly float _dt;
+        private float _dt;
 
         private int _head;      // next write slot
         private int _count;     // live entries
         private long _lastRecordedTick;
 
-        private Vec2 _predicted;      // simulated position: authoritative + replayed inputs
+        private Body _predicted = Body.Planar(Vec2.Zero); // simulated body: authoritative + replayed inputs
         private Vec2 _renderOffset;   // predicted-minus-corrected, decayed to zero
         private Vec2 _step;           // displacement the most recent input produced
+        private float _renderOffsetZ; // vertical part of _renderOffset; 0 under the planar model
+        private float _stepZ;         // vertical part of _step; 0 under the planar model
+
+        // Movement model (see the class remarks). Planar until UseServerProtocol says otherwise.
+        private bool _motor3D;
+        private MapGeometry _geometry;
+        private MotorParams _motorParams = MotorParams.Default;
         private float _sinceInput;    // seconds since it, for spreading that step over frames
         // Starts at 1, never 0: zero is the "nothing held" sentinel for _heldFrom, so a
         // hold set by the very first input on tick 0 would read as no hold at all and
@@ -214,7 +282,7 @@ namespace Cuvara.Netcode.Prediction
         // The simulated position as it stood BEFORE anything stepped the current base tick,
         // and the tick that snapshot belongs to. Used to re-take a tick's single step when a
         // real input turns up after the hold has already taken it -- see RecordInput.
-        private readonly int _maxCatchUpTicks;
+        private int _maxCatchUpTicks;
 
         /// <summary>
         /// Where the prediction stood at the end of each of the last <see cref="HistoryTicks"/>
@@ -247,17 +315,17 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         private const int HistoryTicks = 256;
 
-        private readonly Vec2[] _history = new Vec2[HistoryTicks];
+        private readonly Vec3[] _history = new Vec3[HistoryTicks];
         private readonly long[] _historyTick = new long[HistoryTicks];
 
-        private void RecordHistory(long tick, in Vec2 position)
+        private void RecordHistory(long tick, in Body body)
         {
             int i = (int)((tick % HistoryTicks + HistoryTicks) % HistoryTicks);
-            _history[i] = position;
+            _history[i] = body.Position;
             _historyTick[i] = tick;
         }
 
-        private bool TryReadHistory(long tick, out Vec2 position)
+        private bool TryReadHistory(long tick, out Vec3 position)
         {
             int i = (int)((tick % HistoryTicks + HistoryTicks) % HistoryTicks);
             if (_historyTick[i] == tick)
@@ -266,7 +334,7 @@ namespace Cuvara.Netcode.Prediction
                 return true;
             }
 
-            position = Vec2.Zero;
+            position = Vec3.Zero;
             return false;
         }
 
@@ -279,13 +347,53 @@ namespace Cuvara.Netcode.Prediction
         /// corrected again — a correction that never converges, applied at the snapshot
         /// rate, which is exactly the artefact the history exists to remove.
         /// </remarks>
-        private void ShiftHistory(float dx, float dy)
+        private void ShiftHistory(float dx, float dy, float dz) => ShiftHistory(dx, dy, dz, long.MaxValue);
+
+        /// <summary>
+        /// As <see cref="ShiftHistory(float,float,float)"/>, for entries of ticks before
+        /// <paramref name="beforeTick"/> only: the replay path records the ticks it replayed
+        /// exactly and shifts the older ones.
+        /// </summary>
+        private void ShiftHistory(float dx, float dy, float dz, long beforeTick)
         {
             for (int i = 0; i < HistoryTicks; i++)
             {
-                if (_historyTick[i] == 0) continue;
-                _history[i] = new Vec2(_history[i].X + dx, _history[i].Y + dy);
+                if (_historyTick[i] == 0 || _historyTick[i] >= beforeTick) continue;
+                _history[i] = new Vec3(_history[i].X + dx, _history[i].Y + dy, _history[i].Z + dz);
             }
+        }
+
+        // Replayed positions, staged during a replay and written after the older entries are
+        // shifted (written in place first, they would be shifted too). Fixed size, no allocation.
+        private readonly Vec3[] _replayStage = new Vec3[HistoryTicks];
+        private readonly long[] _replayStageTick = new long[HistoryTicks];
+        private int _replayStageCount;
+
+        private void StageReplayedHistory(long tick, in Body body)
+        {
+            if (_replayStageCount == HistoryTicks)
+            {
+                // A replay longer than the ring: its oldest ticks would be overwritten anyway.
+                System.Array.Copy(_replayStage, 1, _replayStage, 0, HistoryTicks - 1);
+                System.Array.Copy(_replayStageTick, 1, _replayStageTick, 0, HistoryTicks - 1);
+                _replayStageCount--;
+            }
+
+            _replayStage[_replayStageCount] = body.Position;
+            _replayStageTick[_replayStageCount] = tick;
+            _replayStageCount++;
+        }
+
+        private void CommitReplayedHistory()
+        {
+            for (int k = 0; k < _replayStageCount; k++)
+            {
+                int i = (int)((_replayStageTick[k] % HistoryTicks + HistoryTicks) % HistoryTicks);
+                _history[i] = _replayStage[k];
+                _historyTick[i] = _replayStageTick[k];
+            }
+
+            _replayStageCount = 0;
         }
 
         /// <summary>Reconciles answered by comparing at the snapshot's own tick.</summary>
@@ -344,7 +452,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public int Adoptions { get; private set; }
 
-        private Vec2 _tickStart;
+        private Body _tickStart;
         private long _tickStartTick;
 
         // _lastMoveTick as it stood before that first step. Replay seeds its own bookkeeping
@@ -388,6 +496,7 @@ namespace Cuvara.Netcode.Prediction
             IsEnabled = settings.IsUsable;
             _dt = IsEnabled ? MovementSystem.DeltaTimeForTickRate(settings.TickRate) : 0f;
             _maxCatchUpTicks = GameConstants.MaxBankedMovementTicks(settings.TickRate);
+            _geometry = MapGeometry.Flat(settings.Bounds);
 
             // DeltaTimeForTickRate is the server's own helper, so this cannot disagree
             // with the server's dt for a tick rate both sides agree on. A zero here would
@@ -409,7 +518,7 @@ namespace Cuvara.Netcode.Prediction
         /// approximate. An approximation drifts silently and reads as a network problem;
         /// an absence reads as "prediction is off", which is true and diagnosable.
         /// </remarks>
-        public bool IsEnabled { get; }
+        public bool IsEnabled { get; private set; }
 
         /// <summary>
         /// Position to render the local player at: the predicted position plus whatever
@@ -426,6 +535,23 @@ namespace Cuvara.Netcode.Prediction
                 return new Vec2(
                     _predicted.X - _step.X * remaining + _renderOffset.X,
                     _predicted.Y - _step.Y * remaining + _renderOffset.Y);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Position"/> with height: where to render the local player under the 3D
+        /// motor, in the server's (x, y, z) space -- map to Unity as (x, z, y). Its X and Y are
+        /// always exactly <see cref="Position"/>'s; Z is 0 under the planar model.
+        /// </summary>
+        public Vec3 Position3
+        {
+            get
+            {
+                float remaining = 1f - StepProgress;
+                return new Vec3(
+                    _predicted.X - _step.X * remaining + _renderOffset.X,
+                    _predicted.Y - _step.Y * remaining + _renderOffset.Y,
+                    _predicted.Z - _stepZ * remaining + _renderOffsetZ);
             }
         }
 
@@ -517,7 +643,168 @@ namespace Cuvara.Netcode.Prediction
         public float ObservedInputInterval => _inputInterval;
 
         /// <summary>Predicted position with no smoothing applied. Diagnostics and tests.</summary>
-        public Vec2 SimulatedPosition => _predicted;
+        public Vec2 SimulatedPosition => _predicted.XY;
+
+        /// <summary><see cref="SimulatedPosition"/> with height. Z is 0 under the planar model.</summary>
+        public Vec3 SimulatedPosition3 => _predicted.Position;
+
+        /// <summary>
+        /// Predicted vertical velocity, units per second (positive is up). Always 0 under the
+        /// planar model.
+        /// </summary>
+        public float VerticalVelocity => _predicted.VelZ;
+
+        /// <summary>
+        /// Whether the predicted body stands on support. Always true under the planar model, which
+        /// has no air to be in.
+        /// </summary>
+        public bool IsGrounded => _predicted.Grounded;
+
+        /// <summary>
+        /// True when steps go through <see cref="CharacterMotor.Step"/> (a protocol 3 server);
+        /// false for the planar <see cref="MovementSystem.TryMove"/> path (protocol 2 or
+        /// unversioned). Set by <see cref="UseServerProtocol"/>.
+        /// </summary>
+        public bool UsesCharacterMotor => _motor3D;
+
+        /// <summary>
+        /// The collision world the 3D motor steps against. <see cref="MapGeometry.Flat"/> of
+        /// <see cref="PredictionSettings.Bounds"/> until <see cref="SetMapGeometry"/> supplies the
+        /// map's own -- which it must, because the server steps against the map file and a flat
+        /// prediction of a hilly map is corrected on every step.
+        /// </summary>
+        public MapGeometry Geometry => _geometry;
+
+        /// <summary>Motor tuning in force; <see cref="MotorParams.Default"/> unless replaced.</summary>
+        public MotorParams MotorParameters => _motorParams;
+
+        /// <summary>
+        /// Selects the movement model the game server uses, from the protocol version it echoed on
+        /// join (<c>GameSessionClient.ServerProtocolVersion</c>): the 3D
+        /// <see cref="CharacterMotor"/> for version 3 and above, the planar
+        /// <see cref="MovementSystem"/> for version 2 and for an unversioned server.
+        /// </summary>
+        /// <remarks>
+        /// Call it after every join, before the first <see cref="Reconcile(Vec2,long)"/>. A call
+        /// that CHANGES the model also <see cref="Reset"/>s the predictor -- state predicted
+        /// under one model is not a valid starting point for the other -- and a call that keeps
+        /// it changes nothing.
+        /// </remarks>
+        public void UseServerProtocol(uint serverProtocolVersion)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.UseServerProtocol, a: serverProtocolVersion));
+            bool motor = Cuvara.Netcode.Protocol.WireProtocolVersion.Supports(
+                serverProtocolVersion, Cuvara.Netcode.Protocol.WireProtocolVersion.Motor3D);
+            if (motor == _motor3D)
+            {
+                return;
+            }
+
+            _motor3D = motor;
+            Reset();
+        }
+
+        /// <summary>
+        /// Adopts the server's advertised base-tick rate (<c>GameSessionClient.TickRate</c> /
+        /// <c>NetworkClient.TickRate</c>, from the join reply) as this predictor's simulation rate.
+        /// </summary>
+        /// <param name="advertisedTickRate">
+        /// The rate the server simulates and stamps ticks at. Zero means "not sent" (a server
+        /// predating <c>tick_rate</c>) and changes nothing.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>Call it after every join, before the first <see cref="Reconcile(Vec2,long)"/></b>, next
+        /// to <see cref="UseServerProtocol"/>. The predictor is registered at the composition root,
+        /// before any join, so the rate it was constructed with is a guess; this replaces the guess
+        /// with the server's number. A call that keeps the rate changes nothing, so calling it on
+        /// every join is safe. A call that CHANGES the rate re-derives the timestep and everything
+        /// sized by it (<see cref="IntegrationTimestep"/>, <see cref="MaxBankedTicks"/>,
+        /// <see cref="MaxCatchUpTicks"/>) and <see cref="Reset"/>s -- state predicted on another
+        /// timestep, against base ticks seeded in another tick space, is not a starting point.
+        /// </para>
+        /// <para>
+        /// <b>What a wrong rate costs, measured</b> (rpg-factory testlab, run
+        /// 20261022T042952Z-S09-h87z). A game built its predictor with
+        /// <c>GameConstants.DefaultTickRate</c> -- 15, the old world rate -- against a server that
+        /// simulates at 60 Hz. Nothing could correct it after construction. The 15 Hz base clock,
+        /// steered onto the server's 60 Hz tick line, fell 45 ticks a second behind and was hard
+        /// resynchronised about once a second (each one dropping the pending inputs and the hold);
+        /// nearly every reconcile missed the history; every correction was a whole 15 Hz step --
+        /// <see cref="LastCorrection"/> 0.333, four 60 Hz steps, on about half of all snapshots --
+        /// and a late snapshot burst drew the local player up to 1.64 units in one frame. No
+        /// counter named the cause: a rate mismatch reads as network trouble.
+        /// </para>
+        /// </remarks>
+        public void UseServerTickRate(uint advertisedTickRate)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.UseServerTickRate, a: advertisedTickRate));
+            if (advertisedTickRate == 0u || advertisedTickRate > int.MaxValue)
+            {
+                return;
+            }
+
+            int rate = (int)advertisedTickRate;
+            if (rate == _settings.TickRate && !_settings.TickRateIsFallback)
+            {
+                return;
+            }
+
+            float dt = MovementSystem.DeltaTimeForTickRate(rate);
+            if (!(dt > 0f))
+            {
+                return;
+            }
+
+            bool changed = rate != _settings.TickRate;
+            _settings = PredictionSettings.FromServer(
+                advertisedTickRate, _settings.TickRate, _settings.Speed, _settings.Bounds);
+            if (!changed)
+            {
+                // Same number, now known to be the server's: only the fallback flag moves.
+                return;
+            }
+
+            _dt = dt;
+            _maxCatchUpTicks = GameConstants.MaxBankedMovementTicks(rate);
+            IsEnabled = _settings.IsUsable;
+
+            // Same session, same entity: a server speed already adopted from a snapshot stays.
+            // Reset() returns it to the configured fallback because it is also the new-session
+            // path; a rate change is not a new session.
+            float speed = _speed;
+            Reset();
+            _speed = speed;
+        }
+
+        /// <summary>
+        /// Supplies the map's collision world for the 3D motor (ADR-28). Null restores
+        /// <see cref="MapGeometry.Flat"/> of <see cref="PredictionSettings.Bounds"/>, which is the
+        /// protocol 2 world and what the server uses for a map with no map file.
+        /// </summary>
+        /// <remarks>
+        /// Must be the SAME geometry the server loaded for this map
+        /// (<c>content/maps/&lt;map_id&gt;.json</c>), or prediction and authority step against
+        /// different worlds. Ignored by the planar model.
+        /// </remarks>
+        public void SetMapGeometry(MapGeometry geometry)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetMapGeometry, flag: geometry != null));
+            _geometry = geometry ?? MapGeometry.Flat(_settings.Bounds);
+        }
+
+        /// <summary>
+        /// Replaces the motor tuning. Must match the server's, or the first jump diverges; the
+        /// default is <see cref="MotorParams.Default"/>, which is what the server uses unless its
+        /// content says otherwise.
+        /// </summary>
+        public void SetMotorParams(in MotorParams parameters)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetMotorParams,
+                x: parameters.Gravity, y: parameters.JumpSpeed, z: parameters.StepHeight,
+                w: parameters.MaxSlopeRise, u: parameters.CapsuleRadius, v: parameters.CapsuleHeight));
+            _motorParams = parameters;
+        }
 
         /// <summary>
         /// The outstanding correction still being blended out. Zero when the rendered and
@@ -663,6 +950,237 @@ namespace Cuvara.Netcode.Prediction
         public float DiscardedCatchUpSeconds { get; private set; }
 
         /// <summary>
+        /// Hard resynchronisations made because a clamped frame (a client stall) left the clock
+        /// behind the server's tick line. Counted in <see cref="HardResyncs"/> as well.
+        /// </summary>
+        /// <remarks>
+        /// The clamp discards the stalled time, so after a stall the base tick is behind by
+        /// whatever was discarded. Steering closes a gap at 0.5 tick per snapshot, about 7.5
+        /// ticks a second; a 2 s stall took ~14 s to close, and the reconcile corrected the local
+        /// player by a whole step on most snapshots until it had (ClientHitchRecoveryTests). The
+        /// first steer after a clamp therefore sets the clock instead, when the error is outside
+        /// the band ordinary steering works in. Without a clamp nothing changes: jitter is still
+        /// steered, never set.
+        /// </remarks>
+        public int StallResyncs { get; private set; }
+
+        /// <summary>
+        /// Receives every call into this predictor, with its arguments, and the outcome of every
+        /// reconcile; null (the default) traces nothing. A debugging aid for replaying a live
+        /// session headless (<see cref="PredictorTraceReplayer"/>). See <see cref="PredictorTraceEvent"/>.
+        /// </summary>
+        /// <remarks>
+        /// Off, it costs one null check per call and allocates nothing. On, it builds one struct per
+        /// call and hands it to the sink by reference; formatting and storage are the sink's.
+        /// Tracing never changes what the predictor does (<c>PredictorTraceTests</c>).
+        /// </remarks>
+        public PredictorTraceSink Trace { get; set; }
+
+        /// <summary>
+        /// Frame seconds not simulated because a forward stall jump had already covered them
+        /// (see <see cref="StallResyncs"/>). Lifetime total. Diagnostics.
+        /// </summary>
+        public float JumpCreditSpentSeconds { get; private set; }
+
+        // Set when Advance clamps a frame; read and cleared by the next SteerToServerTick.
+        private bool _clampedSinceSteer;
+
+        // Seconds of frame time already covered by a forward clock jump, and the Advance calls
+        // left that may still spend it. Two, not one: Unity's Time.deltaTime reports the PREVIOUS
+        // frame, so when the jump is made in the frame the stall happened in, that frame's Advance
+        // carries only the short frame before it, and the stall arrives as the next frame's delta.
+        // Spending the credit on the short frame and dropping the rest let that next frame simulate
+        // 15 clamped ticks the jump had already covered: the player stepped about 1.25 u forward,
+        // the clock ran 15 ticks ahead, and the next snapshot took both back, two corrections per
+        // stall (rpg-factory testlab S13, runs 20261023T010311Z-S13-3zhl, -j8xw, -9zy5). Whatever
+        // two Advances do not cover is dropped, so a jump that no long frame follows costs at most
+        // two frames of clock progress.
+        private float _jumpCredit;
+        private int _jumpCreditAdvances;
+
+        /// <summary>
+        /// Moves the clock forward (or back) by <paramref name="delta"/> base ticks without
+        /// simulating them, after a stall left it behind the server's tick line.
+        /// </summary>
+        /// <remarks>
+        /// Only the clock moves. Inputs recorded before the stall were stamped on the right ticks
+        /// and keep them; the ticks jumped over carry no movement the client could have known
+        /// about, and replay integrates the hold across them with the same window rule the
+        /// server used, so a hold that expired during the stall expires in replay too. The ack
+        /// offsets and the history were measured on that same, correct alignment and stay. A hard
+        /// resync drops all of that instead, and the next reconcile then adopted the server's
+        /// position outright and rolled back everything predicted since: a second whole
+        /// correction for one stall.
+        /// </remarks>
+        private void JumpClock(long delta)
+        {
+            if (delta > 0)
+            {
+                DeferRestamp(delta);
+            }
+
+            _baseTick += delta;
+            _tickAccumulator = 0f;
+            RecordHistory(_baseTick, _predicted);
+        }
+
+        /// <summary>
+        /// Inputs whose stamp was moved onto the jumped tick line because they were recorded in the
+        /// frame that ended the stall, before the jump. Lifetime total.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why.</b> The client records a frame's input before the frame's snapshot is steered
+        /// on (<c>DotsWorldBridge.Update</c> runs before <c>LocalPredictionSystem</c>). In the frame
+        /// that ends a stall, that input is therefore stamped on the old tick line, a whole stall
+        /// behind the tick it is really sent on. The first reconcile after the jump replayed it
+        /// from that old tick, on top of a server position that does not contain it yet. Live,
+        /// that moved the player 14 steps too far, and the next snapshot took 12 of them back: two
+        /// corrections for one stall (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf).
+        /// </para>
+        /// <para>
+        /// <b>What moves.</b> An input sampled after the stall, and not acknowledged by the
+        /// snapshot the next reconcile compares against, moves with the jump, together with the hold
+        /// and tick-start markers it set, so it sits on the new line where it was sent. Sampled after
+        /// the stall means recorded within the last two <see cref="Advance"/> windows on the stall
+        /// tick or the one before it. Two, because the client uses a snapshot one frame after it
+        /// arrives, so the jump comes one Advance after the stall frame's input (S13 runs
+        /// 20261023T014834Z-S13-bjzo, -82xx, -vf5j: the 500 ms stall still cost two corrections when
+        /// only the last window was taken). The move is made at that reconcile, which knows which
+        /// inputs were acknowledged; inputs recorded before the stall keep their ticks, as
+        /// <see cref="JumpClock"/> requires.
+        /// </para>
+        /// </remarks>
+        public int RestampedInputs { get; private set; }
+
+        // A forward jump's restamp, deferred to the next reconcile, which knows which inputs the
+        // snapshot acknowledged. See RestampedInputs.
+        private bool _restampPending;
+        private long _restampFrom;
+        private long _restampDelta;
+        private long _restampMinAdvance;
+
+        /// <summary>
+        /// Inputs moved to the end of a clamped frame because they were recorded in it, after the
+        /// stall and before its Advance. Lifetime total. See <see cref="RestampedInputs"/>.
+        /// </summary>
+        /// <remarks>
+        /// The client records the frame's input, then advances by the frame's delta. In the frame
+        /// that ends a stall that delta is the stall, so the input was stamped at the stall's first
+        /// tick and the clamped catch-up ran after it. The input was really sampled at the end of
+        /// that span. The next frame's jump moves the clock by the rest of the stall, and the
+        /// restamp moves inputs stamped on the clock's tick. An input left at the start of the
+        /// clamp was missed, and the reconcile replayed it from there, on top of a server position
+        /// that did not contain it yet: one correction forward, and one back on the next snapshot.
+        /// This happened at 5 of 6 stalls in rpg-factory testlab S13, runs 20261023T054339Z-S13-me2y
+        /// and 20261023T054440Z-S13-wqel, reproduced exactly by replaying their traces
+        /// (<c>LiveTraceReplayTests</c>).
+        /// </remarks>
+        public int InputsMovedToClampEnd { get; private set; }
+
+        /// <summary>
+        /// Whether <see cref="InputsMovedToClampEnd"/> applies. On by default. A replay turns it off
+        /// to reproduce a session recorded before it existed, bit for bit, which is what validates
+        /// the replay before it judges the change (<c>LiveTraceReplayTests</c>).
+        /// </summary>
+        internal bool MoveStallFrameInputs { get; set; } = true;
+
+        private void MoveThisFramesInputsToTheClampEnd(long clampFrom)
+        {
+            long to = _baseTick;
+            if (to == clampFrom)
+            {
+                return;
+            }
+
+            bool moved = false;
+            for (int i = 0; i < _count; i++)
+            {
+                int slot = (_head + i) % Capacity;
+                PendingInput input = _pending[slot];
+
+                // Recorded since the previous Advance (this Advance has already counted itself),
+                // on the tick the clamp started from.
+                if (_pendingAdvance[slot] != _advanceCount - 1 || input.BaseTick != clampFrom)
+                {
+                    continue;
+                }
+
+                _pending[slot] = new PendingInput(
+                    input.Tick, input.MoveX, input.MoveY, to, input.LastMoveTickBefore, input.Jump);
+                InputsMovedToClampEnd++;
+                moved = true;
+            }
+
+            if (!moved)
+            {
+                return;
+            }
+
+            if (_heldFrom == clampFrom) _heldFrom = to;
+            if (_tickStartTick == clampFrom) _tickStartTick = to;
+        }
+
+        private void DeferRestamp(long delta)
+        {
+            _restampPending = true;
+            _restampFrom = _baseTick;
+            _restampDelta = delta;
+
+            // The input of the frame the stall ended in, and of the frame after it: the client uses
+            // a snapshot one frame after it arrives, so the jump can come one Advance after that
+            // input was recorded (S13 runs bjzo, 82xx, vf5j).
+            _restampMinAdvance = _advanceCount - 1;
+        }
+
+        /// <summary>
+        /// Moves the inputs recorded around the end of the stall onto the jumped line: recorded within
+        /// the last two Advance windows, stamped on the stall tick or the one before it (the short
+        /// Advance in between may have crossed a tick), and NOT acknowledged by the snapshot being
+        /// reconciled. An acknowledged one reached the server before the stall ended, so it belongs
+        /// to the old line.
+        /// </summary>
+        private void ApplyDeferredRestamp(long ackTick)
+        {
+            if (!_restampPending)
+            {
+                return;
+            }
+
+            _restampPending = false;
+            long from = _restampFrom;
+            long delta = _restampDelta;
+            long lowest = long.MaxValue;
+            for (int i = 0; i < _count; i++)
+            {
+                int slot = (_head + i) % Capacity;
+                PendingInput input = _pending[slot];
+                if (input.Tick <= ackTick
+                    || _pendingAdvance[slot] < _restampMinAdvance
+                    || input.BaseTick > from
+                    || input.BaseTick < from - 1)
+                {
+                    continue;
+                }
+
+                if (input.BaseTick < lowest) lowest = input.BaseTick;
+                _pending[slot] = new PendingInput(
+                    input.Tick, input.MoveX, input.MoveY, input.BaseTick + delta,
+                    input.LastMoveTickBefore, input.Jump);
+                RestampedInputs++;
+            }
+
+            if (lowest == long.MaxValue)
+            {
+                return;
+            }
+
+            if (_lastMoveTick >= lowest && _lastMoveTick <= from) _lastMoveTick += delta;
+            if (_heldFrom >= lowest && _heldFrom <= from) _heldFrom += delta;
+            if (_tickStartTick >= lowest && _tickStartTick <= from) _tickStartTick += delta;
+        }
+
+        /// <summary>
         /// Base ticks on which the held direction actually moved the entity.
         /// </summary>
         /// <remarks>
@@ -699,8 +1217,18 @@ namespace Cuvara.Netcode.Prediction
         /// <c>InputCursor</c> check; a repeated tick is counted and dropped rather than
         /// predicted, because the server will drop it too.
         /// </remarks>
-        public void RecordInput(long tick, float moveX, float moveY)
+        public void RecordInput(long tick, float moveX, float moveY) =>
+            RecordInput(tick, moveX, moveY, false);
+
+        /// <summary>
+        /// As <see cref="RecordInput(long,float,float)"/>, with the input's jump request
+        /// (<c>InputMessage.Jump</c>). Only the 3D motor reads it, and only on the step this input
+        /// takes: like the server, a jump is honoured on the tick it is sent and only when
+        /// grounded, so a held button does not fly.
+        /// </summary>
+        public void RecordInput(long tick, float moveX, float moveY, bool jump)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.RecordInput, a: tick, x: moveX, y: moveY, flag: jump));
             if (!IsEnabled || !_seeded)
             {
                 return;
@@ -737,15 +1265,17 @@ namespace Cuvara.Netcode.Prediction
                 // input away and then applies the hold in the PREVIOUS direction. Live and
                 // replay then diverge by one step per input and the correction accumulates
                 // instead of converging: measured at 120 steps over 30 snapshots.
-                replacesHeldStep ? _tickStartLastMove : _lastMoveTick);
+                replacesHeldStep ? _tickStartLastMove : _lastMoveTick,
+                jump);
+            _pendingAdvance[slot] = _advanceCount;
             _count++;
 
             // Whatever of the previous step was still unshown would otherwise vanish
             // when the new step replaces it. Carry it into the render offset so the
             // visible position does not jump on an input boundary.
-            Vec2 before = Position;
+            Vec3 before = Position3;
 
-            Vec2 previous = _predicted;
+            Body previous = _predicted;
 
             // Rule 1: at most one step per player per server tick. The server coalesces
             // inputs landing in the same tick to the newest and moves once; a client that
@@ -778,7 +1308,7 @@ namespace Cuvara.Netcode.Prediction
                 // has always run inputs before holds. It cost nothing while the hold expired
                 // on exactly the tick the next input arrived on; widening the window to the
                 // silence timeout is what made the two paths meet.
-                verdict = StepResult(_tickStart, moveX, moveY, _dt, out Vec2 replaced);
+                verdict = StepResult(_tickStart, moveX, moveY, jump, _dt, out Body replaced);
 
                 // Including a STOP, which rolls the tick back to where it began: a deadzone
                 // input means the server moved that tick not at all, so neither may the
@@ -791,7 +1321,11 @@ namespace Cuvara.Netcode.Prediction
                 // _renderOffset, and the carry at the end of this method folds the whole
                 // rollback into that offset, which decays over the next few frames. The
                 // rendered avatar eases; only the simulated position moves at once.
-                _predicted = verdict is MoveResult.Accepted or MoveResult.Clamped
+                //
+                // Under the 3D motor the step is taken whatever the verdict: gravity and a jump
+                // run even on a stop, so `replaced` IS the tick's one step. Under the planar
+                // model a refused step returns its origin, so the two readings agree there.
+                _predicted = _motor3D || verdict is MoveResult.Accepted or MoveResult.Clamped
                     ? replaced
                     : _tickStart;
             }
@@ -805,7 +1339,7 @@ namespace Cuvara.Netcode.Prediction
                 // against the deadzone constant here: a second copy of that threshold is
                 // free to drift from the server's.
                 CoalescedInputs++;
-                verdict = StepResult(_predicted, moveX, moveY, _dt, out _);
+                verdict = StepResult(_predicted, moveX, moveY, false, _dt, out _);
                 if (verdict is MoveResult.Clamped) verdict = MoveResult.Accepted;
             }
             else
@@ -815,7 +1349,7 @@ namespace Cuvara.Netcode.Prediction
                 _tickStartLastMove = _lastMoveTick;
 
                 verdict = StepResult(
-                    _predicted, moveX, moveY,
+                    _predicted, moveX, moveY, jump,
                     StepDeltaTime(_baseTick, _lastMoveTick, _heldFrom),
                     out _predicted);
             }
@@ -843,10 +1377,12 @@ namespace Cuvara.Netcode.Prediction
                 // _sinceInput is deliberately NOT reset with it: the step this replaces is
                 // already part-shown, and restarting its clock would show it twice.
                 _step = new Vec2(_predicted.X - _tickStart.X, _predicted.Y - _tickStart.Y);
+                _stepZ = _predicted.Z - _tickStart.Z;
             }
             else if (!coalesced)
             {
                 _step = new Vec2(_predicted.X - previous.X, _predicted.Y - previous.Y);
+                _stepZ = _predicted.Z - previous.Z;
             }
 
             // Set or clear the hold on the server's rule: a direction becomes held only
@@ -909,10 +1445,25 @@ namespace Cuvara.Netcode.Prediction
                 }
             }
 
-            Vec2 after = Position;
+            Vec3 after = Position3;
             _renderOffset = new Vec2(
                 _renderOffset.X + (before.X - after.X),
                 _renderOffset.Y + (before.Y - after.Y));
+            _renderOffsetZ += before.Z - after.Z;
+
+            // RE-RECORD THIS TICK'S HISTORY ENTRY, because the input just changed where the
+            // tick ends.
+            //
+            // The entry for _baseTick was written by Advance when the tick began -- before this
+            // input stepped it, re-took the hold's step, or rolled a stop back. Left alone, the
+            // history says the client was somewhere it never ended the tick, and the reconcile
+            // that later compares against this tick reports the difference as an error: a whole
+            // step at every start (the entry predates the first step) and every stop (the entry
+            // still has the held step the stop rolled back), returned as a +1 / -1 step pair over
+            // the next two snapshots. The server has no such ambiguity -- it drains inputs and
+            // only then ends the tick -- so the client's record of a tick must be taken after its
+            // input too.
+            RecordHistory(_baseTick, _predicted);
         }
 
         /// <summary>
@@ -931,7 +1482,7 @@ namespace Cuvara.Netcode.Prediction
         /// would count a snap that never happened.
         /// </remarks>
         public void Reconcile(Vec2 authoritative, long ackTick) =>
-            Reconcile(authoritative, ackTick, NoServerTick);
+            ReconcileCore(_predicted.WithXY(authoritative), ackTick, NoServerTick, NoAckAppliedTick);
 
         /// <summary>Sentinel for "the caller did not tell us when the snapshot was produced".</summary>
         private const long NoServerTick = long.MinValue;
@@ -962,13 +1513,150 @@ namespace Cuvara.Netcode.Prediction
         /// all. The anchor supplies a start; only the snapshot's tick supplies the end.
         /// </para>
         /// </remarks>
-        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick)
+        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick) =>
+            Reconcile(authoritative, ackTick, serverBaseTick, NoAckAppliedTick);
+
+        /// <summary>
+        /// As <see cref="Reconcile(Vec2,long,long)"/>, plus the snapshot's
+        /// <c>ack_applied_tick</c>: the SERVER tick on which the input <paramref name="ackTick"/>
+        /// names was applied. This is what lets the comparison be made at the right entry of the
+        /// history -- see <see cref="AckTickOffset"/>.
+        /// </summary>
+        /// <param name="authoritative">As for the other overloads.</param>
+        /// <param name="ackTick">As for the other overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <param name="ackAppliedTick">
+        /// <c>SnapshotMessage.AckAppliedTick</c> / <c>WorldState.AckAppliedTick</c> of the SAME
+        /// snapshot as <paramref name="ackTick"/>. Zero or negative means "not sent" (a protocol 2
+        /// or older server), and the call then behaves exactly as the three-argument overload.
+        /// </param>
+        public void Reconcile(Vec2 authoritative, long ackTick, long serverBaseTick, long ackAppliedTick) =>
+            // A caller that knows only the ground plane leaves height to the prediction: the
+            // vertical state is kept, which under the planar model is the constant (0, 0,
+            // grounded) and so changes nothing.
+            ReconcileCore(_predicted.WithXY(authoritative), ackTick, serverBaseTick, ackAppliedTick);
+
+        /// <summary>Sentinel for "the server did not say which tick applied the acked input".</summary>
+        private const long NoAckAppliedTick = 0L;
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long)"/>: as the four-argument overload
+        /// below, for a caller that cannot supply the snapshot's base tick (the DOTS path).
+        /// Such callers keep the two-dimensional overload's behaviour exactly, extended to
+        /// height and vertical velocity.
+        /// </summary>
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick) =>
+            Reconcile(authoritative, verticalVelocity, ackTick, NoServerTick);
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long,long)"/>: the local player's full
+        /// authoritative position and vertical velocity (<c>EntitySnapshot.z</c> /
+        /// <c>vel_z</c>), for a predictor running the 3D motor.
+        /// </summary>
+        /// <param name="authoritative">Position from the newest snapshot, server (x, y, z) space.</param>
+        /// <param name="verticalVelocity">
+        /// The snapshot's <c>vel_z</c>. Together with the map geometry it decides whether the
+        /// replay starts grounded: zero vertical velocity with the feet on support is standing;
+        /// anything else is in the air.
+        /// </param>
+        /// <param name="ackTick">As for the two-dimensional overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <remarks>
+        /// Under the planar model only X and Y are used, exactly as the
+        /// <see cref="Vec2"/> overloads would use them.
+        /// </remarks>
+        public void Reconcile(Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick) =>
+            Reconcile(authoritative, verticalVelocity, ackTick, serverBaseTick, NoAckAppliedTick);
+
+        /// <summary>
+        /// The 3D form of <see cref="Reconcile(Vec2,long,long,long)"/>: full position, vertical
+        /// velocity, and the snapshot's <c>ack_applied_tick</c>.
+        /// </summary>
+        /// <param name="authoritative">Position from the newest snapshot, server (x, y, z) space.</param>
+        /// <param name="verticalVelocity">As for <see cref="Reconcile(Vec3,float,long,long)"/>.</param>
+        /// <param name="ackTick">As for the other overloads.</param>
+        /// <param name="serverBaseTick">As for <see cref="Reconcile(Vec2,long,long)"/>.</param>
+        /// <param name="ackAppliedTick">As for <see cref="Reconcile(Vec2,long,long,long)"/>.</param>
+        public void Reconcile(
+            Vec3 authoritative, float verticalVelocity, long ackTick, long serverBaseTick, long ackAppliedTick)
         {
+            if (!_motor3D)
+            {
+                Reconcile(authoritative.XY, ackTick, serverBaseTick, ackAppliedTick);
+                return;
+            }
+
+            bool grounded = verticalVelocity == 0f && IsOnSupport(authoritative);
+            ReconcileCore(
+                new Body(authoritative.X, authoritative.Y, authoritative.Z, verticalVelocity, grounded),
+                ackTick, serverBaseTick, ackAppliedTick);
+        }
+
+        /// <summary>
+        /// Whether feet at <paramref name="feet"/> stand on terrain or a box top, to within a
+        /// millimetre. Used only to seed the motor's grounded flag from a snapshot, which carries
+        /// position and velocity but not the flag itself.
+        /// </summary>
+        private bool IsOnSupport(in Vec3 feet)
+        {
+            float support = _geometry.SupportHeight(
+                feet.X, feet.Y, _motorParams.CapsuleRadius, feet.Z + _motorParams.StepHeight);
+            float gap = feet.Z - support;
+            return gap <= SupportTolerance && gap >= -SupportTolerance;
+        }
+
+        /// <summary>Height difference, in units, still read as standing on support.</summary>
+        private const float SupportTolerance = 1e-3f;
+
+        private void ReconcileCore(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
+        {
+            var trace = Trace;
+            if (trace == null)
+            {
+                ReconcileBody(authoritative, ackTick, snapshotTick, ackAppliedTick);
+                return;
+            }
+
+            trace(new PredictorTraceEvent(PredictorCall.Reconcile,
+                a: ackTick, b: snapshotTick, c: ackAppliedTick,
+                x: authoritative.X, y: authoritative.Y, z: authoritative.Z, w: authoritative.VelZ,
+                flag: authoritative.Grounded));
+            ReconcileBody(authoritative, ackTick, snapshotTick, ackAppliedTick);
+            trace(new PredictorTraceEvent(PredictorCall.ReconcileResult,
+                a: _baseTick, b: TickError, c: StallResyncs,
+                x: LastCorrection, y: _predicted.X, z: _predicted.Y, w: Snaps));
+        }
+
+        /// <summary>Replays a recorded <see cref="PredictorCall.Reconcile"/> exactly as it was received.</summary>
+        internal void ReplayReconcile(in PredictorTraceEvent e) =>
+            ReconcileCore(new Body(e.X, e.Y, e.Z, e.W, e.Flag), e.A, e.B, e.C);
+
+        private void ReconcileBody(Body authoritative, long ackTick, long snapshotTick, long ackAppliedTick)
+        {
+            // A snapshot of a stall's backlog (see SkipReconcileForBunchedSnapshot): skipped whole.
+            if (_bunchedSnapshotTick != 0 && snapshotTick == _bunchedSnapshotTick)
+            {
+                _bunchedSnapshotTick = 0;
+                LastCorrection = 0f;
+                BunchedReconcilesSkipped++;
+                return;
+            }
+
+            // From here on `serverBaseTick` means "the CLIENT base tick the authoritative position
+            // describes": the snapshot's own tick when the server did not say which tick applied
+            // the acked input (today's behaviour, unchanged), and that tick moved onto the client's
+            // tick line when it did. Everything below -- the history comparison and both replay
+            // fallbacks -- asks exactly that question, so mapping it once here is the whole fix.
+            long serverBaseTick = ResolveAnchorTick(snapshotTick, ackTick, ackAppliedTick);
+            ApplyDeferredRestamp(ackTick);
+
             if (!IsEnabled)
             {
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 return;
             }
 
@@ -978,6 +1666,8 @@ namespace Cuvara.Netcode.Prediction
                 _predicted = authoritative;
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 _sinceInput = 0f;
                 LastCorrection = 0f;
                 return;
@@ -985,7 +1675,7 @@ namespace Cuvara.Netcode.Prediction
 
             Reconciles++;
 
-            Vec2 before = _predicted;
+            Body before = _predicted;
 
             // COMPARE AT THE SNAPSHOT'S OWN TICK, when the history reaches it.
             //
@@ -1000,18 +1690,20 @@ namespace Cuvara.Netcode.Prediction
             // after that tick is kept by construction -- the same offset is applied to the
             // current position -- so there is nothing to replay and nothing to guess.
             if (serverBaseTick != NoServerTick && serverBaseTick > 0
-                && TryReadHistory(serverBaseTick, out Vec2 thenPredicted))
+                && TryReadHistory(serverBaseTick, out Vec3 thenPredicted))
             {
                 HistoryHits++;
                 DropAcknowledged(ackTick);
 
                 float ex = authoritative.X - thenPredicted.X;
                 float ey = authoritative.Y - thenPredicted.Y;
+                // Always 0 under the planar model: both sides are at height 0.
+                float ez = authoritative.Z - thenPredicted.Z;
 
-                if (ex != 0f || ey != 0f)
+                if (ex != 0f || ey != 0f || ez != 0f)
                 {
-                    _predicted = new Vec2(_predicted.X + ex, _predicted.Y + ey);
-                    ShiftHistory(ex, ey);
+                    _predicted = _predicted.Shifted(ex, ey, ez);
+                    ShiftHistory(ex, ey, ez);
 
                     // The current tick's start marker moves with it. RecordInput's
                     // replacement path re-takes the tick's step FROM that marker, so a
@@ -1022,7 +1714,7 @@ namespace Cuvara.Netcode.Prediction
                     // second.
                     if (_tickStartTick == _baseTick)
                     {
-                        _tickStart = new Vec2(_tickStart.X + ex, _tickStart.Y + ey);
+                        _tickStart = _tickStart.Shifted(ex, ey, ez);
                     }
                 }
 
@@ -1064,7 +1756,12 @@ namespace Cuvara.Netcode.Prediction
             // direction on every base tick in the window, including ticks where no packet
             // arrived, so replaying input-by-input reproduces a quarter of its motion at
             // a 15 Hz send rate against a 60 Hz base tick.
-            Vec2 replayed = authoritative;
+            Body replayed = authoritative;
+
+            // First tick the replay below re-simulates. Replayed ticks' history entries are
+            // staged and written with the replayed positions at the end of this method.
+            long replayFrom = _baseTick + 1;
+            _replayStageCount = 0;
 
             if (_count > 0)
             {
@@ -1105,6 +1802,7 @@ namespace Cuvara.Netcode.Prediction
                     replayLastMove = serverBaseTick;
                 }
 
+                replayFrom = start;
                 for (long t = start; t <= _baseTick; t++)
                 {
                     // WHICH OF THE TWO GOT TO THIS TICK FIRST, live. Normally inputs step
@@ -1123,7 +1821,7 @@ namespace Cuvara.Netcode.Prediction
                         && _pending[(_head + next) % Capacity].BaseTick == t
                         && _pending[(_head + next) % Capacity].LastMoveTickBefore == t;
 
-                    Vec2 tickStart = replayed;
+                    Body tickStart = replayed;
                     var heldStepped = false;
 
                     if (holdWentFirst)
@@ -1144,9 +1842,9 @@ namespace Cuvara.Netcode.Prediction
                             // began, in this input's direction -- and if the vector is a stop
                             // or the model refuses it, the held step stands rather than being
                             // rolled back. See RecordInput for why that trade is made.
-                            verdict = StepResult(tickStart, input.MoveX, input.MoveY, _dt,
-                                out Vec2 replacedStep);
-                            replayed = verdict is MoveResult.Accepted or MoveResult.Clamped
+                            verdict = StepResult(tickStart, input.MoveX, input.MoveY, input.Jump, _dt,
+                                out Body replacedStep);
+                            replayed = _motor3D || verdict is MoveResult.Accepted or MoveResult.Clamped
                                 ? replacedStep
                                 : tickStart;
                         }
@@ -1159,7 +1857,7 @@ namespace Cuvara.Netcode.Prediction
                         else
                         {
                             verdict = StepResult(
-                                replayed, input.MoveX, input.MoveY,
+                                replayed, input.MoveX, input.MoveY, input.Jump,
                                 StepDeltaTime(t, replayLastMove, heldFrom), out replayed);
                         }
                         ReplayedSteps++;
@@ -1186,6 +1884,8 @@ namespace Cuvara.Netcode.Prediction
                     {
                         ReplayedSteps++;
                     }
+
+                    StageReplayedHistory(t, replayed);
                 }
             }
             else if (serverBaseTick != NoServerTick && serverBaseTick < _baseTick)
@@ -1209,12 +1909,15 @@ namespace Cuvara.Netcode.Prediction
                 // the hold window expires at the same place.
                 long replayLastMove = serverBaseTick;
 
+                replayFrom = serverBaseTick + 1;
                 for (long t = serverBaseTick + 1; t <= _baseTick; t++)
                 {
                     if (ApplyHeld(ref replayed, t, _heldFrom, _heldX, _heldY, ref replayLastMove))
                     {
                         ReplayedSteps++;
                     }
+
+                    StageReplayedHistory(t, replayed);
                 }
             }
 
@@ -1227,10 +1930,29 @@ namespace Cuvara.Netcode.Prediction
             // rewind would undo it on the next input.
             if (_tickStartTick == _baseTick)
             {
-                _tickStart = new Vec2(
-                    _tickStart.X + (replayed.X - _predicted.X),
-                    _tickStart.Y + (replayed.Y - _predicted.Y));
+                _tickStart = _tickStart.Shifted(
+                    replayed.X - _predicted.X,
+                    replayed.Y - _predicted.Y,
+                    replayed.Z - _predicted.Z);
             }
+
+            // Carry the correction into the history. Recording only the current tick left every
+            // older entry on the uncorrected timeline, and the next snapshot acknowledging one of
+            // those ticks measured the same error again and applied it a second time: a respawn
+            // delivered after a 5 s client stall drew the local player 2.24 units past the server
+            // and back (rpg-factory testlab run 20261022T091437Z-S07-c5hc;
+            // ReplayRewindHistoryTests). The replayed ticks get their replayed positions exactly;
+            // older entries, which a later snapshot normally does not acknowledge, are shifted by
+            // the correction as the history path shifts all of them.
+            float hx = replayed.X - _predicted.X;
+            float hy = replayed.Y - _predicted.Y;
+            float hz = replayed.Z - _predicted.Z;
+            if (hx != 0f || hy != 0f || hz != 0f)
+            {
+                ShiftHistory(hx, hy, hz, replayFrom);
+            }
+
+            CommitReplayedHistory();
 
             _predicted = replayed;
 
@@ -1253,16 +1975,20 @@ namespace Cuvara.Netcode.Prediction
         /// Two copies of this decision is how the two paths would come to disagree about
         /// what a snap is.
         /// </remarks>
-        private void ApplyCorrectionToRender(in Vec2 before)
+        private void ApplyCorrectionToRender(in Body before)
         {
             float dx = before.X - _predicted.X;
             float dy = before.Y - _predicted.Y;
+            float dz = before.Z - _predicted.Z;
 
             // Measured here, from the move actually made, so both paths report the same
             // thing: how far the simulated position just jumped. Computing it separately per
             // path is how the two came to disagree about what a snap is -- the replay path
             // stopped reporting one at all when this was factored out.
-            LastCorrection = new Vec2(dx, dy).Magnitude;
+            //
+            // dz is always 0 under the planar model, which therefore keeps the planar magnitude
+            // to the bit.
+            LastCorrection = dz == 0f ? new Vec2(dx, dy).Magnitude : new Vec3(dx, dy, dz).Magnitude;
 
             if (LastCorrection > SmoothingThreshold)
             {
@@ -1274,6 +2000,8 @@ namespace Cuvara.Netcode.Prediction
                 // corrected one would add a second, smaller wrong movement after the snap.
                 _renderOffset = Vec2.Zero;
                 _step = Vec2.Zero;
+                _renderOffsetZ = 0f;
+                _stepZ = 0f;
                 Snaps++;
             }
             else if (LastCorrection > 0f)
@@ -1288,6 +2016,7 @@ namespace Cuvara.Netcode.Prediction
                 // jump at snapshot rate, which is the exact artefact this release is
                 // removing.
                 _renderOffset = new Vec2(_renderOffset.X + dx, _renderOffset.Y + dy);
+                _renderOffsetZ += dz;
                 SmoothedCorrections++;
             }
         }
@@ -1305,6 +2034,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void Advance(float deltaTime)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.Advance, x: deltaTime));
             if (!IsEnabled || deltaTime <= 0f)
             {
                 return;
@@ -1314,6 +2044,10 @@ namespace Cuvara.Netcode.Prediction
             // the rendered position move between inputs at all.
             _sinceInput += deltaTime;
             _elapsed += deltaTime;
+            _advanceCount++;
+
+            // A jump no reconcile followed: nothing is known to be acknowledged.
+            ApplyDeferredRestamp(long.MinValue);
 
             // Run whole base ticks. The server integrates the held direction once per
             // base tick whether or not a packet arrived (TickLoop calls ApplyHeldMovement
@@ -1331,7 +2065,17 @@ namespace Cuvara.Netcode.Prediction
                 // the RENDERING of a step against the real frame clock and are correct in
                 // client seconds; a few percent there is invisible, while a few percent here
                 // is a standing offset of whole ticks.
-                _tickAccumulator += deltaTime * _clockRateScale;
+                float scaled = deltaTime * _clockRateScale;
+                if (_jumpCredit > 0f)
+                {
+                    float spent = System.Math.Min(_jumpCredit, scaled);
+                    scaled -= spent;
+                    _jumpCredit -= spent;
+                    if (--_jumpCreditAdvances <= 0) _jumpCredit = 0f;
+                    JumpCreditSpentSeconds += spent;
+                }
+
+                _tickAccumulator += scaled;
 
                 // A SINGLE FRAME MAY NOT MANUFACTURE AN UNBOUNDED NUMBER OF TICKS.
                 //
@@ -1356,11 +2100,14 @@ namespace Cuvara.Netcode.Prediction
                 // the budget is DISCARDED rather than carried -- carrying it is the same
                 // burst one frame later.
                 float maxAccumulated = _dt * _maxCatchUpTicks;
+                long clampFrom = -1;
                 if (_tickAccumulator > maxAccumulated)
                 {
                     DiscardedCatchUpSeconds += _tickAccumulator - maxAccumulated;
                     ClampedFrames++;
                     _tickAccumulator = maxAccumulated;
+                    _clampedSinceSteer = true;
+                    clampFrom = _baseTick;
                 }
 
                 while (_tickAccumulator >= _dt)
@@ -1370,20 +2117,54 @@ namespace Cuvara.Netcode.Prediction
 
                     BaseTicksAdvanced++;
 
-                    Vec2 before = _predicted;
+                    Body before = _predicted;
+
+                    // What is on screen at this instant, taken before the tick can replace the
+                    // step being shown. See the carry below.
+                    Vec3 shownBefore = Position3;
+
                     if (ApplyHeld(ref _predicted, _baseTick))
                     {
                         _step = new Vec2(_predicted.X - before.X, _predicted.Y - before.Y);
+                        _stepZ = _predicted.Z - before.Z;
                         _sinceInput = 0f;
                         NoteStep();
                         HeldStepsApplied++;
+
+                        // CARRY THE UNSHOWN PART OF THE PREVIOUS STEP, exactly as RecordInput
+                        // does on an input boundary.
+                        //
+                        // Position walks the latest step in over the smoothing span. A new tick
+                        // replaces that step, and whatever of the old one had not been shown yet
+                        // used to vanish with it: the rendered position jumped forward by the
+                        // unshown remainder in a single frame. In steady motion the remainder is
+                        // small (the span tracks the step interval), but whenever the span runs
+                        // longer than the gap the next step actually arrives after -- a tick
+                        // declined by rule 1, a start, a stop -- it is most of a step. Measured on
+                        // the headless harness (PredictionHarness, 1 ms frames, 59.6 Hz server):
+                        // up to 2.3x the normal per-frame motion on a curve and 16.7x at a start or
+                        // stop before this carry; 1.3x on both with it.
+                        //
+                        // Folding the difference into the render offset keeps the visible
+                        // position continuous; the offset then decays like any other correction,
+                        // so the old step is still shown in full, just not in one frame.
+                        Vec3 shownAfter = Position3;
+                        _renderOffset = new Vec2(
+                            _renderOffset.X + (shownBefore.X - shownAfter.X),
+                            _renderOffset.Y + (shownBefore.Y - shownAfter.Y));
+                        _renderOffsetZ += shownBefore.Z - shownAfter.Z;
                     }
 
                     RecordHistory(_baseTick, _predicted);
                 }
+
+                if (clampFrom >= 0 && MoveStallFrameInputs)
+                {
+                    MoveThisFramesInputsToTheClampEnd(clampFrom);
+                }
             }
 
-            if (_renderOffset.X == 0f && _renderOffset.Y == 0f)
+            if (_renderOffset.X == 0f && _renderOffset.Y == 0f && _renderOffsetZ == 0f)
             {
                 return;
             }
@@ -1391,16 +2172,20 @@ namespace Cuvara.Netcode.Prediction
             float factor = (float)System.Math.Pow(OffsetDecayPerSecond, deltaTime);
             float x = _renderOffset.X * factor;
             float y = _renderOffset.Y * factor;
+            float z = _renderOffsetZ * factor;
 
             // Settle exactly, so Position stops changing rather than approaching forever.
             const float epsilon = 1e-4f;
-            if (System.Math.Abs(x) < epsilon && System.Math.Abs(y) < epsilon)
+            if (System.Math.Abs(x) < epsilon && System.Math.Abs(y) < epsilon
+                && System.Math.Abs(z) < epsilon)
             {
                 _renderOffset = Vec2.Zero;
+                _renderOffsetZ = 0f;
                 return;
             }
 
             _renderOffset = new Vec2(x, y);
+            _renderOffsetZ = z;
         }
 
         /// <summary>
@@ -1431,6 +2216,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetServerSpeed(float speed)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetServerSpeed, x: speed));
             if (speed > 0f && !float.IsNaN(speed) && !float.IsInfinity(speed))
             {
                 _speed = speed;
@@ -1470,6 +2256,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SeedBaseTick(long serverTick)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SeedBaseTick, a: serverTick));
             if (_baseTickSeeded || serverTick <= 0)
             {
                 return;
@@ -1485,6 +2272,48 @@ namespace Cuvara.Netcode.Prediction
         /// ticks, as of the last <see cref="SteerToServerTick"/>. 0 before the first one.
         /// </summary>
         public long TickError { get; private set; }
+
+        /// <summary>
+        /// Reconciles skipped because their snapshot arrived bunched up behind another, as a stall's
+        /// backlog does (<see cref="PredictionClockSteering.BunchedSnapshots"/>). Lifetime total.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why skipped.</b> After a stall the clock is moved onto the server's current tick by
+        /// the first snapshot read; the backlog behind it describes ticks the clock jumped over.
+        /// Their acknowledgement still names the input sent before the stall, so the history entry
+        /// they are compared with lies in the jumped span, which has no entries, and the replay
+        /// fallback then rebuilt the whole span from a stale position: corrections of 3 to 16 steps
+        /// on most of the backlog, in the paced-backlog harness
+        /// (<c>ClientHitchRecoveryTests</c>). The first snapshot back on cadence reconciles
+        /// against a current position a few milliseconds later.
+        /// </para>
+        /// <para>
+        /// Only the snapshot named by <see cref="SkipReconcileForBunchedSnapshot"/> is skipped,
+        /// matched by tick, so a caller that steers without reconciling cannot make a later
+        /// reconcile disappear. The two-argument <c>Reconcile</c> carries no tick and is never
+        /// skipped.
+        /// </para>
+        /// </remarks>
+        public int BunchedReconcilesSkipped { get; private set; }
+
+        // The snapshot tick whose reconcile is to be skipped, or 0.
+        private long _bunchedSnapshotTick;
+
+        /// <summary>
+        /// Marks the snapshot at <paramref name="snapshotTick"/> as part of a backlog: its reconcile
+        /// is skipped, and <see cref="TickError"/> is updated against it without steering. Called by
+        /// <see cref="PredictionClockSteering.OnSnapshot"/>.
+        /// </summary>
+        internal void SkipReconcileForBunchedSnapshot(long snapshotTick, int targetLeadTicks)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SkipReconcileForBunchedSnapshot, a: snapshotTick, b: targetLeadTicks));
+            _bunchedSnapshotTick = snapshotTick;
+            if (_baseTickSeeded && snapshotTick > 0)
+            {
+                TickError = _baseTick - (snapshotTick + (targetLeadTicks < 0 ? 0 : targetLeadTicks));
+            }
+        }
 
         /// <summary>Times the clock was hard-resynchronised rather than steered.</summary>
         public int HardResyncs { get; private set; }
@@ -1537,6 +2366,7 @@ namespace Cuvara.Netcode.Prediction
         /// </param>
         public void SteerToServerTick(long serverTick, int targetLeadTicks)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteerToServerTick, a: serverTick, b: targetLeadTicks));
             if (!IsEnabled || !_baseTickSeeded || serverTick <= 0)
             {
                 return;
@@ -1548,13 +2378,47 @@ namespace Cuvara.Netcode.Prediction
             long error = _baseTick - target;
             TickError = error;
 
-            if (error == 0)
+            // A STALL IS A PHASE EVENT, NOT DRIFT: move the clock onto the server's tick line
+            // rather than walk it back at 0.5 tick per snapshot. See StallResyncs. Two ways to
+            // see one, and only these two -- ordinary jitter is steered exactly as before:
+            //
+            //  - a frame was clamped since the last steer, and the error is outside the band
+            //    steering works in: the clamp discarded the stalled time;
+            //  - the clock is BEHIND by more than the catch-up budget with no clamp yet: the
+            //    stalled frame's snapshot is being handled before that frame's Advance. Jumping
+            //    now gives the input this frame records the tick it really has; the jumped time
+            //    is then credited against the coming Advance, which would otherwise simulate it
+            //    a second time. Nothing else puts the clock that far behind -- Advance follows
+            //    real time, and a snapshot's jitter moves the target by a tick or two.
+            bool clamped = _clampedSinceSteer;
+            _clampedSinceSteer = false;
+            if (error <= HardResyncTicks && error >= -HardResyncTicks)
             {
-                return;
+                // After a clamp the error is stall residue, not jitter: a stall a little longer
+                // than the clamp (0.4 s against 0.25 s) left the clock 7 or 8 ticks behind, inside
+                // the 8-tick steering band, and steering it out at half a tick per snapshot cost
+                // three to five corrections (the 0.4 s paced-backlog sweep of T51). So after a
+                // clamp anything beyond StallJumpMinTicks is set, not steered.
+                bool afterClamp = clamped
+                                  && (error > StallJumpMinTicks || error < -StallJumpMinTicks);
+                bool beforeClamp = !clamped && error < -_maxCatchUpTicks;
+                if (afterClamp || beforeClamp)
+                {
+                    JumpClock(-error);
+                    if (beforeClamp)
+                    {
+                        _jumpCredit = -error * _dt;
+                        _jumpCreditAdvances = 2;
+                    }
+                    StallResyncs++;
+                    HardResyncs++;
+                    return;
+                }
             }
 
             if (error > HardResyncTicks || error < -HardResyncTicks)
             {
+
                 // Too far to walk back. Steering out two seconds at the rate below would
                 // take a minute of visibly wrong speed, which is worse than one correction
                 // the reconcile is about to smooth anyway.
@@ -1565,6 +2429,11 @@ namespace Cuvara.Netcode.Prediction
                 _tickStartTick = 0;
                 _head = 0;
                 _count = 0;
+                // The integrator learned a rate against a clock that has just been replaced,
+                // and the remembered offsets pair input ticks with base ticks that no longer
+                // exist. Both restart.
+                _steerIntegral = 0f;
+                ForgetAckOffsets();
                 HardResyncs++;
                 return;
             }
@@ -1575,8 +2444,51 @@ namespace Cuvara.Netcode.Prediction
             // player reads a speed change, and still closes a second of error in a few
             // seconds.
             float ticks = error * SteerGain;
+            bool saturated = ticks >= MaxSteerTicksPerCall || ticks <= -MaxSteerTicksPerCall;
             if (ticks > MaxSteerTicksPerCall) ticks = MaxSteerTicksPerCall;
             if (ticks < -MaxSteerTicksPerCall) ticks = -MaxSteerTicksPerCall;
+
+            // INTEGRAL TERM: the part of the correction that removes a RATE difference.
+            //
+            // The proportional term acts on a phase error and nothing else, so against a constant
+            // rate difference it droops: it settles at the error that makes its own output equal
+            // the drift, drift / (gain * snapshotHz). A server running 0.7% slow (59.6 Hz against
+            // 60) was measured settling about one tick off, and before ack_applied_tick that tick
+            // came back from the reconcile as position at every start and stop.
+            // SetClockRateScale removes the drift when a corroborated rate exists; most sessions
+            // never corroborate one, so the loop has to close on its own.
+            //
+            // Three choices keep it from doing harm, each measured on the headless harness:
+            //
+            //  - It integrates the INTEGER error, the same one the proportional term sees. A clock
+            //    already in step therefore integrates nothing and is left exactly where it is. An
+            //    integrator on the fractional error (accumulator phase included) was tried first:
+            //    it kept nudging an in-step clock about inside its tick, every nudge moved the
+            //    client/server tick offset by one now and then, and on a 60 Hz server with no
+            //    jitter the reconcile corrected 156 of 405 snapshots where this form corrects
+            //    none.
+            //  - It only integrates while the proportional term is NOT saturated and the error is
+            //    inside SteerIntegralBandTicks (conditional-integration anti-windup). A large phase
+            //    error after a join or a stall is a phase event, not a rate, and is walked back by
+            //    the proportional term alone instead of winding the integrator up into an
+            //    overshoot.
+            //  - The gain is small and the contribution clamped. With Kp = 0.1 and Ki = 0.002 per
+            //    call the closed loop's poles are real, at z ~ 0.97 and 0.92: overdamped, and a
+            //    0.7% drift is learned in about a second of snapshots.
+            if (!saturated && error <= SteerIntegralBandTicks && error >= -SteerIntegralBandTicks)
+            {
+                _steerIntegral += error * SteerIntegralGain;
+                if (_steerIntegral > MaxSteerIntegralTicksPerCall) _steerIntegral = MaxSteerIntegralTicksPerCall;
+                if (_steerIntegral < -MaxSteerIntegralTicksPerCall) _steerIntegral = -MaxSteerIntegralTicksPerCall;
+            }
+
+            ticks += _steerIntegral;
+
+
+            if (ticks == 0f)
+            {
+                return;
+            }
 
             // Ahead of the server means run slower: take time OFF the accumulator.
             _tickAccumulator -= ticks * _dt;
@@ -1666,6 +2578,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetClockRateScale(float scale)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetClockRateScale, x: scale));
             if (!float.IsFinite(scale) || scale <= 0f)
             {
                 return;
@@ -1692,6 +2605,52 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Ceiling on one steering call, in base ticks.</summary>
         private const float MaxSteerTicksPerCall = 0.5f;
 
+        /// <summary>Fraction of the (integer) tick error added to the integrator per call.</summary>
+        private const float SteerIntegralGain = 0.002f;
+
+        /// <summary>
+        /// Ceiling on the integrator's contribution per call, in base ticks: at 15 snapshots a
+        /// second, 7.5 ticks a second, a 12.5% rate difference at 60 Hz -- every rate the
+        /// staleness estimator's own skew bounds would accept.
+        /// </summary>
+        private const float MaxSteerIntegralTicksPerCall = 0.5f;
+
+        /// <summary>
+        /// The integrator only learns while the error is inside this many base ticks. Outside
+        /// it the error is a phase event (a stall, a join), not a rate, and integrating it would
+        /// wind up into an overshoot once the phase is walked back.
+        /// </summary>
+        private const long SteerIntegralBandTicks = 8;
+
+        // Smallest error, in base ticks, that a clamped frame turns into a clock jump rather than
+        // steering. Two: a tick or two is the input-cadence phase that exists without any stall
+        // (ClientHitchRecoveryTests remarks), anything more after a clamp is the stall.
+        private const long StallJumpMinTicks = 2;
+
+        /// <summary>
+        /// Integral of the fractional tick error, in base ticks per steering call. Persists
+        /// across calls; cleared by a hard resync and by <see cref="Reset"/>.
+        /// </summary>
+        private float _steerIntegral;
+
+        /// <summary>
+        /// The integral term in force, in base ticks per steering call: the rate correction the
+        /// loop has learned. Positive slows the client clock. Diagnostics; near zero once a
+        /// corroborated rate is fed through <see cref="SetClockRateScale"/>.
+        /// </summary>
+        public float SteerIntegralTicks => _steerIntegral;
+
+        private void ForgetAckOffsets()
+        {
+            _offsetCount = 0;
+            _offsetNext = 0;
+            _haveStableOffset = false;
+            _stableOffset = 0;
+            _lastSampledAckTick = 0;
+            _ackedInputTick = 0;
+            _ackedInputBaseTick = 0;
+        }
+
         /// <summary>
         /// True when the tick rate came from a local fallback rather than from the server.
         /// </summary>
@@ -1713,6 +2672,7 @@ namespace Cuvara.Netcode.Prediction
         /// <summary>Forgets all prediction state. For a new session or a map transfer.</summary>
         public void Reset()
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.Reset));
             _head = 0;
             _count = 0;
             _lastRecordedTick = 0;
@@ -1726,9 +2686,11 @@ namespace Cuvara.Netcode.Prediction
             SkipNoDisplacement = 0;
             StepIntervalSamples = 0;
             StepIntervalResets = 0;
-            _predicted = Vec2.Zero;
+            _predicted = Body.Planar(Vec2.Zero);
             _renderOffset = Vec2.Zero;
             _step = Vec2.Zero;
+            _renderOffsetZ = 0f;
+            _stepZ = 0f;
             _sinceInput = 0f;
             _inputInterval = 0f;
             _stepInterval = 0f;
@@ -1764,6 +2726,27 @@ namespace Cuvara.Netcode.Prediction
             Reconciles = 0;
             DroppedInputs = 0;
             RejectedInputs = 0;
+            _steerIntegral = 0f;
+            ForgetAckOffsets();
+            AckTickOffset = 0;
+            LastMeasuredAckTickOffset = 0;
+            AckOffsetSamples = 0;
+            AckOffsetChanges = 0;
+            AckOffsetUnresolved = 0;
+
+            // The history belongs to the session that recorded it. Left in place, a new session
+            // whose ticks overlap the old one's -- a reconnect to a server that restarted, or one
+            // whose tick line happens to cross -- could have a reconcile naming a tick before its
+            // own first step answered by where the PREVIOUS player was, and "correct" by the
+            // distance between the two (PredictorResetHistoryTests).
+            System.Array.Clear(_history, 0, HistoryTicks);
+            System.Array.Clear(_historyTick, 0, HistoryTicks);
+            _replayStageCount = 0;
+            _clampedSinceSteer = false;
+            _jumpCredit = 0f;
+            _jumpCreditAdvances = 0;
+            _bunchedSnapshotTick = 0;
+            _restampPending = false;
         }
 
 
@@ -1930,12 +2913,12 @@ namespace Cuvara.Netcode.Prediction
         /// because an off-by-one here is a fixed fraction of every step and lands under
         /// the smoothing threshold — the failure mode this class has now produced twice.
         /// </remarks>
-        private bool ApplyHeld(ref Vec2 position, long baseTick)
+        private bool ApplyHeld(ref Body position, long baseTick)
         {
             // Where this tick started, kept so a real input arriving after the hold has
             // already stepped can RE-TAKE the tick's single step from the same place rather
             // than being coalesced away. See RecordInput for why that matters.
-            Vec2 tickStart = position;
+            Body tickStart = position;
             long lastMoveBefore = _lastMoveTick;
 
             bool stepped = ApplyHeld(
@@ -1967,12 +2950,54 @@ namespace Cuvara.Netcode.Prediction
         }
 
         private bool ApplyHeld(
-            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
             ref long lastMoveTick) =>
             ApplyHeld(ref position, baseTick, heldFrom, heldX, heldY, ref lastMoveTick, out _);
 
+        /// <summary>
+        /// One base tick with no input of its own: the held step if the hold takes it, and under
+        /// the 3D motor otherwise one passive motor step for an airborne body.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Gravity does not wait for input.</b> A body in the air keeps falling on a tick
+        /// nothing steers -- nothing held, the hold expired, or the held vector refused -- so it
+        /// takes one motor step with no horizontal input. Never on a tick an input already
+        /// stepped (<see cref="HoldSkip.InputAlreadyStepped"/>): that step integrated gravity
+        /// itself, and rule 1 allows one step per tick.
+        /// </para>
+        /// <para>
+        /// A passive step stamps <paramref name="lastMoveTick"/> like any other, so an input
+        /// landing on the same tick afterwards re-takes the tick's single step from where it
+        /// began, exactly as it does after a held step.
+        /// </para>
+        /// </remarks>
         private bool ApplyHeld(
-            ref Vec2 position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
+            ref long lastMoveTick, out HoldSkip reason)
+        {
+            bool stepped = ApplyHeldStep(
+                ref position, baseTick, heldFrom, heldX, heldY, ref lastMoveTick, out reason);
+
+            if (stepped || !_motor3D || position.Grounded || reason == HoldSkip.InputAlreadyStepped)
+            {
+                return stepped;
+            }
+
+            StepResult(position, 0f, 0f, false, _dt, out Body fallen);
+            if (fallen.SameAs(position))
+            {
+                return false;
+            }
+
+            position = fallen;
+            lastMoveTick = baseTick;
+            reason = HoldSkip.None;
+            return true;
+        }
+
+        private bool ApplyHeldStep(
+            ref Body position, long baseTick, long heldFrom, float heldX, float heldY,
             ref long lastMoveTick, out HoldSkip reason)
         {
             reason = HoldSkip.None;
@@ -1997,8 +3022,8 @@ namespace Cuvara.Netcode.Prediction
             // The hold path updates LastMoveTick exactly as the packet path does, on both
             // sides, so the two agree on which ticks have already been stepped.
             MoveResult result = StepResult(
-                position, heldX, heldY, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
-                out Vec2 moved);
+                position, heldX, heldY, false, StepDeltaTime(baseTick, lastMoveTick, heldFrom),
+                out Body moved);
 
             if (result is not (MoveResult.Accepted or MoveResult.Clamped))
             {
@@ -2006,7 +3031,10 @@ namespace Cuvara.Netcode.Prediction
                 return false;
             }
 
-            if (moved.X == position.X && moved.Y == position.Y)
+            // Z and the vertical state count as displacement under the motor: a held step into a
+            // wall while falling still moved the body. Under the planar model they never change.
+            if (moved.X == position.X && moved.Y == position.Y
+                && (!_motor3D || moved.SameAs(position)))
             {
                 reason = HoldSkip.NoDisplacement;
                 return false;
@@ -2047,6 +3075,7 @@ namespace Cuvara.Netcode.Prediction
         /// </remarks>
         public void SetHoldTicks(int holdTicks)
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetHoldTicks, a: holdTicks));
             if (holdTicks >= 1)
             {
                 HoldTicks = holdTicks;
@@ -2057,20 +3086,46 @@ namespace Cuvara.Netcode.Prediction
         /// One step, reporting the server's own verdict on it.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// The verdict is taken from <c>MovementSystem</c> rather than recomputed here.
         /// Whether a vector counts as a stop is the deadzone rule, and a second copy of
         /// that threshold on the client is a constant free to drift from the server's —
         /// the identical shape as the tick rate and the hold window. There is one
         /// implementation of the movement model and this asks it.
+        /// </para>
+        /// <para>
+        /// Under the 3D motor this is <see cref="CharacterMotor.Step"/>, which resolves the input
+        /// with the same <c>MovementSystem.ResolveDirection</c> and so returns the same verdict for
+        /// the same vector -- but which ALWAYS produces a step: gravity, a jump and landing run
+        /// even when the horizontal input is a stop or refused, because a body in the air must
+        /// keep falling whatever its owner pressed. <paramref name="moved"/> is that step.
+        /// </para>
+        /// <para>
+        /// Under the planar model a refused step returns <paramref name="from"/> unchanged, as it
+        /// always has, and <paramref name="jump"/> is ignored.
+        /// </para>
         /// </remarks>
         private MoveResult StepResult(
-            Vec2 from, float moveX, float moveY, float deltaTime, out Vec2 moved)
+            in Body from, float moveX, float moveY, bool jump, float deltaTime, out Body moved)
         {
-            var probe = new EntityState { Position = from, Speed = _speed, Dead = false };
+            if (_motor3D)
+            {
+                var state = new MotorState(from.Position, from.VelZ, from.Grounded);
+                MoveResult motorResult = CharacterMotor.Step(
+                    in state, moveX, moveY, jump, _speed, deltaTime, _geometry, in _motorParams,
+                    out MotorState stepped);
+
+                moved = new Body(
+                    stepped.Position.X, stepped.Position.Y, stepped.Position.Z,
+                    stepped.VelocityZ, stepped.Grounded);
+                return motorResult;
+            }
+
+            var probe = new EntityState { Position = from.XY, Speed = _speed, Dead = false };
             MoveResult result = MovementSystem.TryMove(
                 in probe, moveX, moveY, deltaTime, in _settings.Bounds, out Vec2 next);
 
-            moved = result is MoveResult.Accepted or MoveResult.Clamped ? next : from;
+            moved = result is MoveResult.Accepted or MoveResult.Clamped ? from.WithXY(next) : from;
             return result;
         }
 
@@ -2161,6 +3216,16 @@ namespace Cuvara.Netcode.Prediction
             {
                 _lastAcked = _pending[_head];
                 _haveLastAcked = true;
+
+                // Remembered past the drop: later snapshots repeat the same ack (and the same
+                // applied tick) until the next input lands, and each of them still needs the
+                // client base tick this input was recorded on. See ResolveAnchorTick.
+                if (_lastAcked.Tick == ackTick)
+                {
+                    _ackedInputTick = _lastAcked.Tick;
+                    _ackedInputBaseTick = _lastAcked.BaseTick;
+                }
+
                 _head = (_head + 1) % Capacity;
                 _count--;
             }
@@ -2168,5 +3233,200 @@ namespace Cuvara.Netcode.Prediction
 
         private PendingInput _lastAcked;
         private bool _haveLastAcked;
+
+        // The newest input the server has acknowledged by name, and the client base tick it was
+        // recorded on. Zero tick = none yet.
+        private long _ackedInputTick;
+        private long _ackedInputBaseTick;
+
+        /// <summary>
+        /// How many recent measured offsets the stable offset is chosen from: about a second of
+        /// acknowledgements at a 13-15 Hz send rate.
+        /// </summary>
+        private const int OffsetWindow = 15;
+
+        private readonly long[] _offsets = new long[OffsetWindow];
+        private readonly long[] _offsetScratch = new long[OffsetWindow];
+        private int _offsetCount;
+        private int _offsetNext;
+        private bool _haveStableOffset;
+        private long _stableOffset;
+        private long _lastSampledAckTick;
+
+        /// <summary>
+        /// The client base tick the authoritative position of a snapshot at
+        /// <paramref name="snapshotTick"/> describes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a snapshot's tick is not that tick.</b> The server applies an input on the tick
+        /// whose input drain accepts it, not on the tick number the client was at when it recorded
+        /// it. The client runs ahead by its lead, so the input recorded on client tick <c>B</c> is
+        /// applied on server tick <c>P</c>, and the two tick lines are offset by <c>B - P</c> --
+        /// about the lead minus one, plus whatever clock skew the steering has not removed. A
+        /// snapshot at server tick <c>T</c> therefore shows what the client's history holds at
+        /// <c>T + (B - P)</c>, and comparing it against the entry at <c>T</c> compares two moments
+        /// of the same motion. Every tick of that offset came back as a correction: a fraction of
+        /// a step per reconcile on a curve, a whole step at a start or a stop.
+        /// </para>
+        /// <para>
+        /// <b>A STABLE offset, not the exact pair of each acknowledgement.</b> The exact pair --
+        /// this input's <c>B</c> against the snapshot's <c>ack_applied_tick</c> -- was implemented
+        /// first and measured worse than no field at all. Each input's offset carries a tick of
+        /// drain quantisation (it lands somewhere inside a server tick and is drained at the next
+        /// one), so consecutive pairs differ by one tick roughly as often as not. Moving the
+        /// comparison point by that tick on a body that is moving moves it by a whole step, and the
+        /// reconcile "corrects" that step and then corrects it back: measured on the headless
+        /// harness (59.6 Hz server, 13 Hz jittered sends, a circle) as a one-step correction on
+        /// one reconcile in eight and a mean of 0.019 units, against 0.0011 with the stable
+        /// offset below and 0.019 with no field at all.
+        /// </para>
+        /// <para>
+        /// What aligns two moving timelines is the offset they SHARE, so the offset used is the
+        /// median of the last <see cref="OffsetWindow"/> measured pairs, and it only moves when
+        /// the window has clearly moved away from it (fewer than a third of the samples still
+        /// agree). The quantisation then shows up only where it is real -- an input whose drain
+        /// landed a tick away from the shared offset changes direction a tick early or late on the
+        /// server, which is a genuine, bounded disagreement of at most one step at a start or stop
+        /// and a fraction of a step on a curve -- instead of as a comparison artefact on every
+        /// reconcile.
+        /// </para>
+        /// <para>
+        /// <b>Absent field, unchanged behaviour.</b> With no <c>ack_applied_tick</c> (a protocol
+        /// 2 or older server) this returns <paramref name="snapshotTick"/> -- what every caller
+        /// got before -- so that path is as it was.
+        /// </para>
+        /// </remarks>
+        private long ResolveAnchorTick(long snapshotTick, long ackTick, long ackAppliedTick)
+        {
+            if (!IsEnabled || !_seeded || snapshotTick == NoServerTick || snapshotTick <= 0
+                || ackAppliedTick <= 0 || ackTick <= 0)
+            {
+                return snapshotTick;
+            }
+
+            if (TryFindAckedBaseTick(ackTick, out long ackedBaseTick))
+            {
+                long measured = ackedBaseTick - ackAppliedTick;
+                LastMeasuredAckTickOffset = measured;
+
+                // One sample per acknowledged input, not per snapshot: later snapshots repeat the
+                // same pair until the next input lands, and counting them again would weight a
+                // slow sender's inputs by the snapshot rate.
+                if (ackTick != _lastSampledAckTick)
+                {
+                    _lastSampledAckTick = ackTick;
+                    _offsets[_offsetNext] = measured;
+                    _offsetNext = (_offsetNext + 1) % OffsetWindow;
+                    if (_offsetCount < OffsetWindow) _offsetCount++;
+                    AckOffsetSamples++;
+                }
+            }
+
+            if (_offsetCount == 0)
+            {
+                AckOffsetUnresolved++;
+                return snapshotTick;
+            }
+
+            long median = MedianOffset(out int agreeingWithStable);
+            if (!_haveStableOffset)
+            {
+                _haveStableOffset = true;
+                _stableOffset = median;
+            }
+            else if (median != _stableOffset && agreeingWithStable * 3 < _offsetCount)
+            {
+                _stableOffset = median;
+                AckOffsetChanges++;
+            }
+
+            AckTickOffset = _stableOffset;
+            return snapshotTick + _stableOffset;
+        }
+
+        /// <summary>
+        /// The base tick the input <paramref name="ackTick"/> was recorded on, if this predictor
+        /// recorded it: still pending, or the newest one already dropped by name.
+        /// </summary>
+        private bool TryFindAckedBaseTick(long ackTick, out long baseTick)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                PendingInput input = _pending[(_head + i) % Capacity];
+                if (input.Tick > ackTick) break;
+                if (input.Tick == ackTick)
+                {
+                    baseTick = input.BaseTick;
+                    return true;
+                }
+            }
+
+            if (_ackedInputTick != 0 && _ackedInputTick == ackTick)
+            {
+                baseTick = _ackedInputBaseTick;
+                return true;
+            }
+
+            baseTick = 0;
+            return false;
+        }
+
+        /// <summary>
+        /// Median of the measured offsets in the window, and how many of them equal the stable
+        /// offset in force. Allocation-free: sorts a scratch copy.
+        /// </summary>
+        private long MedianOffset(out int agreeingWithStable)
+        {
+            agreeingWithStable = 0;
+            for (int i = 0; i < _offsetCount; i++)
+            {
+                _offsetScratch[i] = _offsets[i];
+                if (_haveStableOffset && _offsets[i] == _stableOffset) agreeingWithStable++;
+            }
+
+            System.Array.Sort(_offsetScratch, 0, _offsetCount);
+            return _offsetScratch[_offsetCount / 2];
+        }
+
+        /// <summary>
+        /// The offset, in base ticks, between this client's tick line and the server's, as used
+        /// by the last reconcile that had an <c>ack_applied_tick</c>: the snapshot at server tick
+        /// T was compared with this predictor's history at <c>T + AckTickOffset</c>. 0 before the
+        /// first such reconcile.
+        /// </summary>
+        /// <remarks>
+        /// The stable value (see <see cref="ResolveAnchorTick"/>): the median of recent measured
+        /// pairs, moved only when the window has clearly moved. Roughly the steering lead minus
+        /// one plus the clock skew the steering has not removed; a value that keeps changing in
+        /// one direction means the clock is not being steered (a consumer that never calls
+        /// <see cref="SteerToServerTick"/>). The reconcile stays aligned regardless, because the
+        /// offset is measured rather than assumed, but the lead it implies is latency the player
+        /// feels.
+        /// </remarks>
+        public long AckTickOffset { get; private set; }
+
+        /// <summary>
+        /// The most recent EXACT offset: the acked input's recorded base tick minus the server
+        /// tick that applied it. Differs from <see cref="AckTickOffset"/> by the drain
+        /// quantisation of that one input. Diagnostics.
+        /// </summary>
+        public long LastMeasuredAckTickOffset { get; private set; }
+
+        /// <summary>Acknowledged inputs whose exact offset was measured and added to the window.</summary>
+        public int AckOffsetSamples { get; private set; }
+
+        /// <summary>
+        /// Times the stable offset moved. Each move on a moving body is a one-step correction, so
+        /// a count that grows steadily means the clock is drifting against the server's.
+        /// </summary>
+        public int AckOffsetChanges { get; private set; }
+
+        /// <summary>
+        /// Reconciles that had <c>ack_applied_tick</c> but no offset yet (the ack named an input
+        /// this predictor never recorded, before any was measured), and so compared at the
+        /// snapshot's own tick as a protocol 2 server's reconciles do.
+        /// </summary>
+        public int AckOffsetUnresolved { get; private set; }
     }
 }

@@ -146,6 +146,12 @@ namespace Cuvara.Netcode.Json
             }
         }
 
+        /// <summary>The value's own number, for a numeric element inside an array.</summary>
+        public double AsNumber(double fallback = 0d)
+        {
+            return Kind == JsonKind.Number ? _number : fallback;
+        }
+
         /// <summary>The value's own text, for a string element inside an array.</summary>
         public string AsString(string fallback = "")
         {

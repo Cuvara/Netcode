@@ -16,13 +16,35 @@ namespace Cuvara.Netcode.Snapshot
     {
         public ResolvedSnapshot(long tick, long ackTick, bool full,
             IReadOnlyList<ResolvedEntity> entities, IReadOnlyList<string> removed)
+            : this(tick, ackTick, full, entities, removed, NoEvents)
+        {
+        }
+
+        public ResolvedSnapshot(long tick, long ackTick, bool full,
+            IReadOnlyList<ResolvedEntity> entities, IReadOnlyList<string> removed,
+            IReadOnlyList<ResolvedGameEvent> events)
+            : this(tick, ackTick, full, entities, removed, events, 0L)
+        {
+        }
+
+        /// <summary>
+        /// The full form: as above, plus <paramref name="ackAppliedTick"/> -- the server tick that
+        /// applied the input <paramref name="ackTick"/> names (wire field 7; 0 = not sent).
+        /// </summary>
+        public ResolvedSnapshot(long tick, long ackTick, bool full,
+            IReadOnlyList<ResolvedEntity> entities, IReadOnlyList<string> removed,
+            IReadOnlyList<ResolvedGameEvent> events, long ackAppliedTick)
         {
             Tick = tick;
             AckTick = ackTick;
+            AckAppliedTick = ackAppliedTick;
             Full = full;
             Entities = entities;
             Removed = removed;
+            Events = events ?? NoEvents;
         }
+
+        private static readonly ResolvedGameEvent[] NoEvents = new ResolvedGameEvent[0];
 
         /// <summary>Server simulation tick this snapshot describes.</summary>
         public long Tick { get; }
@@ -35,6 +57,19 @@ namespace Cuvara.Netcode.Snapshot
         public long AckTick { get; }
 
         /// <summary>
+        /// Server base tick on which the input <see cref="AckTick"/> names was applied
+        /// (<c>ack_applied_tick</c>). Zero means "not sent" (protocol 2 or an older server).
+        /// </summary>
+        /// <remarks>
+        /// <see cref="AckTick"/> counts on the client's tick line, <see cref="Tick"/> on the
+        /// server's; this joins them. A predictor compares this snapshot with its history at
+        /// <c>Tick + (client base tick of the acked input - AckAppliedTick)</c> rather than at
+        /// <c>Tick</c>. Only meaningful together with the <see cref="AckTick"/> of the SAME
+        /// snapshot.
+        /// </remarks>
+        public long AckAppliedTick { get; }
+
+        /// <summary>
         /// Keyframe marker. When true, <see cref="Entities"/> is the complete AOI
         /// set and everything not listed must be discarded.
         /// </summary>
@@ -44,5 +79,16 @@ namespace Cuvara.Netcode.Snapshot
 
         /// <summary>Entity ids that left the AOI or the world. Deltas only.</summary>
         public IReadOnlyList<string> Removed { get; }
+
+        /// <summary>
+        /// Edge-triggered occurrences this tick produced, participants already resolved to
+        /// entity ids. Empty on most snapshots, and never null.
+        /// </summary>
+        /// <remarks>
+        /// <b>Consume these once.</b> They are not state and they are not re-sent: a keyframe
+        /// restates the world, not its history, so an event replayed by a consumer that
+        /// re-reads an old snapshot would show a player a hit that happened twice.
+        /// </remarks>
+        public IReadOnlyList<ResolvedGameEvent> Events { get; }
     }
 }

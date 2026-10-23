@@ -107,7 +107,7 @@ namespace Samples.NetcodeE2E
 
                 _client = new NetworkClient(
                     new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
-                    new DefaultTransportFactory(), new ProtobufWireCodec(), new UnityNetLog());
+                    new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), new ProtobufWireCodec(), new UnityNetLog());
 
                 await _client.ConnectAsync(jwt, mapId, ct);
                 Line($"IN_WORLD as {_client.UserId} on map '{mapId}' via Protobuf");

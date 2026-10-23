@@ -24,9 +24,13 @@ namespace Cuvara.Netcode.Client
     {
         private readonly NetworkSettings _settings;
         private readonly ITransportFactory _transports;
+
+        // The current connection's transport, for its diagnostics only.
+        private ITransport _transport;
         private readonly IWireCodec _codec;
         private readonly INetLog _log;
         private readonly SnapshotResolver _resolver = new SnapshotResolver();
+        private readonly CommandCorrelator _commands = new CommandCorrelator();
 
         private WireConnection _connection;
         private bool _awaitingKeyframe;
@@ -48,6 +52,23 @@ namespace Cuvara.Netcode.Client
 
         /// <summary>Raised once when the gameplay connection ends, however it ends.</summary>
         public event Action<DisconnectInfo> Closed;
+
+        /// <summary>
+        /// Raised for every <see cref="CommandResult"/> the server sends, after the awaiting
+        /// <see cref="SendCommandAsync"/> (if any) has been completed with it. Includes results
+        /// nobody is waiting for any more -- a command cancelled by its caller still executes on
+        /// the server, and this is where its outcome is still visible.
+        /// </summary>
+        /// <remarks>Raised on the connection's read loop, like <see cref="SnapshotReceived"/>.</remarks>
+        public event Action<CommandResult> CommandResultReceived;
+
+        /// <summary>
+        /// Raised for every unsolicited <see cref="ServerPush"/> (inventory changed, quest
+        /// progress, chat line). Decode the payload with Shared.GameLogic's gameplay codec for
+        /// its <see cref="ServerPush.Opcode"/>.
+        /// </summary>
+        /// <remarks>Raised on the connection's read loop, like <see cref="SnapshotReceived"/>.</remarks>
+        public event Action<ServerPush> ServerPushReceived;
 
         public string UserId { get; private set; } = string.Empty;
 
@@ -72,6 +93,43 @@ namespace Cuvara.Netcode.Client
         /// </summary>
         public uint ServerProtocolVersion { get; private set; }
 
+        /// <summary>
+        /// The character this connection plays, as the game server echoed it from the join
+        /// token's <c>cid</c> claim (ADR-31). Empty from a server predating character slots, and
+        /// for the account's default character on one that does not echo it.
+        /// </summary>
+        /// <remarks>
+        /// Bind the local view to THIS, not to the id that was requested: it is what the server
+        /// actually loaded, and the request is not trusted by anyone.
+        /// </remarks>
+        public string CharacterId { get; private set; } = string.Empty;
+
+        /// <summary>
+        /// Whether the game server speaks the command channel (protocol version 3, ADR-30).
+        /// False before a join, and against a version 2 or unversioned server -- in which case
+        /// <see cref="SendCommandAsync"/> completes at once with
+        /// <see cref="CommandChannelErrors.ProtocolTooOld"/>.
+        /// </summary>
+        public bool SupportsCommands =>
+            WireProtocolVersion.Supports(ServerProtocolVersion, WireProtocolVersion.CommandChannel);
+
+        /// <summary>
+        /// Whether the game server's movement is 3D (protocol version 3, ADR-28): predict with
+        /// <c>CharacterMotor</c> rather than the planar <c>MovementSystem</c>. See
+        /// <c>LocalMovePredictor.UseServerProtocol</c>.
+        /// </summary>
+        public bool UsesMotor3D =>
+            WireProtocolVersion.Supports(ServerProtocolVersion, WireProtocolVersion.Motor3D);
+
+        /// <summary>Commands sent on this connection and not yet answered.</summary>
+        public int PendingCommandCount => _commands.PendingCount;
+
+        /// <summary>
+        /// Results that named a seq nothing was waiting for -- a cancelled command's late answer,
+        /// or a server bug. Diagnostics.
+        /// </summary>
+        public int UnmatchedCommandResults => _commands.UnmatchedResults;
+
         /// <summary>Server tick of the newest snapshot applied. Never moves backwards.</summary>
         public long ServerTick { get; private set; }
 
@@ -90,8 +148,46 @@ namespace Cuvara.Netcode.Client
 
         public bool IsConnected => _connection != null && _connection.IsRunning;
 
+        /// <summary>
+        /// Datagrams the gameplay transport has read off its socket (<see cref="KcpTransport.DatagramsRead"/>),
+        /// or zero on any other transport. Sampled per frame, the difference is the datagrams read
+        /// that frame. Diagnostics, for the test lab.
+        /// </summary>
+        public long TransportDatagramsRead => (_transport as KcpTransport)?.DatagramsRead ?? 0L;
+
+        /// <summary>Wakes of the gameplay transport's receive loop (<see cref="KcpTransport.ReceiveWakeups"/>).</summary>
+        public long TransportReceiveWakeups => (_transport as KcpTransport)?.ReceiveWakeups ?? 0L;
+
+        /// <summary>The most datagrams one receive wake has read (<see cref="KcpTransport.MaxDatagramsPerWake"/>).</summary>
+        public int TransportMaxDatagramsPerWake => (_transport as KcpTransport)?.MaxDatagramsPerWake ?? 0;
+
         /// <summary>How the gameplay connection ended, once it has; null while it is up.</summary>
         public DisconnectInfo? CloseInfo => _connection?.CloseInfo;
+
+        /// <summary>
+        /// The message for a join that hit <see cref="NetworkSettings.ConnectTimeout"/>.
+        /// </summary>
+        /// <remarks>
+        /// When the KCP transport received not one datagram, the server never answered at
+        /// all: a closed or unmapped UDP port, a firewall dropping UDP, or a transport-key
+        /// mismatch (both ends drop datagrams they cannot decrypt). That is a connect
+        /// failure, and is named as one, with the host and port that were dialled.
+        /// </remarks>
+        internal string DescribeJoinTimeout(ITransport transport, NetworkEndpoint endpoint)
+        {
+            var seconds = _settings.ConnectTimeout.TotalSeconds;
+            if (transport is KcpTransport kcp && kcp.DatagramsReceived == 0)
+            {
+                return $"KCP/UDP connect timeout to {endpoint.Host}:{endpoint.Port} after {seconds:F0} s: " +
+                       "no UDP datagram came back from the game server. Check the firewall and the UDP " +
+                       $"port mapping for udp/{endpoint.Port} (Docker '{endpoint.Port}:{endpoint.Port}/udp', " +
+                       "Agones/k8s 'protocol: UDP'), and that -cuvara-transport-key matches the server's " +
+                       "TRANSPORT_KEY" + (kcp.IsEncrypted ? " (a key is set here)" : " (no key is set here)") + ".";
+            }
+
+            return $"game server at {endpoint.Host}:{endpoint.Port} did not answer the join within {seconds:F0} s " +
+                   "over KCP/UDP (datagrams were received, so the port is reachable)";
+        }
 
         /// <summary>
         /// Dials the assigned game server and consumes the join token.
@@ -109,7 +205,20 @@ namespace Cuvara.Netcode.Client
                 throw new InvalidOperationException("game session is already connected");
             }
 
-            var transport = _transports.Create(assignment.Transport);
+            // Realtime gameplay is KCP/UDP only. Refused before a factory is asked for
+            // anything, so no factory -- default or custom -- can be talked into building a
+            // TCP gameplay link.
+            try
+            {
+                TransportKinds.RequireGameplay(assignment.Transport);
+            }
+            catch (TransportException ex)
+            {
+                throw new NetworkException(ex.Message, TransportKinds.UnsupportedGameplayTransport);
+            }
+
+            var transport = _transports.Create(TransportKind.Kcp);
+            _transport = transport;
             var connection = new WireConnection("gameserver", transport, _codec, _settings, _log);
             _connection = connection;
             connection.Closed += OnClosed;
@@ -119,20 +228,34 @@ namespace Cuvara.Netcode.Client
             {
                 timeout.CancelAfter(_settings.ConnectTimeout);
 
-                await transport.ConnectAsync(assignment.Endpoint.Host, assignment.Endpoint.Port, timeout.Token);
+                WireFrame? frame;
+                try
+                {
+                    await transport.ConnectAsync(assignment.Endpoint.Host, assignment.Endpoint.Port, timeout.Token);
 
-                // The join token must be the very first frame; the game server
-                // rejects anything else outright.
-                await connection.SendFrameAsync(
-                    MsgType.JoinToken,
-                    new JoinTokenRequest
-                    {
-                        Token = assignment.JoinToken,
-                        ProtocolVersion = WireProtocolVersion.Current,
-                    },
-                    timeout.Token);
+                    // The join token must be the very first frame; the game server
+                    // rejects anything else outright. Over KCP it is also the first
+                    // datagram, which is what creates the session on the server.
+                    await connection.SendFrameAsync(
+                        MsgType.JoinToken,
+                        new JoinTokenRequest
+                        {
+                            Token = assignment.JoinToken,
+                            ProtocolVersion = WireProtocolVersion.Current,
+                        },
+                        timeout.Token);
 
-                var frame = await connection.ReceiveFrameAsync(timeout.Token);
+                    frame = await connection.ReceiveFrameAsync(timeout.Token);
+                }
+                catch (OperationCanceledException) when (
+                    timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    // Our own deadline, not the caller's cancel. UDP has no connect, so a
+                    // dead or unmapped port is only ever visible as this silence: say so,
+                    // instead of surfacing a bare cancellation.
+                    throw new NetworkException(DescribeJoinTimeout(transport, assignment.Endpoint));
+                }
+
                 if (frame == null)
                 {
                     throw new NetworkException("game server closed the connection during the join");
@@ -175,6 +298,7 @@ namespace Cuvara.Netcode.Client
 
                 UserId = response.UserId;
                 TickRate = response.TickRate;
+                CharacterId = response.CharacterId ?? string.Empty;
 
                 if (_settings.RequireSealedSession)
                 {
@@ -186,6 +310,10 @@ namespace Cuvara.Netcode.Client
             _awaitingKeyframe = false;
             ServerTick = 0L;
             AckTick = 0L;
+
+            // Before Start(): a result can only arrive once the read loop runs, and a command
+            // can only be sent once this hop is up, so opening here leaves no window either way.
+            _commands.Open();
 
             connection.Start();
             _log.Info($"joined {assignment.Endpoint} as '{UserId}'");
@@ -321,6 +449,160 @@ namespace Cuvara.Netcode.Client
         }
 
         /// <summary>
+        /// Sends one input frame carrying an ability.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A separate overload rather than four more optional parameters on
+        /// <see cref="SendInput(long, float, float, string)"/>: the common call sends no
+        /// ability, and defaulted parameters make the ability path look like something that
+        /// happens by accident rather than something a caller opted into.
+        /// </para>
+        /// <para>
+        /// <b>This is a request, and the ability is NOT predicted.</b> Prediction covers
+        /// movement only — movement is a pure function of input the client already has, while
+        /// an ability outcome depends on cooldowns, content and other entities' state. The
+        /// only report a client gets is what comes back in the snapshot: a
+        /// <see cref="Protocol.Messages.GameEventType.AbilityCast"/> event if it resolved,
+        /// nothing if it did not. Drive a cast animation and a cooldown sweep off that event,
+        /// never off this call.
+        /// </para>
+        /// <para>
+        /// <paramref name="abilityTargetId"/> is a server-side entity id, in the same space as
+        /// <paramref name="attackTargetId"/> — never an interned handle, which the server
+        /// allocates for its own outbound snapshots and would not recognise coming back.
+        /// <paramref name="aimX"/>/<paramref name="aimY"/> are a world-space POINT for a
+        /// ground-targeted ability, unlike the move vector which is a direction.
+        /// </para>
+        /// </remarks>
+        public void SendAbilityInput(
+            long tick,
+            float moveX,
+            float moveY,
+            uint abilityId,
+            string abilityTargetId = "",
+            float aimX = 0f,
+            float aimY = 0f,
+            string attackTargetId = "")
+        {
+            _connection?.Send(MsgType.Input, new InputMessage
+            {
+                Tick = tick,
+                MoveX = moveX,
+                MoveY = moveY,
+                AttackTargetId = attackTargetId ?? string.Empty,
+                AbilityId = abilityId,
+                AbilityTargetId = abilityTargetId ?? string.Empty,
+                AimX = aimX,
+                AimY = aimY
+            });
+        }
+
+        /// <summary>
+        /// Sends one fully-formed input frame, including the protocol version 3 fields
+        /// (<see cref="InputMessage.Jump"/>, <see cref="InputMessage.AimZ"/>,
+        /// <see cref="InputMessage.RenderTick"/>/<see cref="InputMessage.RenderAlpha"/>,
+        /// <see cref="InputMessage.SpawnSeq"/>).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The other <c>SendInput</c> overloads cover the protocol 2 shape and stay as they
+        /// were; this one exists so a version 3 caller is not forced through a parameter list
+        /// that grows with every field. Fill the render time with
+        /// <see cref="InputMessage.SetRenderTime"/> from <c>WorldViewBinder.RenderTick</c>.
+        /// </para>
+        /// <para>
+        /// Sent as-is, to a version 2 server too: it skips the fields it does not know, so the
+        /// input still moves the player and a jump or a skillshot simply does not happen.
+        /// </para>
+        /// </remarks>
+        public void SendInput(InputMessage input)
+        {
+            if (input == null)
+            {
+                throw new ArgumentNullException(nameof(input));
+            }
+
+            _connection?.Send(MsgType.Input, input);
+        }
+
+        /// <summary>
+        /// Sends one gameplay command on the generic channel (ADR-30) and completes with the
+        /// server's <see cref="CommandResult"/> for it.
+        /// </summary>
+        /// <param name="opcode">
+        /// A Shared.GameLogic <c>GameplayOpcodes</c> value. Allocated from 1; 0 throws.
+        /// </param>
+        /// <param name="payload">
+        /// The opcode's payload, encoded with Shared.GameLogic's gameplay codec. Null is sent as
+        /// empty. This package never looks inside it.
+        /// </param>
+        /// <param name="cancellationToken">
+        /// Stops WAITING, not the command: once sent it may still execute, and its result is
+        /// still raised on <see cref="CommandResultReceived"/>.
+        /// </param>
+        /// <returns>
+        /// The server's answer, correlated by a per-connection seq starting at 1. Never throws
+        /// for a channel failure: a command that cannot be sent or loses its connection
+        /// completes with <c>Ok == false</c> and one of the <see cref="CommandChannelErrors"/>
+        /// names -- <see cref="CommandChannelErrors.NotConnected"/>,
+        /// <see cref="CommandChannelErrors.ProtocolTooOld"/> (the server echoed a protocol
+        /// version below 3, checked BEFORE anything is sent), or
+        /// <see cref="CommandChannelErrors.ConnectionClosed"/> (it was in flight when the
+        /// connection ended, including on a reconnect or transfer).
+        /// </returns>
+        public UniTask<CommandResult> SendCommandAsync(
+            uint opcode, byte[] payload, CancellationToken cancellationToken = default)
+        {
+            // Thrown here, synchronously, rather than inside the async body where it would be
+            // captured into the task: an opcode of 0 is a bug in the caller, not an outcome.
+            if (opcode == 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(opcode), "opcode 0 means \"not sent\" on the wire and the server refuses it");
+            }
+
+            return SendCommandCoreAsync(opcode, payload, cancellationToken);
+        }
+
+        private async UniTask<CommandResult> SendCommandCoreAsync(
+            uint opcode, byte[] payload, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var connection = _connection;
+            var refusal = CommandCorrelator.Precheck(
+                connection != null && connection.IsRunning, ServerProtocolVersion);
+            if (refusal != null)
+            {
+                return CommandCorrelator.LocalFailure(0, refusal);
+            }
+
+            if (!_commands.TryBegin(out var seq, out var waiter))
+            {
+                // The connection closed between the check above and here.
+                return CommandCorrelator.LocalFailure(0, CommandChannelErrors.ConnectionClosed);
+            }
+
+            connection.Send(MsgType.Command, new CommandRequest
+            {
+                Seq = seq,
+                Opcode = opcode,
+                Payload = payload ?? Array.Empty<byte>(),
+            });
+
+            if (!cancellationToken.CanBeCanceled)
+            {
+                return await waiter.Task;
+            }
+
+            using (cancellationToken.Register(() => _commands.Cancel(seq, cancellationToken)))
+            {
+                return await waiter.Task;
+            }
+        }
+
+        /// <summary>
         /// Asks the server to make the next snapshot a keyframe. Repeated calls
         /// while one is already outstanding are dropped: a resync costs a full AOI
         /// snapshot, and one is enough to repair any disagreement.
@@ -336,16 +618,60 @@ namespace Cuvara.Netcode.Client
             _connection.Send(MsgType.Resync, new ResyncRequest());
         }
 
-        /// <summary>Leaves politely, then closes.</summary>
+        /// <summary>
+        /// Leaves politely, then closes: the disconnect frame is delivered before the socket goes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The connection is handed over to the leave, which closes and disposes it when the frame
+        /// has been acknowledged (or its bound has run out, at most about a second). From this
+        /// call on, this client no longer owns it: <see cref="Dispose"/> does not touch it, no
+        /// further frame or close is reported, and every command still in flight fails now with
+        /// <c>ConnectionClosed</c>.
+        /// </para>
+        /// <para>
+        /// The hand-over is the point. <c>NetworkClient</c> disposes the session straight after
+        /// leaving it, and disposing the connection closes the socket: the disconnect frame never
+        /// reached the server, which released the entity only on its KCP dead-link timeout
+        /// (rpg-factory testlab S08G).
+        /// </para>
+        /// </remarks>
         public void Leave()
         {
-            _connection?.Leave();
+            var connection = _connection;
+            if (connection == null)
+            {
+                return;
+            }
+
+            _connection = null;
+            _commands.FailAll(CommandChannelErrors.ConnectionClosed);
+            connection.Closed -= OnClosed;
+            connection.FrameReceived -= OnFrame;
+            LeaveAndReleaseAsync(connection).Forget();
+        }
+
+        private static async UniTaskVoid LeaveAndReleaseAsync(WireConnection connection)
+        {
+            try
+            {
+                await connection.LeaveAsync();
+            }
+            finally
+            {
+                connection.Dispose();
+            }
         }
 
         public void Dispose()
         {
             var connection = _connection;
             _connection = null;
+
+            // Detaching Closed below means OnClosed will not run for this connection, so the
+            // in-flight commands are failed here instead -- every one of them, exactly once.
+            _commands.FailAll(CommandChannelErrors.ConnectionClosed);
+
             if (connection == null)
             {
                 return;
@@ -358,6 +684,27 @@ namespace Cuvara.Netcode.Client
 
         private void OnFrame(WireFrame frame)
         {
+            if (frame.Type == MsgType.CommandResult)
+            {
+                if (frame.Payload is CommandResult result)
+                {
+                    _commands.Complete(result);
+                    CommandResultReceived?.Invoke(result);
+                }
+
+                return;
+            }
+
+            if (frame.Type == MsgType.ServerPush)
+            {
+                if (frame.Payload is ServerPush push)
+                {
+                    ServerPushReceived?.Invoke(push);
+                }
+
+                return;
+            }
+
             if (frame.Type != MsgType.Snapshot)
             {
                 // transfer_map_resp lands here once map transfer is implemented.
@@ -403,6 +750,9 @@ namespace Cuvara.Netcode.Client
 
         private void OnClosed(DisconnectInfo info)
         {
+            // Before Closed is raised, so a handler that reacts to the close (a reconnect)
+            // never observes a command still pending on the dead connection.
+            _commands.FailAll(CommandChannelErrors.ConnectionClosed);
             _log.Info($"game session closed: {info}");
             Closed?.Invoke(info);
         }

@@ -104,6 +104,30 @@ namespace Cuvara.Netcode.Tests.Editor
         public void SeedBaseTickKeepsItsSignature() =>
             AssertSignature(nameof(LocalMovePredictor.SeedBaseTick), typeof(void), typeof(long));
 
+        /// <remarks>
+        /// Added in 0.46.1, and the DOTS <c>LocalPredictionSystem</c> calls these: the snapshot's
+        /// base tick and <c>ack_applied_tick</c> are what let the reconcile compare against the
+        /// history entry the snapshot actually describes, and the steering is what keeps the
+        /// client's clock on the server's. Before them the DOTS path reconciled with no tick at
+        /// all and never steered, and its clock ran 22 ticks ahead over 55 seconds.
+        /// </remarks>
+        [Test]
+        public void TheAckAppliedReconcileAndTheSteeringKeepTheirSignatures()
+        {
+            AssertSignature(nameof(LocalMovePredictor.Reconcile),
+                typeof(void), typeof(Vec2), typeof(long), typeof(long), typeof(long));
+            AssertSignature(nameof(LocalMovePredictor.Reconcile),
+                typeof(void), typeof(Vec3), typeof(float), typeof(long), typeof(long), typeof(long));
+            AssertSignature(nameof(LocalMovePredictor.SteerToServerTick),
+                typeof(void), typeof(long), typeof(int));
+
+            MethodInfo onSnapshot = typeof(PredictionClockSteering).GetMethod(
+                nameof(PredictionClockSteering.OnSnapshot),
+                new[] { typeof(LocalMovePredictor), typeof(long), typeof(long), typeof(double) });
+            Assert.That(onSnapshot, Is.Not.Null,
+                "PredictionClockSteering.OnSnapshot is what com.cuvara.dots steers its clock with.");
+        }
+
         [Test]
         public void PositionIsAReadableVec2()
         {

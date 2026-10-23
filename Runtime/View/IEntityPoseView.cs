@@ -62,12 +62,31 @@ namespace Cuvara.Netcode.View
         /// than falling back to an idle pose, or a server predating the field freezes
         /// every entity in the world mid-animation.
         /// </param>
+        /// <param name="actionSeq">
+        /// Retrigger counter for <paramref name="action"/>. It CHANGES every time the
+        /// entity enters an action, including re-entering the one it is already in; 0 means
+        /// "not sent".
+        /// <para>
+        /// <b>An implementation retriggers on inequality, never on increase.</b> The counter
+        /// wraps at 2^32 and resets when the server restarts or the entity respawns, so a
+        /// greater-than test stops retriggering for four billion actions after a single
+        /// wrap — with nothing reporting an error.
+        /// </para>
+        /// <para>
+        /// <b>Why this is a parameter here and not a fourth interface.</b> The counter is
+        /// meaningless without the action it counts, and splitting them would let an
+        /// implementation receive an action with no edge — which is exactly the failure this
+        /// field exists to fix, reintroduced by the shape of the API. Widening this method
+        /// was the smaller cost: every implementer lives in these two repositories, whereas
+        /// an interface that hands out half a fact is permanent.
+        /// </para>
+        /// </param>
         /// <remarks>
         /// Passed raw rather than decoded so this interface makes no presentation
         /// decision on the implementer's behalf: whether an absent facing should hold or
         /// be derived from movement is the view's call, and it is the only layer with the
         /// context to make it.
         /// </remarks>
-        void SetPose(string id, uint facingBrad, EntityAction action);
+        void SetPose(string id, uint facingBrad, EntityAction action, uint actionSeq);
     }
 }

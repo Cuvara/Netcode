@@ -164,7 +164,7 @@ namespace Cuvara.Netcode.Tests.Editor
         private static byte[] AuthOk() => Frame(MsgType.AuthResp, "{\"ok\":true,\"user_id\":\"u1\"}");
         private static byte[] AuthErr(string error) => Frame(MsgType.AuthResp, "{\"ok\":false,\"error\":\"" + error + "\"}");
         private static byte[] AssignOk() => Frame(MsgType.EnterWorldResp,
-            "{\"server_addr\":\"127.0.0.1:9000\",\"join_token\":\"tok\",\"transport\":\"tcp\"}");
+            "{\"server_addr\":\"127.0.0.1:9000\",\"join_token\":\"tok\",\"transport\":\"kcp\"}");
         private static byte[] JoinOk() => Frame(MsgType.JoinTokenResp, "{\"ok\":true,\"user_id\":\"u1\",\"tick_rate\":60}");
         private static byte[] Kick(string reason) => Frame(MsgType.Kick, "{\"reason\":\"" + reason + "\"}");
         private static byte[] Bye(string reason) => Frame(MsgType.Disconnect, "{\"reason\":\"" + reason + "\"}");

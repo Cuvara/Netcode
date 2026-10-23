@@ -31,5 +31,17 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// Non-empty asks for a dungeon instance for this party. Empty asks for a map server.
         /// </summary>
         public string PartyId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Character to play, from the account's roster (ADR-31, protocol version 3).
+        /// </summary>
+        /// <remarks>
+        /// The gateway does not trust it: it must equal the <c>cid</c> claim of the gateway
+        /// token Nakama minted for this session, which is where ownership was checked -- so the
+        /// auth provider must mint its token for the SAME character. Empty means the account's
+        /// default character (slot 0), the behaviour of every client that predates slots, and
+        /// is omitted from the wire so such an entry is byte-identical to a pre-slot client's.
+        /// </remarks>
+        public string CharacterId { get; set; } = string.Empty;
     }
 }

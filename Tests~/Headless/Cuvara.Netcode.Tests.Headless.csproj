@@ -1,0 +1,190 @@
+<!--
+  Headless test project for the parts of the netcode package that are plain C#.
+
+  Why this exists: every await in TcpTransport and WireConnection goes through
+  UniTask, which needs UnityEngine, so the whole read/write path used to be
+  reachable only from inside the Editor or a built player. That is why a
+  throughput ceiling in the read loop (Cuvara/IndieRPGMMOAdventure#50) was never
+  measured by anything automated — it was argued about instead.
+
+  What is compiled here is the SAME source Unity compiles. The test files are the
+  same files the EditMode suite runs; they are listed here, not copied. Adding a
+  Unity dependency to one of them breaks this project, which is the point.
+
+  Tests~/ ends in a tilde, so Unity does not import this directory and it needs no
+  .meta files.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Cuvara.Netcode.Tests.Headless</RootNamespace>
+    <AssemblyName>Cuvara.Netcode.Tests.Headless</AssemblyName>
+
+    <!-- Nothing is picked up implicitly: every file here is named on purpose, so a
+         new Unity-only file cannot wander into a headless build and fail it. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS1591</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Package sources under test. Unity-free by construction: if one of these ever
+       gains a `using UnityEngine`, this project stops compiling, which is the
+       earliest and cheapest place for that to be noticed. -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Transport/FrameBuffer.cs" />
+    <Compile Include="../../Runtime/Transport/WireFraming.cs" />
+    <Compile Include="../../Runtime/Transport/TransportException.cs" />
+  </ItemGroup>
+
+  <!-- The Editor test files themselves, shared rather than duplicated. -->
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/FrameBufferTests.cs" />
+    <Compile Include="../../Tests/Editor/TransportReadPumpTests.cs" />
+  </ItemGroup>
+
+  <!--
+    KCP/UDP, the only gameplay transport. Everything that decides whether a KCP session is
+    healthy lives in KcpClientSession (no UniTask), so the strict gameplay-transport parsing,
+    the random conversation id, the idle timeout, the bounded receive buffer, the crypto and
+    a real loopback UDP echo all run here. KcpTransport itself (the UniTask/socket shell) and
+    GameSessionClient's refusal of a TCP assignment stay Editor-only
+    (GameplayTransportPolicyTests).
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Transport/TransportKind.cs" />
+    <Compile Include="../../Runtime/Transport/TransportKinds.cs" />
+    <Compile Include="../../Runtime/Transport/Kcp.cs" />
+    <Compile Include="../../Runtime/Transport/KcpCrypto.cs" />
+    <Compile Include="../../Runtime/Transport/KcpClientSession.cs" />
+    <Compile Include="../../Runtime/Transport/NetworkEndpoint.cs" />
+    <Compile Include="../../Runtime/Transport/UdpDatagramDrain.cs" />
+    <Compile Include="../../Tests/Editor/KcpCoreTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpCryptoTests.cs" />
+    <Compile Include="../../Tests/Editor/NetworkEndpointTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpGameplayTransportTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpReliabilityTests.cs" />
+    <Compile Include="../../Tests/Editor/TransportReceivePacingTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpCloseFlushTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpSilenceTests.cs" />
+  </ItemGroup>
+
+  <!--
+    Prediction: LocalMovePredictor, the clock it is steered by and the view binder that drives
+    it, plus the deterministic server-stub harness (Tests/Editor/PredictionHarness.cs, shared
+    with the EditMode suite like every test file here) that measures what a player sees.
+
+    Why it is here: the reconcile, the history it compares against and the render smoothing are
+    ordinary C#, and the defects they produce (rubber-banding at starts, stops and on curves) are
+    only visible as distributions over thousands of frames: exactly what a Unity job cannot
+    afford to run often and a dotnet job runs in a second.
+
+    It needs Shared.GameLogic, which this repository consumes as a git package rather than
+    containing. SglDir points at its source: by default the sibling rpg-mmo-server checkout of a
+    workspace laid out like the developers' (C:/Workspaces/UnityIndie/{Netcode,rpg-mmo-server});
+    CI checks the pinned sgl tag out and passes -p:SglDir=... (see .github/workflows/ci.yml).
+  -->
+  <PropertyGroup>
+    <SglDir Condition="'$(SglDir)' == ''">$(MSBuildThisFileDirectory)../../../rpg-mmo-server/backend/gameserver-dotnet/Shared.GameLogic</SglDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(SglDir)/Shared.GameLogic.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Runtime/Prediction/LocalMovePredictor.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictionSettings.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictionClockSteering.cs" />
+    <Compile Include="../../Runtime/Prediction/TickRateEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/SnapshotStalenessEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/AckLatencyEstimator.cs" />
+    <Compile Include="../../Runtime/Prediction/InputCadence.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictorTrace.cs" />
+    <Compile Include="../../Runtime/Protocol/*.cs" />
+    <Compile Include="../../Runtime/Protocol/Messages/*.cs" />
+    <Compile Include="../../Runtime/Snapshot/*.cs" />
+    <Compile Include="../../Runtime/World/*.cs" />
+    <Compile Include="../../Runtime/Interpolation/*.cs" />
+    <Compile Include="../../Runtime/View/*.cs" Exclude="../../Runtime/View/GameObjectEntityView.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/PredictionClockRateTests.cs" />
+    <Compile Include="../../Tests/Editor/LocalMovePredictorTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconcileLeadTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconcileAdoptionTests.cs" />
+    <Compile Include="../../Tests/Editor/ReconciliationDivergenceTests.cs" />
+    <Compile Include="../../Tests/Editor/RenderSmoothingTests.cs" />
+    <Compile Include="../../Tests/Editor/HeldMovementParityTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorClockAdvancesOnceTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderLeadTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderRateGateTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldViewBinderTests.cs" />
+    <Compile Include="../../Tests/Editor/StoppedEntityConvergesTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorTickRateTests.cs" />
+    <Compile Include="../../Tests/Editor/ReplayRewindHistoryTests.cs" />
+    <Compile Include="../../Tests/Editor/ReplayHistoryStagingTests.cs" />
+    <Compile Include="../../Tests/Editor/ServerStallRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientHitchRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorTraceTests.cs" />
+    <Compile Include="../../Tests/Editor/LiveTraceReplayTests.cs" />
+    <Compile Include="../../Runtime/Json/*.cs" />
+    <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
+    <Compile Include="../../Tests/Editor/AckFloorConversionRateTests.cs" />
+    <Compile Include="../../Tests/Editor/AckLatencyEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotStalenessEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/TickRateEstimatorTests.cs" />
+    <Compile Include="../../Tests/Editor/AckAppliedTickReconcileTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictionHarness.cs" />
+    <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
+  </ItemGroup>
+
+  <!--
+    Unity-free EditMode tests that used to run only inside the Editor: snapshot interning and
+    the abort-on-unknown-handle rule, the remote interpolation continuity and defer-until-
+    bracketed fixtures, and the per-entity counters. They compile against the same sources
+    as everything above, so the headless job is now their earliest gate too.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/SnapshotResolverInterningTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotSpeedTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldStateEntityCounterTests.cs" />
+    <Compile Include="../../Tests/Editor/RemoteInterpolationContinuityTests.cs" />
+    <Compile Include="../../Tests/Editor/DeferUntilBracketedTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotFreshnessTests.cs" />
+    <Compile Include="../../Tests/Editor/SessionBoundaryResetTests.cs" />
+    <Compile Include="../../Tests/Editor/EntityLifecycleTests.cs" />
+    <Compile Include="../../Tests/Editor/EntityReentryTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationScenarioTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationConfigNormalizationTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientStallInterpolationTests.cs" />
+  </ItemGroup>
+
+  <!--
+    The reconnect policy: a pure cause -> decision table (ReconnectPolicy) and the types it reads.
+    NetworkClient around it is UniTask-bound and stays Editor-only (ReconnectPolicyTests also
+    covers NetworkSettings, so it does too); ReconnectDecisionTableTests pins the table headless.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Client/ReconnectPolicy.cs" />
+    <Compile Include="../../Runtime/Client/NetworkException.cs" />
+    <Compile Include="../../Runtime/Client/SealedRefusalReason.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectCause.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectInfo.cs" />
+    <Compile Include="../../Tests/Editor/ReconnectDecisionTableTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+</Project>

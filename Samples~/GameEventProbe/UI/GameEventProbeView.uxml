@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<engine:UXML
+    xmlns:engine="UnityEngine.UIElements"
+    xmlns:editor="UnityEditor.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd">
+
+    <engine:Style src="GameEventProbeView.uss" />
+
+    <engine:VisualElement name="game-event-probe" class="cuvara-probe" picking-mode="Ignore">
+        <engine:VisualElement class="cuvara-probe__panel">
+
+            <engine:Label text="Game events and action_seq" class="cuvara-probe__title" />
+            <engine:Label name="subtitle" class="cuvara-probe__subtitle"
+                          text="No server, no network. Synthetic snapshots drive the real codec, resolver, merger and view binder." />
+
+            <engine:Label text="What the event channel carries" class="cuvara-probe__section" />
+            <engine:Label name="event-line" class="cuvara-probe__readout cuvara-probe__mono" />
+            <engine:Label name="hp-line" class="cuvara-probe__readout" />
+            <engine:Label name="derive-line" class="cuvara-probe__readout" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="toggle-events" text="Stop sending events" class="cuvara-probe__button" />
+                <engine:Button name="heal" text="Heal the victim"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Retrigger counter" class="cuvara-probe__section" />
+            <engine:Label name="seq-line" class="cuvara-probe__readout cuvara-probe__mono" />
+            <engine:Label name="retrigger-line" class="cuvara-probe__readout" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="toggle-seq" text="Stop sending action_seq" class="cuvara-probe__button" />
+                <engine:Button name="kill" text="Land a killing blow"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label text="Resolver" class="cuvara-probe__section" />
+            <engine:Label name="resolver-line" class="cuvara-probe__readout cuvara-probe__mono" />
+            <engine:VisualElement class="cuvara-probe__row">
+                <engine:Button name="unknown-handle" text="Send an event naming an unknown entity"
+                               class="cuvara-probe__button cuvara-probe__button--secondary" />
+            </engine:VisualElement>
+
+            <engine:Label name="verdict" class="cuvara-probe__verdict" />
+
+        </engine:VisualElement>
+    </engine:VisualElement>
+</engine:UXML>

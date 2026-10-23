@@ -72,6 +72,28 @@ namespace Cuvara.Netcode.Protocol
         /// the handshake transcript. Protobuf only, for the same reason as
         /// <see cref="SealedClientHello"/>.
         /// </summary>
-        SealedServerHello = 17
+        SealedServerHello = 17,
+
+        // 18-31 stay reserved for the gateway hop's handshake (wire.proto). 32-34 are still
+        // one-byte varints.
+
+        /// <summary>
+        /// client -> game server: <c>{seq, opcode, payload}</c>, a discrete gameplay command
+        /// (ADR-30, protocol version 3). The payload schema of each opcode lives in
+        /// Shared.GameLogic's <c>gameplay.proto</c>; this package only moves the bytes.
+        /// </summary>
+        Command = 32,
+
+        /// <summary>
+        /// game server -> client: <c>{seq, ok, error, payload}</c>, the answer to exactly one
+        /// <see cref="Command"/>, correlated by <c>seq</c>. Protocol version 3.
+        /// </summary>
+        CommandResult = 33,
+
+        /// <summary>
+        /// game server -> client: <c>{opcode, payload}</c>, an unsolicited gameplay message in
+        /// the <see cref="Command"/> opcode space. Protocol version 3.
+        /// </summary>
+        ServerPush = 34
     }
 }

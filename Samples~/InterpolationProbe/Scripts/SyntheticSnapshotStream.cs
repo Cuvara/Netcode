@@ -154,7 +154,7 @@ namespace Cuvara.Netcode.Samples.InterpolationProbe
                 _nextProduceAt += TickInterval;
             }
 
-            // Delivered from the front only. The wire is TCP and therefore ordered, so a
+            // Delivered from the front only. The wire is KCP in stream mode, reliable and ordered, so a
             // packet whose jittered arrival time landed before its predecessor's must still
             // wait for it — see the clamp in Schedule.
             while (_inFlight.Count > 0 && _inFlight[0].ArriveAt <= nowSeconds)

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Cuvara.Netcode.Protocol.Messages;
+using Shared.GameLogic.Components;
 
 namespace Cuvara.Netcode.Snapshot
 {
@@ -30,11 +31,36 @@ namespace Cuvara.Netcode.Snapshot
         /// <summary>Number of snapshots that could not be resolved and forced a resync.</summary>
         public int UnresolvedCount { get; private set; }
 
+        /// <summary>
+        /// Event participants whose handle had no binding. Counted, never escalated: see
+        /// <see cref="ResolvedGameEvent"/> for why an event does not force a resync the way
+        /// an entity does.
+        /// </summary>
+        /// <remarks>
+        /// A steadily climbing value here means the server is referring to entities it
+        /// believes this client knows about and it does not — which is the same class of
+        /// disagreement <see cref="UnresolvedCount"/> reports, seen from a channel that
+        /// cannot afford to act on it. Worth an eye in a diagnostics overlay; not worth a
+        /// keyframe.
+        /// </remarks>
+        public int UnresolvedEventParticipants { get; private set; }
+
+        /// <summary>
+        /// Protocol version 3 references to ANOTHER entity -- a projectile's <c>owner</c>, a
+        /// status effect's <c>source</c> -- whose handle had no binding. Counted, never
+        /// escalated, for the reason <see cref="UnresolvedEventParticipants"/> is: the entity
+        /// carrying the reference is still correctly identified, and the reference resolves to
+        /// null rather than to a guess.
+        /// </summary>
+        public int UnresolvedEntityReferences { get; private set; }
+
         /// <summary>Forgets every binding, for a fresh connection or after a map transfer.</summary>
         public void Reset()
         {
             _handles.Clear();
             UnresolvedCount = 0;
+            UnresolvedEventParticipants = 0;
+            UnresolvedEntityReferences = 0;
         }
 
         /// <summary>
@@ -106,7 +132,8 @@ namespace Cuvara.Netcode.Snapshot
                 }
 
                 entities.Add(new ResolvedEntity(
-                id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action));
+                    id, e.Type, e.X, e.Y, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action,
+                    actionSeq: e.ActionSeq, changedFields: e.ChangedFields));
             }
 
             // Every entity resolved, so state may now be mutated. The clear happens
@@ -127,14 +154,176 @@ namespace Cuvara.Netcode.Snapshot
                 }
             }
 
+            // Protocol version 3 references (owner, status source) resolve against the same
+            // table, AFTER the bindings land for the same reason events do: a projectile is
+            // routinely introduced in the same snapshot as its caster.
+            ResolveVersion3Fields(snapshot, entities);
+
+            // Resolved AFTER the bindings above have landed, which is load-bearing rather
+            // than incidental: an event routinely names an entity introduced by THIS
+            // snapshot (the thing that just spawned and immediately took damage), and
+            // resolving events first would miss exactly those bindings and report them
+            // unresolved. On a keyframe it matters twice over, because the table was cleared
+            // a few lines up.
+            IReadOnlyList<ResolvedGameEvent> events = ResolveEvents(snapshot);
+
             resolved = new ResolvedSnapshot(
                 snapshot.Tick,
                 snapshot.AckTick,
                 snapshot.Full,
                 entities,
-                snapshot.Removed);
+                snapshot.Removed,
+                events,
+                snapshot.AckAppliedTick);
 
             return true;
+        }
+
+        private static readonly ResolvedGameEvent[] NoEvents = new ResolvedGameEvent[0];
+
+        private IReadOnlyList<ResolvedGameEvent> ResolveEvents(SnapshotMessage snapshot)
+        {
+            // The overwhelmingly common case is a tick in which nothing happened. Returning
+            // a shared empty array keeps that path free of an allocation per snapshot per
+            // tick, which at 15 Hz is the difference between zero garbage and a steady drip.
+            if (snapshot.Events.Count == 0)
+            {
+                return NoEvents;
+            }
+
+            var events = new List<ResolvedGameEvent>(snapshot.Events.Count);
+
+            foreach (var e in snapshot.Events)
+            {
+                events.Add(new ResolvedGameEvent(
+                    e.Type,
+                    ResolveParticipant(e.Source, e.SourceId),
+                    ResolveParticipant(e.Target, e.TargetId),
+                    e.Amount,
+                    e.AbilityId,
+                    e.Flags,
+                    e.EffectId));
+            }
+
+            return events;
+        }
+
+        /// <summary>
+        /// Rebuilds every entity that carries protocol version 3 data with that data attached,
+        /// its owner and status sources resolved to ids.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A version 2 entity -- every entity a version 2 server sends, and most of what a
+        /// version 3 server sends on a delta -- is skipped without allocating, so the v2 path
+        /// costs one branch per entity.
+        /// </para>
+        /// <para>
+        /// The arrays are fresh per entity, never the decoded message's lists: the codec may
+        /// reuse those for the next snapshot, and a resolved snapshot is published to
+        /// subscribers this package does not control.
+        /// </para>
+        /// </remarks>
+        private void ResolveVersion3Fields(SnapshotMessage snapshot, List<ResolvedEntity> entities)
+        {
+            for (var i = 0; i < entities.Count; i++)
+            {
+                var e = snapshot.Entities[i];
+                if (!HasVersion3Fields(e))
+                {
+                    continue;
+                }
+
+                StatValueData[] stats = null;
+                if (e.Stats.Count > 0)
+                {
+                    stats = new StatValueData[e.Stats.Count];
+                    for (var s = 0; s < stats.Length; s++)
+                    {
+                        stats[s] = new StatValueData(e.Stats[s].StatId, e.Stats[s].Value);
+                    }
+                }
+
+                StatusEffectData[] statuses = null;
+                if (e.Statuses.Count > 0)
+                {
+                    statuses = new StatusEffectData[e.Statuses.Count];
+                    for (var s = 0; s < statuses.Length; s++)
+                    {
+                        var status = e.Statuses[s];
+                        var source = ResolveReference(status.Source, null);
+                        statuses[s] = new StatusEffectData(
+                            status.EffectId, status.Stacks, status.ExpiresTick, source);
+                    }
+                }
+
+                var core = entities[i];
+                entities[i] = new ResolvedEntity(
+                    in core,
+                    e.Z, e.VelX, e.VelY, e.VelZ,
+                    ResolveReference(e.Owner, e.OwnerId),
+                    e.SpawnSeq,
+                    stats,
+                    e.StatsRemoved.Count > 0 ? e.StatsRemoved.ToArray() : null,
+                    statuses,
+                    e.StatusesRemoved.Count > 0 ? e.StatusesRemoved.ToArray() : null);
+            }
+        }
+
+        private static bool HasVersion3Fields(EntitySnapshot e) =>
+            e.Z != 0f || e.VelX != 0f || e.VelY != 0f || e.VelZ != 0f
+            || e.Owner != 0u || !string.IsNullOrEmpty(e.OwnerId) || e.SpawnSeq != 0u
+            || e.Stats.Count > 0 || e.StatsRemoved.Count > 0
+            || e.Statuses.Count > 0 || e.StatusesRemoved.Count > 0;
+
+        /// <summary>
+        /// A reference to another entity: handle first, explicit id as the JSON fallback, null
+        /// for none. An unbound handle is counted in <see cref="UnresolvedEntityReferences"/> and
+        /// reads as null -- never as a guess.
+        /// </summary>
+        private string ResolveReference(uint handle, string explicitId)
+        {
+            if (handle != 0)
+            {
+                if (_handles.TryResolve(handle, out var id))
+                {
+                    return id;
+                }
+
+                UnresolvedEntityReferences++;
+                return null;
+            }
+
+            return string.IsNullOrEmpty(explicitId) ? null : explicitId;
+        }
+
+        /// <summary>
+        /// Turns one event participant into an entity id: handle first, explicit id as the
+        /// fallback, empty when neither identifies anything.
+        /// </summary>
+        /// <remarks>
+        /// The precedence matches <see cref="EntitySnapshot"/>'s own id/handle rule. A zero
+        /// handle with an empty id is not a failure — it is how the server says "no such
+        /// participant, or not one you can see" — so it is NOT counted as unresolved. Only a
+        /// non-zero handle with no binding is.
+        /// </remarks>
+        private string ResolveParticipant(uint handle, string explicitId)
+        {
+            if (handle != 0)
+            {
+                if (_handles.TryResolve(handle, out var id))
+                {
+                    return id;
+                }
+
+                // A handle the table does not know. Reported as absent rather than guessed,
+                // and counted so the disagreement is visible.
+                UnresolvedEventParticipants++;
+                return string.Empty;
+            }
+
+            // JSON, which never interns and names participants outright.
+            return explicitId ?? string.Empty;
         }
     }
 }

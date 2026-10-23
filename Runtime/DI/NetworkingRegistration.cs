@@ -45,9 +45,10 @@ namespace Cuvara.Netcode.DI
         /// </param>
         /// <param name="transports">
         /// The transport factory the client creates sockets with. Null registers
-        /// <see cref="DefaultTransportFactory"/>. Pass an instance to wrap or replace it —
-        /// a fault-injecting factory in a sample, a fake in a test, a factory carrying a
-        /// per-session transport key in a shipping build.
+        /// <see cref="DefaultTransportFactory"/>, built with
+        /// <see cref="NetworkSettings.TransportKey"/> for the KCP gameplay hop and the gateway
+        /// TLS options. Pass an instance to wrap or replace it — a fault-injecting factory
+        /// in a sample, a fake in a test.
         /// <para>
         /// <b>Passing it here is the only supported way to substitute one.</b> Registering
         /// <see cref="ITransportFactory"/> again after calling this method does not
@@ -115,8 +116,13 @@ namespace Cuvara.Netcode.DI
                 // GatewayUseTls after RegisterNetworking still gets a factory that can
                 // build the TLS transport. Reading them here, at registration time, would
                 // bake in whatever the flag happened to be one line earlier.
+                //
+                // The KCP transport key is read inside the lambda for the same reason: the
+                // gameplay hop is KCP/UDP only and its datagram key comes from
+                // NetworkSettings.TransportKey (empty = plaintext, dev).
                 builder.Register<ITransportFactory>(
-                    _ => new DefaultTransportFactory(null, networkSettings.BuildGatewayTlsOptions()),
+                    _ => new DefaultTransportFactory(
+                        networkSettings.TransportKey, networkSettings.BuildGatewayTlsOptions()),
                     Lifetime.Singleton);
             }
 

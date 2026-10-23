@@ -35,7 +35,50 @@ namespace Cuvara.Netcode.Protocol
     public static class WireProtocolVersion
     {
         /// <summary>The version this build speaks. Sent on both handshake hops.</summary>
-        public const uint Current = 1;
+        /// <remarks>
+        /// <para>
+        /// <b>History.</b>
+        /// </para>
+        /// <list type="bullet">
+        /// <item><description><b>1</b> -- first advertised version.</description></item>
+        /// <item><description>
+        /// <b>2</b> (#158) -- field-level delta: <c>EntitySnapshot.changed_fields</c> (wire
+        /// field 13), where a non-zero mask means the entry is a PARTIAL update and every
+        /// field whose bit is clear keeps its last known value.
+        /// </description></item>
+        /// <item><description>
+        /// <b>3</b> (0.46.0, ADR-28..31) -- 3D (<c>z</c>, velocity), projectile entities with
+        /// <c>owner</c>/<c>spawn_seq</c>, the content stat block and status effects (mask bits
+        /// <c>0x0200</c>-<c>0x2000</c>), the command channel (MsgType 32-34), character slots
+        /// (<c>character_id</c> on enter-world and the join reply), and the version 3 input
+        /// fields (<c>aim_z</c>, <c>render_tick</c>, <c>render_alpha</c>, <c>jump</c>,
+        /// <c>spawn_seq</c>). Bumped because a receiver that ignores a projectile entity or a
+        /// <c>CommandResult</c> diverges silently -- the "receiver MUST act on it" class.
+        /// </description></item>
+        /// </list>
+        /// <para>
+        /// <b>A bump is not optional.</b> The server refuses any peer whose version is not one
+        /// it serves, so once the backend moved, a client still announcing the old number was
+        /// refused at the handshake rather than quietly served the old wire.
+        /// </para>
+        /// </remarks>
+        public const uint Current = 3;
+
+        /// <summary>
+        /// The oldest SERVER version this client still works against. A version 3 server keeps
+        /// serving version 2 peers the version 2 shape, and this client keeps understanding a
+        /// version 2 server: nothing version 3 adds is sent by one, so every v3-only feature is
+        /// simply absent -- the command channel refuses with
+        /// <c>CommandChannelErrors.ProtocolTooOld</c> and prediction falls back to the planar
+        /// <c>MovementSystem</c> path.
+        /// </summary>
+        public const uint MinimumServerVersion = 2;
+
+        /// <summary>The first version that carries the command channel (MsgType 32-34, ADR-30).</summary>
+        public const uint CommandChannel = 3;
+
+        /// <summary>The first version whose movement is 3D (<c>CharacterMotor</c>, ADR-28).</summary>
+        public const uint Motor3D = 3;
 
         /// <summary>
         /// The wire value meaning "this peer does not advertise a version" — a peer
@@ -71,9 +114,23 @@ namespace Cuvara.Netcode.Protocol
         /// Callers should surface <see cref="IsUnversioned"/> so the trust is
         /// visible rather than silent.
         /// </para>
+        /// <para>
+        /// <b>Version 3 accepts a range.</b> A server from <see cref="MinimumServerVersion"/> up to
+        /// <see cref="Current"/> is compatible: version 3 is a strict superset whose additions a
+        /// version 2 server never sends. A server AHEAD of this client is still refused.
+        /// </para>
         /// </remarks>
         public static bool IsCompatible(uint serverVersion)
-            => serverVersion == Current || serverVersion == Unversioned;
+            => serverVersion == Unversioned
+               || (serverVersion >= MinimumServerVersion && serverVersion <= Current);
+
+        /// <summary>
+        /// Whether a server that echoed <paramref name="serverVersion"/> speaks at least
+        /// <paramref name="feature"/>. An unversioned server (0) supports no versioned feature:
+        /// it predates the field, and so predates everything gated on it.
+        /// </summary>
+        public static bool Supports(uint serverVersion, uint feature)
+            => serverVersion != Unversioned && serverVersion >= feature;
 
         /// <summary>
         /// Reports whether a peer advertised no version at all, i.e. it predates the

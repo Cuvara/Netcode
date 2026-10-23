@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Google.Protobuf;
 using Cuvara.Netcode.Protocol;
 using Msg = Cuvara.Netcode.Protocol.Messages;
@@ -28,6 +29,74 @@ namespace Cuvara.Netcode.Codec
     /// </remarks>
     public sealed class ProtobufWireCodec : IWireCodec
     {
+        // Not readonly, and not a constructor parameter: see CreatePooled.
+        private bool _reuseDecodedSnapshot;
+
+        private Msg.SnapshotMessage _pooledSnapshot;
+        private List<Msg.EntitySnapshot> _entityPool;
+        private List<Msg.GameEvent> _eventPool;
+
+        /// <summary>
+        /// Creates a codec that returns a freshly allocated message from every
+        /// <see cref="DecodeBody"/>.
+        /// </summary>
+        /// <remarks>
+        /// <b>This must stay the only constructor, public or not.</b> The type is
+        /// registered with VContainer as
+        /// <c>builder.Register&lt;ProtobufWireCodec&gt;(Lifetime.Singleton)</c>, and
+        /// VContainer's <c>TypeAnalyzer</c> selects a constructor by reflection, takes the
+        /// greediest one, and does so with <c>BindingFlags.NonPublic</c> included — so
+        /// making an extra constructor private does <b>not</b> hide it. Any second
+        /// constructor therefore makes the container try to resolve that constructor's
+        /// parameters, and <c>RegisterNetworking</c> throws
+        /// <c>"Failed to resolve ProtobufWireCodec : No such registration of type:
+        /// System.Boolean"</c> at resolve time. It compiles, every codec test passes, and
+        /// only the DI test catches it. That is why <see cref="CreatePooled"/> sets a field
+        /// on an already-constructed instance instead of taking a constructor argument, and
+        /// why <c>_reuseDecodedSnapshot</c> is not <c>readonly</c>.
+        /// <para>
+        /// Marking this one <c>[Inject]</c> would also fix it and is the wrong fix: it would
+        /// make the Codec assembly depend on VContainer, which is an optional dependency
+        /// here — the <c>no-vcontainer</c> install probe exists to keep it optional.
+        /// </para>
+        /// </remarks>
+        public ProtobufWireCodec()
+        {
+        }
+
+        /// <summary>
+        /// Creates a codec that reuses the decoded snapshot message and its entity and
+        /// event objects across calls.
+        /// </summary>
+        /// <returns>
+        /// A codec whose every <see cref="MsgType.Snapshot"/> decode returns the <b>same</b>
+        /// <see cref="Msg.SnapshotMessage"/> instance, refilled — so the previous decode's
+        /// result is invalidated by the next one.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// A separate factory rather than the default, and that is the safe choice rather
+        /// than the tidy one: the reuse is only sound where the frame is fully consumed
+        /// before the next decode, and a caller that holds two decoded snapshots at once
+        /// (every test that decodes a keyframe and a delta from one codec, for instance)
+        /// would silently see one object twice. The saving is real but it is not free of
+        /// contract, so it is asked for by name.
+        /// </para>
+        /// <para>
+        /// <c>WireConnection</c> turns it on because its read loop raises
+        /// <c>FrameReceived</c> synchronously and the only snapshot consumer,
+        /// <c>GameSessionClient.OnFrame</c>, resolves the message into a
+        /// <c>ResolvedSnapshot</c> and retains nothing from it.
+        /// </para>
+        /// <para>
+        /// Only the snapshot path is pooled. Every other message type is small, arrives
+        /// rarely, and is routinely stashed by the handshake code, so pooling those would
+        /// buy nothing and cost a real aliasing hazard.
+        /// </para>
+        /// </remarks>
+        public static ProtobufWireCodec CreatePooled() =>
+            new ProtobufWireCodec { _reuseDecodedSnapshot = true };
+
         public WireEncoding Encoding => WireEncoding.Protobuf;
 
         public byte[] EncodeBody(MsgType type, IWireMessage payload)
@@ -51,7 +120,11 @@ namespace Cuvara.Netcode.Codec
             var inner = EncodePayload(payload);
             if (inner != null)
             {
-                envelope.Payload = ByteString.CopyFrom(inner);
+                // UnsafeWrap rather than CopyFrom: this saves a full copy of the payload on
+                // every frame sent, and the aliasing it normally warns about cannot happen
+                // here — `inner` was allocated by EncodePayload one line above, is never
+                // published, and is never written again.
+                envelope.Payload = UnsafeByteOperations.UnsafeWrap(inner);
             }
 
             return envelope.ToByteArray();
@@ -111,6 +184,9 @@ namespace Cuvara.Netcode.Codec
                     {
                         MapId = m.MapId ?? string.Empty,
                         PartyId = m.PartyId ?? string.Empty,
+                        // Empty is elided by proto3, so a default-character entry is the SAME
+                        // bytes a pre-slot client produced (ADR-31).
+                        CharacterId = m.CharacterId ?? string.Empty,
                     }.ToByteArray();
 
                 case Msg.SealedClientHello m:
@@ -137,6 +213,32 @@ namespace Cuvara.Netcode.Codec
                         MoveX = m.MoveX,
                         MoveY = m.MoveY,
                         AttackTargetId = m.AttackTargetId ?? string.Empty,
+                        AbilityId = m.AbilityId,
+                        AbilityTargetId = m.AbilityTargetId ?? string.Empty,
+                        // Written unconditionally rather than only when AbilityId is set.
+                        // The aim is meaningless without an ability and the server says so;
+                        // gating it here would be a second place that has to agree about
+                        // which field gates which, and proto3 elides a zero float anyway.
+                        AimX = m.AimX,
+                        AimY = m.AimY,
+                        // Protocol version 3. Written unconditionally for the same reason as the
+                        // aim: proto3 elides every zero, so an input that uses none of them is
+                        // byte-identical to a version 2 input, and a version 2 server skips
+                        // them as unknown fields when they are set.
+                        AimZ = m.AimZ,
+                        RenderTick = m.RenderTick,
+                        RenderAlpha = m.RenderAlpha,
+                        Jump = m.Jump,
+                        SpawnSeq = m.SpawnSeq,
+                    }.ToByteArray();
+
+                case Msg.CommandRequest m:
+                    // Opaque: the payload's schema is the opcode's, defined in Shared.GameLogic.
+                    return new Pb.CommandRequest
+                    {
+                        Seq = m.Seq,
+                        Opcode = m.Opcode,
+                        Payload = ByteString.CopyFrom(m.Payload ?? Array.Empty<byte>()),
                     }.ToByteArray();
 
                 case Msg.DisconnectMessage m:
@@ -159,7 +261,7 @@ namespace Cuvara.Netcode.Codec
             }
         }
 
-        private static IWireMessage DecodePayload(MsgType type, ByteString payload)
+        private IWireMessage DecodePayload(MsgType type, ByteString payload)
         {
             var bytes = payload ?? ByteString.Empty;
 
@@ -202,6 +304,42 @@ namespace Cuvara.Netcode.Codec
                             Error = m.Error,
                             TickRate = m.TickRate,
                             ProtocolVersion = m.ProtocolVersion,
+                            CharacterId = m.CharacterId,
+                        };
+                    }
+
+                    case MsgType.CommandResult:
+                    {
+                        var m = Pb.CommandResult.Parser.ParseFrom(bytes);
+                        return new Msg.CommandResult
+                        {
+                            Seq = m.Seq,
+                            Ok = m.Ok,
+                            Error = m.Error,
+                            Payload = m.Payload.ToByteArray(),
+                        };
+                    }
+
+                    case MsgType.ServerPush:
+                    {
+                        var m = Pb.ServerPush.Parser.ParseFrom(bytes);
+                        return new Msg.ServerPush
+                        {
+                            Opcode = m.Opcode,
+                            Payload = m.Payload.ToByteArray(),
+                        };
+                    }
+
+                    case MsgType.Command:
+                    {
+                        // Client -> server only; decoded anyway so a tool or test that reads
+                        // its own outbound frames sees the same shape it sent.
+                        var m = Pb.CommandRequest.Parser.ParseFrom(bytes);
+                        return new Msg.CommandRequest
+                        {
+                            Seq = m.Seq,
+                            Opcode = m.Opcode,
+                            Payload = m.Payload.ToByteArray(),
                         };
                     }
 
@@ -260,39 +398,25 @@ namespace Cuvara.Netcode.Codec
             }
         }
 
-        private static Msg.SnapshotMessage DecodeSnapshot(Pb.SnapshotMessage m)
+        private Msg.SnapshotMessage DecodeSnapshot(Pb.SnapshotMessage m)
         {
-            var snapshot = new Msg.SnapshotMessage
-            {
-                // ulong on the wire, long here. Ticks are counters, not durations, and
-                // will not approach the point where this narrows.
-                Tick = (long)m.Tick,
-                AckTick = (long)m.AckTick,
-                Full = m.Full,
-            };
+            var snapshot = RentSnapshot();
 
+            // ulong on the wire, long here. Ticks are counters, not durations, and
+            // will not approach the point where this narrows.
+            snapshot.Tick = (long)m.Tick;
+            snapshot.AckTick = (long)m.AckTick;
+            // Zero when the server did not send it (protocol 2, older server); the pooled
+            // instance is overwritten on every decode, so a previous value cannot leak.
+            snapshot.AckAppliedTick = (long)m.AckAppliedTick;
+            snapshot.Full = m.Full;
+
+            var entityIndex = 0;
             foreach (var e in m.Entities)
             {
-                snapshot.Entities.Add(new Msg.EntitySnapshot
-                {
-                    // May be empty: on a delta the id is interned away and only the
-                    // handle identifies the entity. SnapshotResolver resolves it.
-                    Id = e.Id,
-                    Type = ReadEntityType(e),
-                    X = e.X,
-                    Y = e.Y,
-                    Hp = e.Hp,
-                    MaxHp = e.MaxHp,
-                    Handle = e.Handle,
-                    Speed = e.Speed,
-                    // Both carried raw: their "zero means not sent" contract lives in the
-                    // encoding itself (facing is biased so no real angle is zero, action
-                    // reserves zero), not in a translation here. Applying a fallback at
-                    // this layer would hide from the view layer whether a value was ever
-                    // sent at all.
-                    FacingBrad = e.FacingBrad,
-                    Action = (Shared.GameLogic.Components.EntityAction)e.Action,
-                });
+                var entity = RentEntity(entityIndex++);
+                snapshot.Entities.Add(entity);
+                Fill(entity, e);
             }
 
             foreach (var id in m.Removed)
@@ -301,7 +425,182 @@ namespace Cuvara.Netcode.Codec
                 snapshot.Removed.Add(id);
             }
 
+            var eventIndex = 0;
+            foreach (var ev in m.Events)
+            {
+                var decoded = RentEvent(eventIndex++);
+                snapshot.Events.Add(decoded);
+                Fill(decoded, ev);
+            }
+
             return snapshot;
+        }
+
+        /// <summary>
+        /// Copies one wire entity onto a decoded one. Every field is written on every call
+        /// — unconditionally, with no "leave it alone when the wire omitted it" branch —
+        /// because a pooled instance still carries the previous snapshot's values, and a
+        /// field left unwritten would read as this tick's state while describing an entity
+        /// that may not even be the same one.
+        /// </summary>
+        private static void Fill(Msg.EntitySnapshot target, Pb.EntitySnapshot e)
+        {
+            // May be empty: on a delta the id is interned away and only the
+            // handle identifies the entity. SnapshotResolver resolves it.
+            target.Id = e.Id;
+            target.Type = ReadEntityType(e);
+            target.X = e.X;
+            target.Y = e.Y;
+            target.Hp = e.Hp;
+            target.MaxHp = e.MaxHp;
+            target.Handle = e.Handle;
+            target.Speed = e.Speed;
+            // Both carried raw: their "zero means not sent" contract lives in the
+            // encoding itself (facing is biased so no real angle is zero, action
+            // reserves zero), not in a translation here. Applying a fallback at
+            // this layer would hide from the view layer whether a value was ever
+            // sent at all.
+            target.FacingBrad = e.FacingBrad;
+            target.Action = (Shared.GameLogic.Components.EntityAction)e.Action;
+            // Carried raw for the same reason: the "changes means retrigger, zero
+            // means not sent" contract belongs to the consumer that drives an
+            // animator, not to this layer. Normalising it here would erase the
+            // difference between "no counter" and "counter at its initial value".
+            target.ActionSeq = e.ActionSeq;
+            // Zero here is not "absent", it is "every field present" — see
+            // EntitySnapshot.ChangedFields. proto3 elides a zero, so a server that
+            // does not implement field-delta produces exactly the value that makes
+            // the receiver apply every field, which is why this needs no fallback.
+            target.ChangedFields = e.ChangedFields;
+
+            // Protocol version 3. Every field written, including the lists, which are
+            // CLEARED first: a pooled entity still holds the previous snapshot's stats, and
+            // appending to them would hand this entity another entity's stat block.
+            target.Z = e.Z;
+            target.VelX = e.VelX;
+            target.VelY = e.VelY;
+            target.VelZ = e.VelZ;
+            // A HANDLE, resolved a layer up like Handle itself; never resolved here.
+            target.Owner = e.Owner;
+            target.OwnerId = e.OwnerId;
+            target.SpawnSeq = e.SpawnSeq;
+
+            target.Stats.Clear();
+            foreach (var stat in e.Stats)
+            {
+                target.Stats.Add(new Msg.StatValue(stat.StatId, stat.Value));
+            }
+
+            target.StatsRemoved.Clear();
+            foreach (var id in e.StatsRemoved)
+            {
+                target.StatsRemoved.Add(id);
+            }
+
+            target.Statuses.Clear();
+            foreach (var status in e.Statuses)
+            {
+                target.Statuses.Add(new Msg.StatusEffect(
+                    status.EffectId, status.Stacks, status.ExpiresTick, status.Source));
+            }
+
+            target.StatusesRemoved.Clear();
+            foreach (var id in e.StatusesRemoved)
+            {
+                target.StatusesRemoved.Add(id);
+            }
+        }
+
+        /// <summary>Copies one wire event onto a decoded one. Total, for the same reason
+        /// <see cref="Fill(Msg.EntitySnapshot, Pb.EntitySnapshot)"/> is.</summary>
+        private static void Fill(Msg.GameEvent target, Pb.GameEvent ev)
+        {
+            // An unrecognised type is carried through rather than dropped here: this
+            // layer decodes, it does not decide. The consumer ignores what it does
+            // not know, which keeps "the server sent something new" visible in a
+            // debug overlay instead of vanishing inside the codec.
+            target.Type = (Msg.GameEventType)ev.Type;
+            target.Source = ev.Source;
+            target.Target = ev.Target;
+            // Empty on Protobuf by construction — the server fills these only for a
+            // connection that is not interning. Copied anyway so one decoded shape
+            // serves both encodings and consumers need no per-encoding branch.
+            target.SourceId = ev.SourceId;
+            target.TargetId = ev.TargetId;
+            target.Amount = ev.Amount;
+            target.AbilityId = ev.AbilityId;
+            target.Flags = (Msg.GameEventFlags)ev.Flags;
+            target.EffectId = ev.EffectId;
+        }
+
+        /// <summary>
+        /// The snapshot object this decode fills — the pooled one, cleared, or a new one.
+        /// </summary>
+        private Msg.SnapshotMessage RentSnapshot()
+        {
+            if (!_reuseDecodedSnapshot)
+            {
+                return new Msg.SnapshotMessage();
+            }
+
+            if (_pooledSnapshot == null)
+            {
+                _pooledSnapshot = new Msg.SnapshotMessage();
+                return _pooledSnapshot;
+            }
+
+            // Clear() keeps each list's capacity, which is the point: the lists regrow to
+            // the AOI high-water mark once and never reallocate after that.
+            _pooledSnapshot.Entities.Clear();
+            _pooledSnapshot.Removed.Clear();
+            _pooledSnapshot.Events.Clear();
+            return _pooledSnapshot;
+        }
+
+        /// <summary>
+        /// The entity object at <paramref name="index"/> in this codec's free list, created
+        /// on first use. The free list is never trimmed: it settles at the largest entity
+        /// count seen, which is bounded by the server's AOI cap.
+        /// </summary>
+        private Msg.EntitySnapshot RentEntity(int index)
+        {
+            if (!_reuseDecodedSnapshot)
+            {
+                return new Msg.EntitySnapshot();
+            }
+
+            if (_entityPool == null)
+            {
+                _entityPool = new List<Msg.EntitySnapshot>();
+            }
+
+            while (_entityPool.Count <= index)
+            {
+                _entityPool.Add(new Msg.EntitySnapshot());
+            }
+
+            return _entityPool[index];
+        }
+
+        /// <summary>The event object at <paramref name="index"/>; see <see cref="RentEntity"/>.</summary>
+        private Msg.GameEvent RentEvent(int index)
+        {
+            if (!_reuseDecodedSnapshot)
+            {
+                return new Msg.GameEvent();
+            }
+
+            if (_eventPool == null)
+            {
+                _eventPool = new List<Msg.GameEvent>();
+            }
+
+            while (_eventPool.Count <= index)
+            {
+                _eventPool.Add(new Msg.GameEvent());
+            }
+
+            return _eventPool[index];
         }
 
         /// <summary>

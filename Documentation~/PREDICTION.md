@@ -32,15 +32,33 @@ server refuses is worse than showing the hit late.
 
 ### Key methods
 
+The predictor does not send anything. The game sends its own `InputMessage` and records the
+same tick on the predictor. `WorldViewBinder` (GameObject path) and `LocalPredictionSystem`
+(UnityDots) run the per-snapshot and per-frame calls for you. A game that drives a predictor
+directly makes these calls:
+
 ```csharp
-// Called every frame with the local player's input
-predictor.PredictAndSend(moveX, moveY, attackTargetId);
+// After every join, before the first Reconcile:
+predictor.UseServerProtocol(session.ServerProtocolVersion);
+predictor.UseServerTickRate(session.TickRate);
 
-// Called when a snapshot arrives
-predictor.Reconcile(snapshot);
+// Each input the game sends, with the tick that input carries:
+predictor.RecordInput(inputTick, moveX, moveY);
+steering.NoteInputSent(inputTick, nowSeconds);   // PredictionClockSteering
 
-// The position to render (predicted + smoothing offset)
-Vector2 renderPos = predictor.RenderPosition;
+// Each NEW snapshot (world.Tick advanced), in this order:
+predictor.SeedBaseTick(world.Tick);              // once per session; later calls do nothing
+predictor.SetServerSpeed(entity.Speed);          // non-positive = not sent, ignored
+steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
+predictor.Reconcile(new Vec2(entity.X, entity.Y), world.AckTick, world.Tick, world.AckAppliedTick);
+
+// Each rendered frame:
+predictor.Advance(deltaTime);
+Vec2 renderPos = predictor.Position;             // predicted + decaying smoothing offset
+Vec2 simulated = predictor.SimulatedPosition;    // without the offset
+
+// On a session boundary (reconnect, map transfer):
+predictor.Reset();                               // also forgets the 256-tick history
 ```
 
 ### Replay through Shared.GameLogic
@@ -56,39 +74,260 @@ Replay calls `MovementSystem.TryMove` — the **exact** entry point the server's
    moves at unit speed, not 1.414x. Calling `Integrate` directly with unnormalized
    input would predict diagonal movement 41% too fast.
 
+### 3D movement: the character motor (protocol 3, 0.46.0)
+
+Against a protocol 3 server (ADR-28) every step goes through `Shared.GameLogic`'s
+`CharacterMotor.Step` instead of `MovementSystem.TryMove`: planar input times speed, gravity, a
+jump honoured only when grounded, step-up onto low boxes, a slope limit, and walls — over a
+`MapGeometry`. The predicted body carries height, vertical velocity and grounded-ness. Requires
+`sgl-v0.7.0`.
+
+```csharp
+// After every join, before the first Reconcile:
+predictor.UseServerProtocol(session.ServerProtocolVersion); // 3 -> motor, 2/0 -> planar
+predictor.UseServerTickRate(session.TickRate); // the server's BASE rate (60), not the 15 Hz world rate
+predictor.SetMapGeometry(mapGeometry);   // the SAME map file the server loaded; null = flat
+predictor.SetMotorParams(MotorParams.Default); // only if content overrides the defaults
+
+// Input: the jump rides on the step this input takes.
+predictor.RecordInput(tick, moveX, moveY, jump);
+
+// Reconcile with height and vertical velocity (WorldViewBinder does this itself when
+// predictor.UsesCharacterMotor):
+predictor.Reconcile(new Vec3(e.X, e.Y, e.Z), e.VelZ, world.AckTick, world.Tick);
+
+Vec3 render = predictor.Position3; // server (x, y, z) -> Unity (x, z, y)
+```
+
+- **Model selection is by protocol, not by configuration.** `UseServerProtocol` picks the motor
+  for version 3 and the planar path for version 2 or an unversioned server. A call that changes
+  the model resets the predictor; one that keeps it does nothing. The default is planar, so a
+  consumer that never calls it behaves exactly as before.
+- **The tick rate is the server's, adopted the same way.** `UseServerTickRate` replaces the rate
+  the predictor was constructed with (a guess, at a composition root that runs before the join)
+  with the advertised one; a change re-derives the timestep and resets, the same rate or zero
+  changes nothing. A predictor left at the 15 Hz world rate against a 60 Hz server corrects by a
+  whole 15 Hz step (0.333) on about half of all snapshots and hard-resyncs its clock about once a
+  second; `PredictionClockSteering.PredictorRateDisagrees` reads true. See NETCODE.md "The
+  predictor's tick rate is the server's".
+- **The planar path is bit-identical to 0.45.0.** Under it height and vertical velocity stay 0,
+  grounded stays true, and `jump` is ignored; every existing prediction test passes unchanged.
+- **Gravity does not wait for input.** The clock, rule 1, the hold window, the history
+  comparison, replay and smoothing are the same code for both models. The one addition: on a
+  base tick that neither an input nor the hold steps, an *airborne* body still takes one motor
+  step with no horizontal input, so a jump keeps rising and falling between keypresses. That
+  passive step stamps the last-moved tick like a held step, so an input arriving later on the
+  same tick re-takes the tick's single step (rule 1) rather than adding a second.
+- **Under the motor a step always happens.** `CharacterMotor.Step` integrates gravity even for a
+  stop or a refused vector, so the "refused input rolls back to the tick start" rule of the planar
+  path becomes "the tick's step is the motor's step with that input".
+- **Grounded is derived on reconcile.** A snapshot carries position and `vel_z`, not the flag:
+  zero vertical velocity with the feet within 1 mm of `MapGeometry.SupportHeight` is standing,
+  anything else is airborne. The `Vec2` overloads keep the predicted height and vertical state.
+- **The geometry must be the server's.** A flat prediction of a hilly map is corrected on every
+  step. `MapGeometry.Flat(settings.Bounds)` is the default and is exactly the protocol 2 world.
+- `Position3.X/Y` always equal `Position.X/Y`; the render offset and the in-step spread gain a
+  vertical component. `LastCorrection` is the 3D distance when height changed, the planar one
+  otherwise.
+
+### Projectile prediction: `ProjectilePredictor` (protocol 3, ADR-29)
+
+Predicts the local player's own skillshots from the button press until the server's projectile
+entity with the same `spawn_seq` appears, then hands over:
+
+```csharp
+var projectiles = new ProjectilePredictor(tickRate, mapGeometry);
+
+uint seq = projectiles.Fire(origin, aimPoint, speed, radius, range); // 0 = refused, send nothing
+input.SpawnSeq = seq; input.AimX = aimPoint.X; /* ... */
+session.SendInput(input);
+
+projectiles.Advance(Time.deltaTime);              // whole server ticks, ProjectileLogic.Step
+client.SnapshotReceived += s => projectiles.ApplySnapshot(s);
+projectiles.HandedOver += (predicted, entityId) => { /* swap visuals */ };
+projectiles.Unconfirmed += predicted => { /* server never claimed it */ };
+```
+
+- Spawn and flight are `ProjectileLogic.Spawn`/`Step` over the same geometry, one step per server
+  tick, so the path matches the server's wherever the inputs agree. The origin cannot match
+  exactly — the server launches from the caster's *authoritative* position — so a small offset at
+  handover is normal and is the game's to blend.
+- The server sends `spawn_seq` only to the owner's connection; any entity carrying one this
+  predictor issued is the authoritative copy. Seqs start at 1 and skip 0 on wrap.
+- A prediction nobody claims (cast refused, or the projectile lived less than a snapshot
+  interval) is dropped after `HandoverTimeoutSeconds` (1 s) and reported, never kept.
+- Hits are not predicted: impact is `PROJECTILE_HIT` and damage is `DAMAGE`, both from the server.
+
+### Which history entry a snapshot describes: `ack_applied_tick` (0.46.1)
+
+The reconcile compares the snapshot with the predictor's own **history** -- where it thought
+the player was at the tick the snapshot describes -- and moves the prediction by the
+difference. Before 0.46.1 it looked that entry up at the snapshot's own tick number `T`. That
+is the wrong entry:
+
+- The server applies an input on the tick whose **input drain** accepts it, not on the tick
+  the client was at when it recorded it. The client runs ahead by its lead, so an input
+  recorded on client base tick `B` is applied on server tick `P`, and the two tick lines are
+  offset by `B - P` -- about the lead minus one, plus whatever skew the clock steering has not
+  removed.
+- The snapshot at server tick `T` therefore matches the client's history at
+  `T + (B - P)`, not at `T`. Every tick of that offset came back as a correction: about
+  0.0033 units per tick of offset per reconcile on a curve, and a whole step at every start
+  and stop -- the rubber-banding.
+
+The server now says which tick applied the acknowledged input: `SnapshotMessage` field 7,
+`ack_applied_tick` (protocol 3 servers only; the server's `docs/API.md`, *Reconciliation*, is
+normative). It travels as `SnapshotMessage.AckAppliedTick` -> `ResolvedSnapshot.AckAppliedTick`
+-> `WorldState.AckAppliedTick` (kept paired with `WorldState.AckTick`), and the predictor takes
+it through two new overloads:
+
+```csharp
+predictor.Reconcile(Vec2 position, long ackTick, long serverBaseTick, long ackAppliedTick);
+predictor.Reconcile(Vec3 position, float velZ, long ackTick, long serverBaseTick, long ackAppliedTick);
+```
+
+`WorldViewBinder` and the DOTS `LocalPredictionSystem` (com.cuvara.dots) pass
+`world.AckAppliedTick`; a consumer reconciling by hand should do the same.
+
+**The offset is a stable one, not the pair of each acknowledgement.** `B` is the base tick
+stored with the acked input; `P` is `ack_applied_tick`. But every input's pair carries a tick of
+drain quantisation -- it lands somewhere inside a server tick and is drained at the next one --
+so consecutive pairs differ by one tick roughly as often as not, and on a moving body moving the
+comparison point by a tick moves it by a whole step. The exact-pair version was measured
+*worse* than no field at all. The predictor therefore keeps the last 15 measured pairs and
+compares at `T + median`, moving that offset only when fewer than a third of the window still
+agree with it. What is left is real: an input whose drain landed a tick away from the shared
+offset changed direction a tick early or late on the server, which is at most one step at a
+start or stop and a fraction of a step on a curve.
+
+Diagnostics: `AckTickOffset` (the offset in use), `LastMeasuredAckTickOffset` (the newest exact
+pair), `AckOffsetSamples`, `AckOffsetChanges` (each change on a moving body is a one-step
+correction; a steadily growing count means the clock is drifting) and `AckOffsetUnresolved`.
+
+**No field, no change.** With `ack_applied_tick` absent or zero (a protocol 2 or older server)
+the overloads behave exactly as `Reconcile(position, ackTick, serverBaseTick)` always did.
+
+Three smaller defects were fixed beside it, on every path:
+
+- **An input tick's history entry is re-recorded after the input.** `Advance` wrote the entry
+  when the tick began; the input then stepped the tick (or rolled a held step back on a stop),
+  and the history kept the stale value -- a +1/-1 step pair at every start and stop.
+- **A new tick carries the unshown part of the step on screen into the render offset**, as an
+  input boundary already did. It used to vanish, and the rendered position jumped forward by it
+  in one frame: up to 2.3x the normal per-frame motion on a curve and 16.7x at a start or stop
+  (1 ms frames), 1.3x now.
+- **The clock steering has an integral term** -- see *The clock runs on the server's timebase*.
+
+Measured on the deterministic headless harness (`Tests/Editor/PredictionHarness.cs`: the
+server's per-tick rules on one clock, the predictor on another, seeded latency and jitter;
+`AckAppliedTickReconcileTests` asserts these):
+
+| Run (55 s unless noted) | 0.46.0 | 0.46.1 |
+|---|---|---|
+| 60.0 Hz server, 15 Hz sends, no jitter, circle: nonzero corrections | 38 | **0** |
+| 59.6 Hz server, 13 Hz jittered sends, lead 6, circle: mean correction | 0.0208 | **0.0011** |
+| same, start/stop: largest correction | 4 steps | **1 step** |
+| same, 1 ms frames (20 s): largest frame-to-frame motion vs normal, circle / start-stop | 2.32x / 16.67x | **1.31x / 1.34x** |
+| DOTS path (2-argument reconcile, no steering, before): client clock lead over the server after 55 s | 22 ticks and climbing | 2 ticks, the measured target, with `PredictionClockSteering` |
+
 ### Smoothing vs snapping
 
 Every reconcile produces some position error:
 
 | Error magnitude | Behaviour |
 |----------------|-----------|
-| Below `SmoothingThreshold` (default 2.0 units) | Absorbed into a decaying render offset |
-| Above `SmoothingThreshold` | Offset dropped, avatar snaps to correct position |
+| Up to `LocalMovePredictor.SmoothingThreshold` (0.5 units) | Absorbed into a decaying render offset (`SmoothedCorrections`) |
+| Above `SmoothingThreshold` | Offset dropped, avatar snaps to the corrected position (`Snaps`) |
 
-The render position is always `predictedPosition + smoothingOffset`, where the offset
-decays exponentially each frame.
+The render position (`Position`) is always the simulated position plus the smoothing offset.
+The offset decays by `OffsetDecayPerSecond` raised to the frame time, so the same fraction is
+retired per second at any frame rate (about 99 % after 250 ms). Both values are constants on
+`LocalMovePredictor`, not settings.
+
+### After a client stall
+
+`Advance` never simulates more than `MaxCatchUpTicks` in one frame. The rest of a long frame
+is discarded (`ClampedFrames`, `DiscardedCatchUpSeconds`). The clock is then behind the
+server's tick line by the discarded time. `SteerToServerTick` does not walk that gap back at
+0.5 tick per snapshot. It jumps the clock onto the line (`StallResyncs`). Pending inputs,
+holds and the history are kept. Ordinary jitter never triggers a jump: it needs a clamped
+frame, or a clock that is behind by more than the catch-up budget.
+
+**The backlog after the stall (0.48.0).** The snapshots the server sent during the stall are
+not always all there when it ends. Before 0.48.0 the KCP receive loop read one datagram per
+frame, and a network can also deliver late and then in a burst. The live client applied the
+backlog of a 2 s stall oldest first, about one snapshot every 10 ms over 300 ms (rpg-factory
+testlab S13). The jump was then decided against the oldest, stale snapshot. The clock fell
+behind the backlog as it kept arriving, and the jump fired again and again, 6 to 15 corrections
+of 16 ticks each. `PredictionClockSteering.OnSnapshot` now classifies each snapshot by its
+arrival gap against its tick gap at the advertised rate (band 0.5x to 2x):
+
+| Delivery | What is done | Counter |
+|---|---|---|
+| **Late** (above the band) | steered to its tick plus the delay times the rate: the server's tick now. After a stall this is the first snapshot read, so the jump happens there, once. Not measured: its age is the delivery stall, not the route | `LateSnapshots` |
+| **Bunched** behind a late one (below the band) | the backlog: not measured, not steered on, and its reconcile is skipped, because its acknowledgement maps into the ticks the clock jumped over. `TickError` is still updated | `BunchedSnapshots`, `LocalMovePredictor.BunchedReconcilesSkipped` |
+| **On cadence**, or early outside such an episode (jitter) | measured and steered as before | |
+
+`ClientHitchRecoveryTests` covers both shapes: the whole backlog handed over in the stall-end
+frame, and the backlog paced at 10 ms with the frame delta capped at 0.333 s, as Unity caps
+`Time.deltaTime`.
+
+**The stall-end input (0.48.0).** The client records a frame's input before the frame's
+snapshot is steered on (`DotsWorldBridge.Update` runs before `LocalPredictionSystem`). In the
+frame that ends a stall, that input is stamped on the old tick line. A forward jump therefore
+moves every input recorded since the last `Advance`, together with the hold and tick-start
+markers it set, onto the new line (`RestampedInputs`). Without that, the first reconcile
+replayed the input from a whole stall back, and the next one took the overshoot back: two
+corrections per stall (S13 run uwrf). `PredictionHarness.InputBeforeSnapshot` runs the harness
+in the client's order.
+
+**The snapshot is used one frame late.** The client reconciles a snapshot one frame after the
+transport applied it. The jump can therefore come one `Advance` after the stall frame's input. The
+restamp is deferred to the next reconcile. It covers the last two `Advance` windows and the stall
+tick or the one before it, and it skips inputs that reconcile's snapshot acknowledges
+(`PredictionHarness.SnapshotsVisibleNextFrame`). After a clamped frame, any clock error beyond 2
+ticks is jumped. The 8-tick steering band is for jitter, and a stall slightly longer than the
+clamp left the clock 7 to 8 ticks behind.
+
+**The stall frame's own input (live trace replay, 0.48.0).** In the client, the frame that ends a
+stall records its input and then calls `Advance` with the stall as its delta. The clamp then runs
+15 ticks after an input that was really sampled at the end of them. A clamped `Advance` therefore
+moves the inputs recorded since the previous `Advance` to the clamp's end tick
+(`InputsMovedToClampEnd`), where the next jump's restamp finds them. This was found and verified by
+replaying recorded live traces (`LiveTraceReplayTests`, `Tests/Editor/Fixtures/S13Traces`), not by a
+model of the frame order.
+
+**Unity's late `deltaTime`.** `Time.deltaTime` reports the previous frame. A stall inside a
+frame therefore reaches `Advance` one frame after the jump made in it. The jump credit lasts for
+two `Advance` calls, so that next frame does not simulate the stall a second time
+(`JumpCreditSpentSeconds`). `PredictionHarness.DeltaTimeLagsOneFrame` models it.
 
 ## TickRateEstimator
 
-Measures the server's tick rate from snapshot arrivals. The server sends `tick_rate`
-in `JoinTokenResponse` (since #93), but the estimator validates it against what
-actually arrives. A mismatch is logged as a warning.
-
-The estimated tick rate drives `secondsPerTick` which the predictor uses to advance
-its internal tick counter.
+Measures the server's tick rate and the gap between snapshot ticks from snapshot
+arrivals. The server sends `tick_rate` in the join reply, and the predictor takes it through
+`UseServerTickRate`. The estimator does not set the predictor's timestep. It checks the rate
+(`PredictionClockSteering.PredictorRateDisagrees` reports a predictor that runs at another
+rate). Its `SnapshotTickGap` sets the hold window (`SetHoldTicks`) and seeds the
+interpolation clock. Its `EstimatedHz` converts the acknowledgement floor to ticks
+(`AckFloorConversionHz`).
 
 ## SnapshotStalenessEstimator
 
-Fits the client/server clock ratio from snapshot inter-arrival times. Reports how
-many ppm the client clock runs fast or slow relative to the server, so the prediction
-clock can adjust its advance rate to stay synchronized.
+Fits the client/server clock ratio from snapshot arrivals. It reports how many ppm the
+client clock runs fast or slow relative to the server (`SkewPpm`). When the rate is
+corroborated, `PredictionClockSteering` feeds it to the prediction clock
+(`SetClockRateScale`). The interpolation clock does not use it.
 
-**The fit is linear regression over a sliding window.** A single outlier (GC pause,
-radio wake) does not move the estimate; it takes sustained drift across the window.
+**The fit is a lower envelope, not a regression.** Each epoch keeps its lowest
+(least-delayed) sample. The line goes through two such anchors far apart in time. A late
+sample (GC pause, radio wake, a server stall) cannot pull the line, because it is never the
+lowest of its epoch.
 
-Clamped at +/-200,000 ppm. The development machine measured +110,000 ppm (host
-`CLOCK_REALTIME` running 11% fast against `CLOCK_MONOTONIC`), which silently disabled
-the fit until 0.23.0 added the clamp and the probe scene.
+A fitted rate outside `MinimumSkew`..`MaximumSkew` (0.75..1.33) is refused and counted
+(`FitsRefused`). The development machine measured +110,000 ppm (host `CLOCK_REALTIME`
+running 11 % fast against `CLOCK_MONOTONIC`), which silently disabled the fit until 0.23.0
+added the bounds and the probe scene.
 
 ### The warm-up window, and why the reading is offered in two strengths
 
@@ -131,9 +370,9 @@ many start/stop transitions is measuring it.
 
 ### The clock runs on the server's timebase
 
-`SteerToServerTick` corrects the base-tick clock's **phase**. It is proportional (gain 0.1,
-called once per snapshot) and has no integral term, so a constant **rate** difference is not
-something it can remove — it settles at a standing offset instead:
+`SteerToServerTick` corrects the base-tick clock's **phase**. Until 0.46.1 it was proportional
+only (gain 0.1, called once per snapshot), and a constant **rate** difference is not something a
+proportional loop can remove — it settles at a standing offset instead:
 
 ```
 standing tick error  =  drift / (gain x snapshotHz)
@@ -154,6 +393,44 @@ counted in `RefusedClockRateScales`.
 
 A ratio near 1.10 is not exotic: it is the Windows performance counter against the Linux
 clock the server ticks on, and it is what the development machine measures.
+
+**Most sessions never corroborate a rate**, though, and a server running 0.7% slow (59.6 Hz)
+left the proportional loop about one tick off for the whole session. Since 0.46.1 the steering
+also has an **integral term**: it integrates the same integer tick error the proportional term
+acts on (so a clock already in step is left exactly where it is), only while the proportional
+term is not saturated and the error is within 8 ticks (anti-windup), with a gain of 0.002 per
+call and a contribution clamped to 0.5 ticks per call. The loop's poles are real (z ~ 0.97 and
+0.92): overdamped. Every ratio from 1.02 to 1.103 now settles at zero tick error without the
+fed-forward rate (`PredictionClockRateTests`), where the proportional loop alone sat 0.8 to 4.1
+ticks off. `SteerIntegralTicks` reads what it has learned.
+
+### `PredictionClockSteering`: the same steering outside the binder (0.46.1)
+
+The measuring and steering half of `WorldViewBinder` -- `TickRate`, `Staleness`, `AckLatency`,
+`RoundTripMs`, the acknowledgement-floor conversion, the corroborated rate feed-forward and the
+measured `TargetLeadTicks` -- now lives in `PredictionClockSteering`, unchanged, and the binder
+forwards to it (`WorldViewBinder.ClockSteering`). A consumer that drives a predictor without the
+binder (the DOTS `LocalPredictionSystem`) steers with the same code:
+
+```csharp
+var steering = new PredictionClockSteering(predictor);
+
+// beside every RecordInput, same tick, same clock as below:
+steering.NoteInputSent(inputTick, nowSeconds);
+
+// once per NEW snapshot, before reconciling:
+steering.SampleTickRate(world.Tick, nowSeconds);
+steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
+predictor.Reconcile(position, world.AckTick, world.Tick, world.AckAppliedTick);
+
+// on a session boundary (reconnect, map transfer), with predictor.Reset():
+steering.Reset();
+```
+
+`Reset()` forgets the session: `TickRate`, `Staleness`, `AckLatency` (its sent-input timestamps
+and floor), the advertised tick rate and `RoundTripMs`. Kept, the new session's acknowledgements
+are timed against the old session's sends and its lead carries the old route's floor. The
+lifetime counter `AckFloorRateFallbacks` is kept. `WorldViewBinder.Reset()` calls it.
 
 ### The lead must cover the pipeline, not just the snapshot's age
 
@@ -350,6 +627,12 @@ In the measurement report, read `rate corroborated` before `clock rate differenc
 large ppm is the artefact being caught; `NO` beside a small one, early in a session, is simply a
 baseline that has not doubled yet.
 
+The DOTS sample's `[DOTSNet/health]` line follows the same rule. `skew=` is the raw fitted
+reading and prints whether or not the estimator applied it, so `skewApplied=` (the rate reached
+the clock, i.e. `RateCorroborated`) and `ageFitted=` (`AgeIsFitted`) print beside it, and
+`uncorroborated=` / `extraordinary=` at the end of the line say which guard refused a fit. A large `skew=`
+beside `skewApplied=0` is a refused fit, not a clock running off-rate (Cuvara/Netcode#174).
+
 ### Reading a correction figure
 
 Size a correction by the tick rate **measured off the wire**, never by the one the client
@@ -418,13 +701,49 @@ so the two columns are comparable and a difference between them is itself a find
 
 ## PredictionSettings
 
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `SmoothingThreshold` | 2.0 | Error above this snaps instead of smoothing |
-| `SmoothingDecay` | 0.85 | Per-frame decay factor for the smoothing offset |
-| `MaxUnackedInputs` | 120 | Buffer size for unacknowledged inputs |
+`new PredictionSettings(tickRate, speed, bounds)`, or `PredictionSettings.FromServer(...)`.
+
+| Field | Purpose |
+|-------|---------|
+| `TickRate` | Base tick rate the predictor integrates at. 0 builds a refusing predictor. `UseServerTickRate` replaces it after the join. |
+| `Speed` | Fallback speed until a snapshot carries one (`SetServerSpeed`) |
+| `Bounds` | Map bounds, clamped exactly as the server clamps them |
+| `TickRateIsFallback` | True when the rate was not the server's own |
+
+The smoothing threshold (0.5 units), the decay (`OffsetDecayPerSecond`) and the input
+buffer (`Capacity`, 128 unacknowledged inputs) are constants on `LocalMovePredictor`.
 
 ## Debugging
+
+### Replaying a live session: the call trace (0.48.0)
+
+The predictor is deterministic given its calls. The server's half (snapshots and
+acknowledgements) does not depend on what the client predicted. A recorded call sequence
+therefore replays a live session exactly, and a fix can be judged against what the client really
+did, not against a model of its frame order.
+
+```csharp
+PredictorTraceSink sink = (in PredictorTraceEvent e) => { sb.Clear(); e.AppendJson(sb); writer.WriteLine(sb); };
+predictor.Trace = sink;   // every call, with its arguments, plus each reconcile's outcome
+steering.Trace = sink;    // OnSnapshot begin/end, NoteInputSent, SampleTickRate, RoundTripMs, Reset
+
+// Headless, later:
+var replayer = new PredictorTraceReplayer(new LocalMovePredictor(sameSettings)) { Geometry = sameMap };
+foreach (var line in File.ReadLines(path))
+    if (PredictorTraceEvent.TryParseJson(line, out var e)) replayer.Apply(in e);
+```
+
+- **What the trace does not hold:**
+  - the `PredictionSettings` the predictor was built with (tick rate, speed, bounds);
+  - the map geometry, which is recorded only as "a geometry was set".
+  - Record both next to the trace.
+- **Modes:**
+  - `ReplaySteering = false` replays the predictor's own calls, the steering's effects included.
+  - `true` replays the steering's inputs and lets the steering decide again.
+- **Cost:** off, a null check per call. On, one struct per call, passed by reference: formatting
+  and storage are the sink's.
+- **Tests:** `PredictorTraceTests` pins the record-then-replay identity, the on-versus-off identity,
+  and the zero allocation.
 
 The DOTS sample's HUD shows:
 - `Predict … err 0.000` — the reconciliation error (should be near zero)

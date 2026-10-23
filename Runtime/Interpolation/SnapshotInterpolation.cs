@@ -1,3 +1,4 @@
+using System;
 namespace Cuvara.Netcode.Interpolation
 {
     /// <summary>
@@ -47,6 +48,40 @@ namespace Cuvara.Netcode.Interpolation
         /// <param name="config">Tuning.</param>
         /// <param name="x">Rendered X.</param>
         /// <param name="y">Rendered Y.</param>
+        /// <summary>
+        /// As <see cref="EvaluateAt{TBuffer}(in TBuffer, double, double, in InterpolationConfig, out float, out float)"/>,
+        /// and additionally reports whether the answer is a <b>hold</b> rather than a
+        /// position the entity was actually at.
+        /// </summary>
+        /// <param name="holding">
+        /// True when the buffer cannot bracket the render instant — a single sample, or a
+        /// render clock still behind the oldest one. The position returned is the oldest
+        /// known state repeated, which is correct to render only if there is no better
+        /// option; a caller that can defer showing the entity should prefer that, because a
+        /// newly seen entity holds for <c>TargetDelay</c> before the render clock reaches
+        /// its first sample, and a frozen body that then starts moving is the most visible
+        /// artefact the jitter buffer produces.
+        /// </param>
+        public static bool EvaluateAt<TBuffer>(in TBuffer buffer, double renderTick, double secondsPerTick,
+                                               in InterpolationConfig config, out float x, out float y,
+                                               out bool holding)
+            where TBuffer : struct, ISampleBuffer
+        {
+            int n = buffer.Length;
+            holding = n > 0 && (n == 1 || renderTick <= buffer[0].Tick);
+            return EvaluateAt(buffer, renderTick, secondsPerTick, config, out x, out y);
+        }
+
+        /// <summary>
+        /// As <see cref="Evaluate{TBuffer}(in TBuffer, in InterpolationClock, in InterpolationConfig, out float, out float)"/>,
+        /// reporting whether the answer is a hold. See the other overload's remarks.
+        /// </summary>
+        public static bool Evaluate<TBuffer>(in TBuffer buffer, in InterpolationClock clock,
+                                             in InterpolationConfig config,
+                                             out float x, out float y, out bool holding)
+            where TBuffer : struct, ISampleBuffer
+            => EvaluateAt(buffer, clock.RenderTick, clock.SecondsPerTick, config, out x, out y, out holding);
+
         public static bool EvaluateAt<TBuffer>(in TBuffer buffer, double renderTick, double secondsPerTick,
                                                in InterpolationConfig config, out float x, out float y)
             where TBuffer : struct, ISampleBuffer
@@ -116,7 +151,9 @@ namespace Cuvara.Netcode.Interpolation
 
         /// <summary>
         /// Carries the last segment's direction past the newest sample, capped by
-        /// <see cref="InterpolationConfig.MaxExtrapolation"/>, then holds.
+        /// <see cref="InterpolationConfig.MaxExtrapolation"/>; holds at the cap for
+        /// <see cref="InterpolationConfig.ExtrapolationHold"/>; then eases back onto the newest
+        /// sample over <see cref="InterpolationConfig.ExtrapolationSettle"/>.
         /// </summary>
         /// <remarks>
         /// Reaching here means the stream has been quiet for longer than
@@ -126,6 +163,22 @@ namespace Cuvara.Netcode.Interpolation
         /// the extrapolated distance is absorbed by the next segment instead of being
         /// stepped back out of. That backward step is precisely what the old <c>t</c>
         /// clamp produced.
+        /// <para>
+        /// The settle exists because "quiet" also means "stopped": the binder pushes no sample
+        /// for an entity whose position did not change, so an entity that stopped is past its
+        /// newest sample permanently. Holding at the cap forever drew it permanently past where
+        /// it stopped (StoppedEntityConvergesTests).
+        /// </para>
+        /// <para>
+        /// <b>The settle moves the rendered entity backward</b>, along the segment it was carried
+        /// on, onto the newest sample. That is a deliberate trade and not the backward step the
+        /// note above rules out: it happens only after the stream has been quiet for the cap plus
+        /// <see cref="InterpolationConfig.ExtrapolationHold"/> (200 ms by default), its distance
+        /// is bounded by the cap (speed x 50 ms, 0.125 units for an enemy), and it is eased over
+        /// <see cref="InterpolationConfig.ExtrapolationSettle"/> rather than stepped. The
+        /// alternative is the entity drawn permanently past where the server says it stopped.
+        /// An entity that resumes moving before the hold expires never settles.
+        /// </para>
         /// </remarks>
         private static void ExtrapolatePastNewest<TBuffer>(in TBuffer buffer, int count, double renderTick,
                                                            double secondsPerTick, in InterpolationConfig config,
@@ -148,15 +201,48 @@ namespace Cuvara.Netcode.Interpolation
                 return;
             }
 
+            if (config.MaxExtrapolationSpan > 0.0 && span * secondsPerTick > config.MaxExtrapolationSpan)
+            {
+                // Stale segment: the entity was still, then moved. No velocity to carry.
+                return;
+            }
+
+            if (config.MaxExtrapolationSpeed > 0.0)
+            {
+                double dx = newest.X - previous.X;
+                double dy = newest.Y - previous.Y;
+                double speed = Math.Sqrt((dx * dx) + (dy * dy)) / (span * secondsPerTick);
+                if (speed > config.MaxExtrapolationSpeed)
+                {
+                    // A teleport, not motion: there is no velocity to carry.
+                    return;
+                }
+            }
+
             double overshoot = renderTick - newest.Tick;
-            double cap = config.MaxExtrapolation / secondsPerTick;
-            if (overshoot > cap) overshoot = cap;
             if (overshoot <= 0.0)
             {
                 return;
             }
 
-            double f = overshoot / span;
+            double cap = config.MaxExtrapolation / secondsPerTick;
+            double carried = Math.Min(overshoot, cap);
+            double settleStart = cap + (config.ExtrapolationHold / secondsPerTick);
+            if (overshoot > settleStart)
+            {
+                double settle = config.ExtrapolationSettle / secondsPerTick;
+                double remaining = settle <= 0.0 ? 0.0 : 1.0 - ((overshoot - settleStart) / settle);
+                if (remaining <= 0.0)
+                {
+                    return;
+                }
+
+                // Smoothstep: no velocity jump where the ease starts or where it lands.
+                remaining = remaining * remaining * (3.0 - (2.0 * remaining));
+                carried *= remaining;
+            }
+
+            double f = carried / span;
             x = (float)(newest.X + (newest.X - previous.X) * f);
             y = (float)(newest.Y + (newest.Y - previous.Y) * f);
         }

@@ -344,7 +344,8 @@ namespace DOTSSample
         /// The parameter is named rather than discarded so that is visible as a choice.
         /// </para>
         /// </remarks>
-        public void SetPose(string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        public void SetPose(
+            string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action, uint actionSeq)
         {
             if (!IsValid || id == null || !_entities.TryGetValue(id, out var rec))
                 return;

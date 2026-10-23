@@ -160,7 +160,8 @@ namespace Cuvara.Netcode.View
         /// parameter is named rather than dropped so that intent is visible.
         /// </para>
         /// </remarks>
-        public void SetPose(string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action)
+        public void SetPose(
+            string id, uint facingBrad, Shared.GameLogic.Components.EntityAction action, uint actionSeq)
         {
             if (id == null || !_objects.TryGetValue(id, out var go) || go == null) return;
 

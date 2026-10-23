@@ -122,6 +122,13 @@ namespace Cuvara.Netcode.View
             public int Hp, MaxHp;
 
             /// <summary>
+            /// When this entity's FIRST sample arrived, in the same seconds base as
+            /// <c>_clock.NowMs / 1000</c>. Bounds how long rendering may be deferred while
+            /// the buffer fills — see <c>HoldDeferBudget</c>.
+            /// </summary>
+            public double FirstSampleTime;
+
+            /// <summary>
             /// Facing (biased wire form) and action, as of the newest snapshot.
             /// </summary>
             /// <remarks>
@@ -136,6 +143,13 @@ namespace Cuvara.Netcode.View
             /// </remarks>
             public uint FacingBrad;
             public Shared.GameLogic.Components.EntityAction Action;
+
+            /// <summary>
+            /// Retrigger counter for <see cref="Action"/>, carried through interpolation
+            /// unblended for the same reason the action is: it is an identity, not a
+            /// quantity, and a value between two counters names no occurrence at all.
+            /// </summary>
+            public uint ActionSeq;
         }
 
         private readonly IEntityView _view;
@@ -148,7 +162,39 @@ namespace Cuvara.Netcode.View
         private readonly LocalMovePredictor _predictor;
         private readonly HashSet<string> _live = new HashSet<string>();
         private readonly HashSet<string> _explicitlyRemoved = new HashSet<string>();
+
+        // Ids the world reported removed since the previous Tick. See WorldState.TakeRemovedIds.
+        private readonly List<string> _removedThisTick = new List<string>();
+
+        /// <summary>
+        /// Entities removed and added again between two <see cref="Tick"/> calls, and respawned in
+        /// the view rather than continued: a re-entry into the area of interest or a reused id
+        /// whose removal and return merged into one frame. Diagnostics.
+        /// </summary>
+        public int RespawnsWithinAFrame { get; private set; }
         private readonly List<string> _gone = new List<string>();
+
+        /// <summary>
+        /// How long a remote entity may be withheld from the view while its buffer is too
+        /// thin to bracket the render instant.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A newly seen entity holds at its single sample until the render clock — which
+        /// runs <c>TargetDelay</c> behind — reaches it. Rendering during that window shows
+        /// a frozen body that then visibly starts moving; deferring shows nothing and then
+        /// a body already in motion, one render delay later.
+        /// </para>
+        /// <para>
+        /// The budget exists so the deferral cannot become a disappearance. An entity sent
+        /// once and never again — stationary, or leaving the area of interest on the next
+        /// tick — never acquires a second sample, so the hold condition never clears on its
+        /// own. After this long it renders held, which is exactly the behaviour that
+        /// preceded the deferral. 0.15s is TargetDelay plus one 15Hz interval, i.e. the
+        /// longest a legitimately-filling buffer should need.
+        /// </para>
+        /// </remarks>
+        private const double HoldDeferBudget = 0.15;
 
         private readonly Dictionary<string, InterpEntry> _interp = new Dictionary<string, InterpEntry>();
 
@@ -173,6 +219,7 @@ namespace Cuvara.Netcode.View
         private int _localHp;
         private int _localMaxHp;
         private uint _localFacingBrad;
+        private uint _localActionSeq;
         private Shared.GameLogic.Components.EntityAction _localAction;
         private bool _localSeen;
 
@@ -296,6 +343,7 @@ namespace Cuvara.Netcode.View
             _poseView = view as IEntityPoseView;
             _predictor = predictor != null && predictor.IsEnabled ? predictor : null;
             _clock = clock ?? new StopwatchViewClock();
+            _clockSteering = new PredictionClockSteering(_predictor);
             _interpConfig = interpolation.Normalized();
         }
 
@@ -318,16 +366,20 @@ namespace Cuvara.Netcode.View
         public bool IsPredicting => _predictor != null;
 
         /// <summary>
-        /// Measures the server's base tick rate from snapshot arrivals, so the advertised
-        /// rate can be verified rather than trusted.
+        /// The clock half of this binder: tick rate, snapshot age, acknowledgement floor, rate
+        /// feed-forward and phase steering for the predictor. A separate type so a consumer that
+        /// drives a predictor without this binder (the DOTS <c>LocalPredictionSystem</c>) steers
+        /// with the same code. The members below forward to it unchanged.
         /// </summary>
-        /// <remarks>
-        /// Fed here because this is the one place that already sees every snapshot and
-        /// owns a clock. Reading it costs nothing; ignoring it costs what a wrong tick
-        /// rate costs, which is continuous sub-threshold wrongness that never announces
-        /// itself. See <see cref="TickRateEstimator"/>.
-        /// </remarks>
-        public TickRateEstimator TickRate { get; } = new TickRateEstimator();
+        public PredictionClockSteering ClockSteering => _clockSteering;
+
+        private readonly PredictionClockSteering _clockSteering;
+
+        /// <summary>
+        /// Measures the server's base tick rate from snapshot arrivals, so the advertised
+        /// rate can be verified rather than trusted. See <see cref="PredictionClockSteering.TickRate"/>.
+        /// </summary>
+        public TickRateEstimator TickRate => _clockSteering.TickRate;
 
         /// <summary>
         /// Base tick carried by the newest snapshot applied, or 0 before the first one.
@@ -339,89 +391,38 @@ namespace Cuvara.Netcode.View
         /// </remarks>
         public long LastServerTick => _lastWorldTick;
 
+
         /// <summary>Round-trip time in milliseconds, as last reported by the session.</summary>
         /// <remarks>
         /// Set by the consumer; 0 until then, which makes the steering target degrade to one
         /// snapshot interval rather than to something invented.
         /// </remarks>
-        public long RoundTripMs { get; set; }
-
-        /// <summary>
-        /// Measures how old the newest snapshot is by the time it is used. See
-        /// <see cref="Prediction.SnapshotStalenessEstimator"/>.
-        /// </summary>
-        public SnapshotStalenessEstimator Staleness { get; } = new SnapshotStalenessEstimator();
-
-        /// <summary>
-        /// Measures the pipeline constant the staleness fit absorbs. See
-        /// <see cref="Prediction.AckLatencyEstimator"/>.
-        /// </summary>
-        /// <remarks>
-        /// Fed from two places: <see cref="NoteInputSent"/>, which the consumer must call, and
-        /// this binder's own snapshot handling, which already sees every acknowledgement. A
-        /// consumer that never calls <see cref="NoteInputSent"/> simply never gets a floor and
-        /// keeps the round-trip fallback — no worse off than before this existed.
-        /// </remarks>
-        public AckLatencyEstimator AckLatency { get; } = new AckLatencyEstimator();
-
-        /// <summary>
-        /// The rate the acknowledgement floor's seconds-to-ticks conversion uses: the measured
-        /// one where there is a measurement, the advertised one until then.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// <b>The measured rate is the correct factor, not merely the safer one.</b>
-        /// <see cref="AckLatencyEstimator"/> uses this only to turn a duration in CLIENT seconds
-        /// into base ticks, and <see cref="TickRateEstimator.EstimatedHz"/> is "server ticks per
-        /// client second" — the two units match by construction. Converting with the advertised
-        /// rate instead makes a client whose clock runs fast by <c>e</c> report a floor
-        /// <c>(1+e)</c> too large, and the steering lead over-lead by <c>e × floor</c>.
-        /// </para>
-        /// <para>
-        /// <b>The fallback is guarded and counted, not silent.</b> Until the estimator has a
-        /// measurement there is nothing to convert with but the advertised rate — and a fallback
-        /// is another claim about the same quantity, not an absence of one. Every fallback in
-        /// this area that went wrong went wrong by being invisible: a floor truncated to whole
-        /// ticks contributing zero while still taking its branch, a round trip rounding to zero
-        /// on a fast link, a clamp saturating and delivering its bound on every call. So the
-        /// substitution is visible in <see cref="AckFloorRateIsFallback"/> and countable in
-        /// <see cref="AckFloorRateFallbacks"/>, and a consumer is expected to report it.
-        /// </para>
-        /// <para>
-        /// Zero when there is neither — no predictor and no estimate — which
-        /// <c>RecordAck</c> refuses outright rather than converting with a made-up rate.
-        /// </para>
-        /// </remarks>
-        public float AckFloorConversionHz
+        public long RoundTripMs
         {
-            get
-            {
-                if (TickRate.HasEstimate && TickRate.EstimatedHz > 0f)
-                {
-                    return TickRate.EstimatedHz;
-                }
-
-                return _predictor?.TickRateHz ?? 0f;
-            }
+            get => _clockSteering.RoundTripMs;
+            set => _clockSteering.RoundTripMs = value;
         }
 
         /// <summary>
-        /// Whether <see cref="AckFloorConversionHz"/> is currently the advertised rate standing
-        /// in for a measurement that does not exist yet.
+        /// Measures how old the newest snapshot is by the time it is used. See
+        /// <see cref="PredictionClockSteering.Staleness"/>.
         /// </summary>
-        public bool AckFloorRateIsFallback => !(TickRate.HasEstimate && TickRate.EstimatedHz > 0f);
+        public SnapshotStalenessEstimator Staleness => _clockSteering.Staleness;
 
         /// <summary>
-        /// Acknowledgements folded in using the advertised rate because no measured one was
-        /// available. Counted so a fallback that never stops being one is visible.
+        /// Measures the pipeline constant the staleness fit absorbs. See
+        /// <see cref="PredictionClockSteering.AckLatency"/>.
         /// </summary>
-        /// <remarks>
-        /// A handful at the start of a session is the normal case — the tick rate estimator
-        /// needs snapshots before it can report. A count that keeps climbing means the estimator
-        /// never reached an estimate, and every floor on that session was converted with a rate
-        /// nobody measured.
-        /// </remarks>
-        public int AckFloorRateFallbacks { get; private set; }
+        public AckLatencyEstimator AckLatency => _clockSteering.AckLatency;
+
+        /// <inheritdoc cref="PredictionClockSteering.AckFloorConversionHz"/>
+        public float AckFloorConversionHz => _clockSteering.AckFloorConversionHz;
+
+        /// <inheritdoc cref="PredictionClockSteering.AckFloorRateIsFallback"/>
+        public bool AckFloorRateIsFallback => _clockSteering.AckFloorRateIsFallback;
+
+        /// <inheritdoc cref="PredictionClockSteering.AckFloorRateFallbacks"/>
+        public int AckFloorRateFallbacks => _clockSteering.AckFloorRateFallbacks;
 
         /// <summary>
         /// Tells the binder an input has just been sent, so its acknowledgement can be timed.
@@ -441,231 +442,18 @@ namespace Cuvara.Netcode.View
         /// </para>
         /// </remarks>
         public void NoteInputSent(long inputTick) =>
-            AckLatency.RecordSent(inputTick, _clock.NowMs / 1000.0);
+            _clockSteering.NoteInputSent(inputTick, _clock.NowMs / 1000.0);
 
         /// <summary>
         /// Base ticks the client's clock should sit ahead of the newest snapshot's tick: how
-        /// old that snapshot already is when it is acted on.
+        /// old that snapshot already is when it is acted on. See
+        /// <see cref="PredictionClockSteering.TargetLeadTicks"/>.
         /// </summary>
         /// <remarks>
-        /// <para>
-        /// The clock is steered onto the newest snapshot's tick, and that tick is old by the
-        /// time it is read. Steering to it with no allowance drags the client's clock behind
-        /// the server's real one by exactly that age, and a tick number then stops naming the
-        /// same moment on both sides: the client's tick N carries inputs the server will not
-        /// apply until its own tick N + age. The reconcile reports that as a correction of one
-        /// input interval, on every snapshot.
-        /// </para>
-        /// <para>
-        /// <b>Measured, with a derived fallback — and the fallback is now bounded by a
-        /// measurement too.</b> <see cref="Staleness"/> fits the server's clock to the
-        /// client's — offset and rate — and reports the height of the newest snapshot above
-        /// that line, which is its age beyond the best the route has shown. Until it has a
-        /// line, the derived figure is one snapshot interval, because the newest snapshot
-        /// describes the tick it was produced on and the next is a whole interval behind it.
-        /// </para>
-        /// <para>
-        /// <b>That derived figure alone was wrong for eight seconds of every session, and
-        /// wrong by the whole of the defect it was meant to cover.</b> A rate is a slope and
-        /// cannot honestly be fitted over a short baseline, so
-        /// <see cref="SnapshotStalenessEstimator.IsUsable"/> only turns true once two anchors
-        /// sit <see cref="SnapshotStalenessEstimator.MinimumBaselineSeconds"/> apart —
-        /// measured against a 15 Hz snapshot stream, <b>8.2 s after join</b>. Over those eight
-        /// seconds the real age on localhost is <b>0.06 base ticks</b> and the derived figure
-        /// is <b>4</b>, so the clock is steered four base ticks past the server's and the
-        /// reconcile reports exactly that as a correction — <b>0.3333 world units, 4.00
-        /// steps</b> — at every start and every stop. Live, that is 36 corrections in 162
-        /// reconciles with the tick rate agreeing on both sides and every other counter clean,
-        /// which reads as a rate mismatch and is not one.
-        /// </para>
-        /// <para>
-        /// So the age is taken from the estimator as soon as it has a reading at all
-        /// (<see cref="SnapshotStalenessEstimator.HasEstimate"/>), fitted or provisional, and
-        /// the derived figure becomes a CEILING on it rather than a substitute for it. The
-        /// asymmetry is the point and it is not a heuristic: an unfitted rate can only drift
-        /// the provisional reading UPWARD, so below the derived figure the reading is evidence
-        /// and above it it is drift. Taking the smaller is therefore never worse than the old
-        /// fallback and is four ticks better on the measured case.
-        /// </para>
-        /// <para>
-        /// Either way the half round trip is added on top: the one-way delay sits inside the
-        /// fitted offset, inseparable from the difference between the two clocks' origins, so
-        /// no arrival-time measurement can recover it and the caller must supply it.
-        /// </para>
-        /// <para>
-        /// <b>The ceiling is not decoration.</b> This number steers a clock, and a measurement
-        /// that can run away will take the simulation with it — the clock follows, the
-        /// reconcile reports the growing gap as a correction, and both keep going. An earlier
-        /// estimator that fitted the offset alone did exactly that, reaching 613 ticks with
-        /// the lead tracking it the whole way. Two snapshot intervals plus a round trip is
-        /// past anything a healthy link produces and far short of a runaway.
-        /// </para>
+        /// <b>internal, not private:</b> it is asserted directly by <c>WorldViewBinderLeadTests</c>
+        /// rather than inferred from a downstream symptom.
         /// </remarks>
-        /// <remarks>
-        /// <b>internal, not private:</b> this number steers a clock, and the defect it last
-        /// carried was invisible from outside — a four-tick lead against a real age of 0.06
-        /// reads on every other counter as a healthy client. It is asserted directly by
-        /// <c>WorldViewBinderLeadTests</c> rather than inferred from a downstream symptom.
-        /// </remarks>
-        internal int TargetLeadTicks()
-        {
-            int gap = TickRate.SnapshotTickGap > 0 ? TickRate.SnapshotTickGap : 1;
-
-            float lead;
-            if (Staleness.AgeIsFitted)
-            {
-                // A fitted line WHOSE SLOPE HAS REPRODUCED. Believe it; the ceiling below is
-                // the only guard it then needs.
-                //
-                // This used to read `Staleness.IsUsable`, with the comment "A fitted line.
-                // Believe it." That was true while the only thing that could go wrong with a
-                // fit was noise. It is not true now that a fit can be a displacement divided by
-                // a baseline: the age is the height above THAT line, so an uncorroborated slope
-                // reached the lead through the residual even after the clock stopped listening
-                // to it. Live, with the rate correctly refused, a 51 225 ppm fit still drove the
-                // age to 5.24 base ticks against a true idle 0.06, and the lead to 6.
-                lead = Staleness.StalenessTicks;
-            }
-            else if (Staleness.HasEstimate)
-            {
-                // Provisional, so trusted only downwards -- but a reading that SATURATES that
-                // clamp is not a reading at all, and treating it as one delivers the defect.
-                //
-                // Math.Min(.., gap) was written as a ceiling on a provisional figure expected to
-                // be roughly right and occasionally high. A provisional reading has no slope
-                // term, so when the timebase is untrustworthy it accumulates at the apparent
-                // skew: measured at 45.56 base ticks against a true age of 0.09, on a run whose
-                // apparent skew was 81 351 ppm. Clamped, that returns `gap` on every call -- and
-                // a saturated clamp is a constant, which is precisely the warm-up fallback this
-                // work exists to remove. All three arms of that run steered on a lead of 4
-                // against an age under a tenth of a tick, and the report labelled it, one line
-                // below: "a lead equal to this is the warm-up fallback, not a measurement".
-                //
-                // THE PRINCIPLE, because it generalises past this function: AN UNTRUSTWORTHY
-                // TIMEBASE MUST PRODUCE AN UNDER-LEAD, NOT THE LARGEST LEAD AVAILABLE. And the
-                // corollary a future reader needs on seeing the Math.Min this replaced: A CLAMP
-                // ON AN UNTRUSTED QUANTITY IS NOT A GUARD, IT IS A DEFAULT -- and defaults get
-                // delivered. A clamp only guards while the quantity it bounds is roughly right;
-                // once the quantity saturates it, the clamp value IS the output, on every call,
-                // and whatever that value happens to be is what the system now does.
-                //
-                // So saturation is treated as EVIDENCE OF AN UNUSABLE READING rather than as a
-                // number to clamp. A provisional age above one snapshot interval is not a
-                // plausible age for a healthy route; a route genuinely that slow produces a fit
-                // whose slope REPRODUCES, and takes the branch above. Down here it means the
-                // timebase cannot be trusted, and an untrustworthy timebase must produce an
-                // UNDER-lead, not the largest one available -- the uplink is still covered by the
-                // acknowledgement floor, which is measured independently of this.
-                float provisional = Staleness.StalenessTicks;
-                lead = provisional > gap ? 0f : provisional;
-            }
-            else
-            {
-                lead = gap;
-            }
-
-            // THE PIPELINE CONSTANT. The staleness reading above is the age ABOVE its own
-            // envelope floor; this is the constant that envelope absorbed, plus the uplink,
-            // which no arrival-time measurement can recover at all. Their sum is the whole of
-            // uplink + age and neither counts anything twice.
-            //
-            // THE ROUND TRIP IS COMPUTED WHETHER OR NOT THERE IS A FLOOR, AND THAT IS A FIX.
-            //
-            // It used to sit in an `else if` behind AckLatency.HasEstimate, which made HAVING
-            // a floor and USING a floor the same condition. They are not the same condition,
-            // because the floor was truncated to whole base ticks: on a localhost link, where
-            // uplink + age is a fraction of a tick, it contributed exactly ZERO while still
-            // taking the branch. Turning the estimator on therefore did nothing at all except
-            // DELETE the half-round-trip term from the lead and its whole-tick term from the
-            // ceiling below.
-            //
-            // That is the coupling behind the second open question on this work — the measured
-            // clock error moving from -1 to -2/-4 when the estimator was wired in, from a
-            // change that argued it was safe by construction. It was not the floor steering
-            // anything. It was the round trip no longer steering anything. An estimator whose
-            // safety argument is "the worst case is that it contributes nothing" must not be
-            // able to make the lead SMALLER than it was without it, and behind an `else` it
-            // could, by exactly rttTicks * 0.5.
-            //
-            // So both terms are computed and the LARGER is used. AckLatency times the real
-            // path end to end -- the input drain, the server's staged snapshot write, the
-            // wire, the wait for a client frame -- which is the quantity the reconcile needs,
-            // and it is the better number wherever it is the bigger one. RoundTripMs is a
-            // heartbeat ping through the socket: it sees none of the staging, and half of it
-            // is not the quantity either. Taking the maximum keeps the floor's contribution
-            // where it is real, and keeps the fallback bit-for-bit as it was for a consumer
-            // that supplies a round trip and never calls NoteInputSent.
-            int rttTicks = 0;
-            float rttLead = 0f;
-            if (RoundTripMs > 0 && TickRate.EstimatedHz > 0f)
-            {
-                rttTicks = (int)Math.Round(RoundTripMs * TickRate.EstimatedHz / 1000.0);
-                rttLead = rttTicks * 0.5f;
-            }
-
-            // FRACTIONAL, AND BIASED LOW BY ITS OWN UNCERTAINTY RATHER THAN BY TRUNCATION.
-            //
-            // The bias is not optional -- an over-lead steers the client past the server, the
-            // original defect arriving from the other side -- but truncating the floor to
-            // whole base ticks is a guard that fires as a total loss. Live it read 0.14 and
-            // 0.68 base ticks and Math.Floor returned zero both times. Combined with the
-            // displacement below, that is the whole story of why wiring this in changed
-            // nothing except to make the clock error worse: the floor contributed zero while
-            // still taking the branch that removed the round trip.
-            //
-            // And a sub-tick deficit is not a sub-tick problem. The tick LABEL is an integer:
-            // a client leading 0.68 ticks short carries the wrong tick number for 68% of every
-            // tick, and the reconcile returns a WHOLE step of correction for it. That is the
-            // second step of the live 2.00 against a floor of 1.00 -- so truncation did not
-            // merely cost accuracy here, it was the reason the term stayed open.
-            //
-            // AckLatencyEstimator.ConservativeFloorTicks keeps the bias and puts it where the
-            // bias actually IS: the floor is the tenth percentile of `constant + wait`, so on a
-            // swept link it sits 0.1 * S above the constant BY CONSTRUCTION, on every clean run.
-            // That measured offset is what it subtracts, using the ladder slope fitted from the
-            // run's own observations. It reads zero -- and says so, via FloorCorrectionRefusals
-            // -- only when the ladder is not straight and the model predicting the bias is
-            // therefore false, instead of whenever the link is fast enough that the constant is
-            // under one base tick.
-            float ackLead = AckLatency.HasEstimate ? AckLatency.ConservativeFloorTicks : 0f;
-
-            // THE FLOOR DISPLACES THE ROUND TRIP RATHER THAN ADDING TO IT, BECAUSE THEY
-            // MEASURE THE SAME THING. Adding them counts the pipeline twice. The floor wins
-            // because it times the real path end to end -- the input drain, the server's
-            // staged snapshot write, the wire, the wait for a client frame -- while
-            // RoundTripMs is a heartbeat through the socket that sees none of the staging, and
-            // half of it is not the quantity anyway.
-            //
-            // BUT THE DISPLACEMENT IS THE ONE PATH BY WHICH THIS ESTIMATOR CAN TOUCH THE
-            // STEER, and it is worth naming because it went unnoticed once. A floor that
-            // appears removes rttLead from the lead, so a small floor against a large round
-            // trip makes the lead SMALLER -- which is the coupling behind the clock error
-            // moving from -1 to -2/-4 when this was first wired in, from a change that argued
-            // it was safe by construction. It was never the floor steering anything; it was
-            // the round trip no longer steering anything, while a truncated floor put nothing
-            // back. With the truncation gone the displacement is a measurement decision rather
-            // than a silent deletion, which is what makes it defensible; it is still a real
-            // coupling and a live run that moves the clock error should look here first.
-            lead += AckLatency.HasEstimate ? ackLead : rttLead;
-            int ticks = (int)Math.Round(lead);
-            if (ticks < 0) ticks = 0;
-
-            // The ceiling bounds a RUNAWAY, not a measurement. The acknowledgement floor is a
-            // measured constant with its own refusal band, and on a slow link it legitimately
-            // exceeds two snapshot intervals -- clamping it there would reintroduce the
-            // under-lead this estimator exists to remove, on exactly the connections that
-            // suffer most from it. So it raises the ceiling with it rather than being cut by
-            // it, while the derived terms stay bounded as before.
-            //
-            // rttTicks is in the ceiling UNCONDITIONALLY, and that is a fix. It used to be
-            // computed only on the branch the floor did not take, so the arrival of a floor
-            // silently lowered the ceiling by rttTicks as well as lowering the lead -- a
-            // clamp tightening for a reason that has nothing to do with a runaway. A ceiling
-            // that shrinks the moment a measurement appears is not a bound, it is a second,
-            // accidental steer.
-            int ceiling = gap * 2 + rttTicks + (int)Math.Ceiling(ackLead);
-            return ticks > ceiling ? ceiling : ticks;
-        }
+        internal int TargetLeadTicks() => _clockSteering.TargetLeadTicks();
 
         /// <summary>Entities currently presented.</summary>
         public int LiveCount => _live.Count;
@@ -681,6 +469,13 @@ namespace Cuvara.Netcode.View
         /// means a session boundary was crossed without <see cref="Reset"/>.
         /// </summary>
         public int Relocalizations { get; private set; }
+
+        /// <summary>
+        /// Times the world's tick went backwards under this binder and the render timeline was
+        /// restarted on the new tick line. Nonzero means a session boundary was crossed without
+        /// <see cref="Reset"/> (the world was reset, the binder was not).
+        /// </summary>
+        public int TickLineRestarts { get; private set; }
 
         /// <summary>
         /// Records ids a snapshot named in <c>removed</c>, so the next reconcile can
@@ -718,6 +513,40 @@ namespace Cuvara.Netcode.View
             }
 
             RelocalizeIfLocalIdChanged(localId);
+
+            // REMOVED AND BACK WITHIN ONE FRAME: a new incarnation, not the same entity. Ended here
+            // so the loop below spawns it fresh, with an empty sample ring (see
+            // WorldState.TakeRemovedIds for the live failure this removes).
+            world.TakeRemovedIds(_removedThisTick);
+            for (var i = 0; i < _removedThisTick.Count; i++)
+            {
+                var removedId = _removedThisTick[i];
+                if (!_live.Contains(removedId))
+                {
+                    continue;
+                }
+
+                _explicitlyRemoved.Add(removedId);
+                if (world.EntityMap.ContainsKey(removedId))
+                {
+                    _live.Remove(removedId);
+                    ReleaseRing(removedId);
+                    _view.Despawn(removedId);
+                    _explicitlyRemoved.Remove(removedId);
+                    RespawnsWithinAFrame++;
+                }
+            }
+
+            // A world tick BELOW the newest one this binder has seen cannot happen within a
+            // session (WorldState.Tick never moves backwards), so it is a session boundary the
+            // caller did not report: the world was reset for a new join and this binder was not.
+            // Left alone, nothing reaches the interpolator until the new session's ticks pass the
+            // old ones -- remotes drawn at raw snapshot positions and RenderTick stuck in the old
+            // tick space, for as long as the old session ran (UnityDots audit finding F2).
+            if (world.Tick < _lastWorldTick)
+            {
+                RestartTickLine();
+            }
 
             double nowMs = _clock.NowMs;
             double nowSeconds = nowMs / 1000.0;
@@ -774,7 +603,17 @@ namespace Cuvara.Netcode.View
                 var e = kv.Value;
                 bool isLocal = id == localId;
 
-                if (_live.Add(id))
+                // Spawn is deferred for a remote entity whose buffer cannot yet bracket the
+                // render instant — see SpawnWhenRenderable below. Showing it earlier means
+                // showing it FROZEN: the render clock runs TargetDelay behind, so a newly
+                // seen entity holds at its first sample for that long before interpolation
+                // has anything to work with. Measured on the DOTS sample: 38.2% of the
+                // frames in an entity's first 0.25s rendered zero displacement, against
+                // 0.42% once established (rpg-mmo-server BENCHMARK Part XIX §56).
+                //
+                // The local entity is exempt: it is predicted, never interpolated, and has
+                // a position from frame one.
+                if ((isLocal || !_interpConfig.DeferUntilBracketed) && _live.Add(id))
                 {
                     // Type is carried on every snapshot the entity appears in, keyframe
                     // and delta alike, so it is already correct on the pass that first
@@ -799,99 +638,18 @@ namespace Cuvara.Netcode.View
                         _predictor.SeedBaseTick(world.Tick);
                         _predictor.SetServerSpeed(e.Speed);
 
-                        // ...and keep them together afterwards. Seeding aligns the two
-                        // clocks once, at join; from then on each counts base ticks off its
-                        // own wall clock and nothing bounds the difference. Measured live,
-                        // the client's tick ran 456 ticks -- 7.6 seconds -- past the newest
-                        // snapshot and was still climbing, with every correction counter
-                        // reading clean, because Reconcile replays that whole span as
-                        // prediction lead. See LocalMovePredictor.SteerToServerTick.
+                        // ...and keep them together afterwards. Seeding aligns the two clocks once,
+                        // at join; from then on each counts base ticks off its own wall clock and
+                        // nothing bounds the difference -- measured live, 456 ticks past the newest
+                        // snapshot and climbing, with every correction counter clean. Measure the
+                        // snapshot age and the acknowledgement floor, feed a corroborated rate
+                        // forward, then steer the phase to this snapshot's tick plus the lead.
                         //
-                        // The target lead is what the client has to predict THROUGH to be
-                        // showing "now": one snapshot interval, because that is how stale
-                        // the newest snapshot already is when it arrives, plus half a round
-                        // trip for the journey. Both are measured rather than assumed.
-                        // Sampled at the moment of USE, not of arrival, so the wait for this
-                        // frame is inside the measurement -- that wait is a real part of how
-                        // old the snapshot is when the client acts on it, and it is the part
-                        // that varies with a client's join phase.
-                        // The ADVERTISED rate, not the one measured off the wire. The
-                        // measurement converts a TICK NUMBER to a time -- `snapshotTick /
-                        // baseHz` -- so it has to use the rate the server stamped that tick
-                        // at; an estimate's error becomes a drift against the wall clock that
-                        // grows with the tick counter, and a 57.7 Hz reading of a 60 Hz server
-                        // took this from a stable figure to 613 ticks and climbing in under a
-                        // minute, dragging the steering with it.
-                        Staleness.Sample(world.Tick, nowSeconds, _predictor.TickRateHz);
-
-                        // THE MEASURED RATE, AND THAT IS NOT A CONTRADICTION OF THE COMMENT
-                        // ABOVE -- these two lines convert different things and want different
-                        // rates, which is why they no longer share a justification.
-                        //
-                        // AckLatencyEstimator uses baseHz for exactly one purpose: turning a
-                        // DURATION in client seconds into a number of base ticks
-                        // (`FloorSeconds * baseHz`). It never converts a tick number to a time,
-                        // so the drift that broke the staleness fit cannot arise here -- there
-                        // is no growing tick counter for an error to accumulate against, only a
-                        // few tens of milliseconds.
-                        //
-                        // And for a duration the measured rate is the CORRECT one, not merely
-                        // the safer one. EstimatedHz is "server ticks per CLIENT second", which
-                        // is exactly the factor a duration measured on the client's clock needs.
-                        // With the advertised rate instead, a client whose clock runs fast by
-                        // `e` reports a floor `(1+e)` too large and the steering lead -- which
-                        // is compared against the server's own tick numbers -- over-leads by
-                        // `e * floor`. Bounded at 0.02 * floor on any run the validity gate
-                        // admits, and measured at 0.068 base ticks on a refused arm: small,
-                        // real, and in the over-lead direction this estimator exists to avoid.
-                        //
-                        // It also does not matter whether the disagreement is a fast client or
-                        // a slow server. Both produce an error of `advertised/measured - 1` and
-                        // both take this same correction, so the fix does not depend on
-                        // attributing it -- which is fortunate, because nothing here can.
-                        //
-                        // The round-trip term at TargetLeadTicks already converts with the
-                        // measured rate. This was the same kind of quantity converted two ways
-                        // in one class.
-                        if (AckFloorRateIsFallback) AckFloorRateFallbacks++;
-                        AckLatency.RecordAck(world.AckTick, nowSeconds, AckFloorConversionHz);
-
-                        // RATE FIRST, THEN PHASE. The steering below is proportional and
-                        // has no integral term, so any rate difference it is left to absorb
-                        // settles as a standing tick offset of drift / (gain * snapshotHz)
-                        // — 3.6 base ticks for a client clock 9% fast at 15 snapshots a
-                        // second. The reconcile compares at the snapshot's own tick NUMBER,
-                        // so that offset is not a diagnostic: it comes back as position, at
-                        // every start and every stop. The estimator has already fitted the
-                        // rate and, until now, nothing read it.
-                        //
-                        // Gated on IsUsable, never on HasEstimate: the provisional reading
-                        // carries no rate at all, and a rate wired into this clock from a
-                        // short baseline is the failure SnapshotStalenessEstimator's remarks
-                        // record twice, once reaching 613 ticks.
-                        //
-                        // AND GATED ON RateCorroborated, WHICH IS THE FIX FOR A THIRD.
-                        //
-                        // The envelope fit is only a rate if the minimum achievable delay was
-                        // the same at both anchors. That assumption was documented and never
-                        // tested, and the fit resting on it was handed straight to a clock. A
-                        // starved frame loop raises the delay floor, the later anchor sits
-                        // above the true line, and the slope absorbs the rise AS RATE: one
-                        // machine minutes apart read 220 ppm idle and 90 636 ppm inside a
-                        // loaded suite, and the client obediently ran its clock 8.3% slow and
-                        // sat at a three-tick standing error.
-                        //
-                        // IsUsable is the right gate for the AGE and the wrong one for the
-                        // RATE. A wrong slope perturbs a residual slightly, once per snapshot;
-                        // it perturbs a clock rate every second, forever. Different evidence
-                        // requirements, and they used to share one gate.
-                        if (Staleness.IsUsable && Staleness.RateCorroborated)
-                        {
-                            _predictor.SetClockRateScale(
-                                (float)(1.0 / (1.0 + Staleness.SkewPpm / 1e6)));
-                        }
-
-                        _predictor.SteerToServerTick(world.Tick, TargetLeadTicks());
+                        // That whole sequence lives in PredictionClockSteering.OnSnapshot, moved
+                        // there unchanged from this method so that the DOTS LocalPredictionSystem,
+                        // which drives a predictor without this binder, steers with the same code
+                        // instead of not at all.
+                        _clockSteering.OnSnapshot(_predictor, world.Tick, world.AckTick, nowSeconds);
 
                         // world.Tick is the tick this snapshot was produced on, and
                         // SeedBaseTick has already put it in the same space as the
@@ -900,7 +658,24 @@ namespace Cuvara.Netcode.View
                         // ordinary play: inputs go at ~15 Hz against a 60 Hz base tick, so
                         // there is a window of up to four base ticks after an
                         // acknowledgement before the next input is recorded (#53).
-                        _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick, world.Tick);
+                        //
+                        // world.AckAppliedTick (protocol 3 servers) names the server tick that
+                        // applied the acked input, which lets the predictor compare this snapshot
+                        // with the matching entry of its history rather than the one at
+                        // world.Tick. Zero (protocol 2, older server) keeps the old comparison.
+                        //
+                        // Under the 3D motor (a protocol 3 server) the height and vertical
+                        // velocity ride along, so the replay starts from the body the server has
+                        // rather than from its shadow on the ground plane.
+                        if (_predictor.UsesCharacterMotor)
+                        {
+                            _predictor.Reconcile(
+                                new Vec3(e.X, e.Y, e.Z), e.VelZ, world.AckTick, world.Tick, world.AckAppliedTick);
+                        }
+                        else
+                        {
+                            _predictor.Reconcile(new Vec2(e.X, e.Y), world.AckTick, world.Tick, world.AckAppliedTick);
+                        }
                     }
 
                     // Only the time no frame has advanced yet. AdvanceFrame is the
@@ -939,6 +714,7 @@ namespace Cuvara.Netcode.View
                     _localMaxHp = e.MaxHp;
                     _localFacingBrad = e.FacingBrad;
                     _localAction = e.Action;
+                    _localActionSeq = e.ActionSeq;
                     _localSeen = true;
 
                     // Once AdvanceFrame owns the local entity's rendering (the same
@@ -950,7 +726,7 @@ namespace Cuvara.Netcode.View
                     {
                         var predicted = _predictor.Position;
                         _view.SetState(id, predicted.X, predicted.Y, e.Hp, e.MaxHp);
-                        _poseView?.SetPose(id, e.FacingBrad, e.Action);
+                        _poseView?.SetPose(id, e.FacingBrad, e.Action, e.ActionSeq);
                     }
 
                     // HP is deliberately still the server's. Only movement is predicted;
@@ -962,19 +738,47 @@ namespace Cuvara.Netcode.View
                 {
                     if (!_interp.TryGetValue(id, out var fresh))
                     {
-                        fresh = new InterpEntry { Ring = RentRing() };
+                        fresh = new InterpEntry { Ring = RentRing(), FirstSampleTime = nowSeconds };
                     }
 
                     // Rejected for a tick that is not strictly newer, which the
                     // evaluator's bracketing must never see. Nothing is lost: a
                     // superseded state is not worth rendering.
-                    fresh.Ring.TryPush(new InterpolationSample
+                    //
+                    // ONLY when the position actually moved. This loop runs over every
+                    // entity the client holds, not over the entities this snapshot
+                    // carried — a delta names only what changed, and the merged world
+                    // keeps the rest at its last value. Pushing unconditionally therefore
+                    // MANUFACTURES a sample for every entity the snapshot did not mention:
+                    // new tick, old position, i.e. a positive assertion that the entity
+                    // was still there at that tick. The evaluator then interpolates
+                    // between two identical points, renders the entity frozen for the
+                    // interval, and jumps when the real update lands.
+                    //
+                    // That was harmless while "absent from a delta" could only mean
+                    // "unchanged". The server's replication schedule (rpg-mmo-server
+                    // ADR-27) made it mean "unchanged OR withheld", and nothing on this
+                    // side was told: three people playing saw mobs walk in visible steps
+                    // while players moved smoothly. Comparing against the last SAMPLE
+                    // rather than asking the wire settles both readings at once — a
+                    // genuinely stationary entity has nothing to add either way, and a
+                    // withheld moving one keeps its real samples, so the evaluator carries
+                    // the motion across the gap instead of being told it stopped.
+                    var ring = fresh.Ring;
+                    bool moved = ring.Length == 0
+                                 || ring[ring.Length - 1].X != e.X
+                                 || ring[ring.Length - 1].Y != e.Y;
+
+                    if (moved)
                     {
-                        Tick = world.Tick,
-                        ReceiveTime = nowSeconds,
-                        X = e.X,
-                        Y = e.Y
-                    });
+                        ring.TryPush(new InterpolationSample
+                        {
+                            Tick = world.Tick,
+                            ReceiveTime = nowSeconds,
+                            X = e.X,
+                            Y = e.Y
+                        });
+                    }
 
                     // HP is snapped, never interpolated. A half-applied hit is not a
                     // state the server ever occupied. Facing and action get the same
@@ -984,6 +788,7 @@ namespace Cuvara.Netcode.View
                     fresh.MaxHp = e.MaxHp;
                     fresh.FacingBrad = e.FacingBrad;
                     fresh.Action = e.Action;
+                    fresh.ActionSeq = e.ActionSeq;
                     _interp[id] = fresh;
                 }
 
@@ -1003,22 +808,50 @@ namespace Cuvara.Netcode.View
                         ix = newest.X;
                         iy = newest.Y;
                     }
-                    else if (!SnapshotInterpolation.Evaluate(
-                                 new EntitySampleBuffer(entry.Ring), _interpClock, _interpConfig,
-                                 out ix, out iy))
+                    else
                     {
-                        var newest = entry.Ring[entry.Ring.Length - 1];
-                        ix = newest.X;
-                        iy = newest.Y;
+                        if (!SnapshotInterpolation.Evaluate(
+                                new EntitySampleBuffer(entry.Ring), _interpClock, _interpConfig,
+                                out ix, out iy, out bool holding))
+                        {
+                            var newest = entry.Ring[entry.Ring.Length - 1];
+                            ix = newest.X;
+                            iy = newest.Y;
+                        }
+                        else if (_interpConfig.DeferUntilBracketed && holding &&
+                                 nowSeconds - entry.FirstSampleTime < HoldDeferBudget)
+                        {
+                            // Still filling. Do not show it yet: rendering now means
+                            // rendering a still body that will visibly start moving once
+                            // the clock reaches its first sample. Appearing one render
+                            // delay later, already in motion, is the lesser artefact.
+                            //
+                            // Bounded, and the bound is load-bearing: an entity that is
+                            // sent once and never again — stationary, or leaving the area
+                            // of interest immediately — would otherwise never appear at
+                            // all. After the budget it renders held, which is exactly the
+                            // old behaviour.
+                            continue;
+                        }
+                    }
+
+                    if (_live.Add(id))
+                    {
+                        _view.Spawn(id, isLocal, e.Type ?? string.Empty);
                     }
 
                     _view.SetState(id, ix, iy, entry.Hp, entry.MaxHp);
-                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action);
+                    _poseView?.SetPose(id, entry.FacingBrad, entry.Action, entry.ActionSeq);
                 }
                 else
                 {
+                    if (_live.Add(id))
+                    {
+                        _view.Spawn(id, isLocal, e.Type ?? string.Empty);
+                    }
+
                     _view.SetState(id, e.X, e.Y, e.Hp, e.MaxHp);
-                    _poseView?.SetPose(id, e.FacingBrad, e.Action);
+                    _poseView?.SetPose(id, e.FacingBrad, e.Action, e.ActionSeq);
                 }
             }
 
@@ -1112,7 +945,33 @@ namespace Cuvara.Netcode.View
             // these from - inventing a facing from the predicted velocity here would
             // fight the authoritative value on the very next snapshot.
             _view.SetState(_localId, predicted.X, predicted.Y, _localHp, _localMaxHp);
-            _poseView?.SetPose(_localId, _localFacingBrad, _localAction);
+            // The counter rides the between-snapshot frames unchanged, like facing and
+            // action. Repeating the same value is exactly right: a consumer retriggers on
+            // CHANGE, so an unchanged counter says "no new occurrence since the last
+            // snapshot", which is the truth here.
+            _poseView?.SetPose(_localId, _localFacingBrad, _localAction, _localActionSeq);
+        }
+
+        /// <summary>
+        /// Drops everything keyed to the old session's tick line: the render clock, the per-entity
+        /// sample rings (a lower tick would be rejected by every one of them) and the estimators
+        /// measured off those ticks. What is presented and the prediction stay; the next pass
+        /// re-samples every entity on the new tick line.
+        /// </summary>
+        private void RestartTickLine()
+        {
+            foreach (var kv in _interp)
+            {
+                Recycle(kv.Value.Ring);
+            }
+
+            _interp.Clear();
+            _interpClock.Reset();
+            _lastInterpAdvanceMs = -1.0;
+            _lastWorldTick = 0;
+            TickRate.Reset();
+            Staleness.Reset();
+            TickLineRestarts++;
         }
 
         /// <summary>Forgets all state and clears the view. For a fresh session.</summary>
@@ -1135,22 +994,25 @@ namespace Cuvara.Netcode.View
             _lastInterpAdvanceMs = -1.0;
             _explicitlyRemoved.Clear();
             _predictor?.Reset();
-            TickRate.Reset();
 
-            // The floor describes one route to one server; carrying it across a session
+            // The floors describe one route to one server; carrying them across a session
             // boundary measures the new connection against the old one's best case, and a
-            // best case that is no longer achievable reads as constant staleness.
-            Staleness.Reset();
+            // best case that is no longer achievable reads as constant staleness. The whole
+            // steering session goes -- tick rate, staleness, acknowledgement latency, advertised
+            // rate, round trip -- not only the first two (PredictionClockSteering.Reset).
+            _clockSteering.Reset();
             _localId = string.Empty;
             _localHp = 0;
             _localMaxHp = 0;
             _localFacingBrad = 0;
+            _localActionSeq = 0;
             _localAction = Shared.GameLogic.Components.EntityAction.Unspecified;
             _localSeen = false;
             _lastWorldTick = 0;
             DespawnsFromRemoval = 0;
             DespawnsFromAbsence = 0;
             Relocalizations = 0;
+            TickLineRestarts = 0;
         }
 
         /// <summary>

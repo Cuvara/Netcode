@@ -236,7 +236,7 @@ namespace Samples.NetcodeE2E
         {
             var c = new NetworkClient(
                 new NetworkSettings { GatewayHost = gatewayHost, GatewayPort = gatewayPort, RequireSealedSession = requireSealedSession },
-                new DefaultTransportFactory(), NewCodec(), new UnityNetLog());
+                new DefaultTransportFactory(System.Environment.GetEnvironmentVariable("CUVARA_TRANSPORT_KEY")), NewCodec(), new UnityNetLog());
 
             if (label == "A")
             {

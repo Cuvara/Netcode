@@ -63,6 +63,52 @@ namespace Cuvara.Netcode.Interpolation
         public double MaxExtrapolation;
 
         /// <summary>
+        /// Seconds an entity is held at the <see cref="MaxExtrapolation"/> cap before it is
+        /// eased back onto its newest confirmed position.
+        /// </summary>
+        /// <remarks>
+        /// Default 0.15 s. An entity is extrapolated only when no newer sample has arrived, and
+        /// the binder pushes no sample for an entity whose position did not change, so an entity
+        /// that STOPS sits past its newest sample for good. Without this it was drawn at the cap
+        /// forever: every enemy that reached its target 0.125 units past it, and a respawned
+        /// player several units past its spawn (found by the rpg-factory testlab, scenario S05).
+        /// The hold is longer than a withheld snapshot leaves the clock past the newest sample
+        /// (a 133 ms replication band against the 100 ms target delay), so an entity in a slow
+        /// band keeps moving smoothly instead of being pulled back between its updates.
+        /// <see cref="double.PositiveInfinity"/> restores the old hold-at-the-cap behaviour.
+        /// </remarks>
+        public double ExtrapolationHold;
+
+        /// <summary>Seconds over which a held extrapolation eases back to the newest sample.</summary>
+        /// <remarks>Default 0.10 s. Zero snaps back in one frame.</remarks>
+        public double ExtrapolationSettle;
+
+        /// <summary>
+        /// Fastest motion, in world units per second, that is extrapolated at all; a last segment
+        /// faster than this is a teleport (respawn, portal, server correction) and is held, not
+        /// carried. Zero (the default) disables the guard.
+        /// </summary>
+        /// <remarks>
+        /// Off by default because the evaluator works in the consumer's units and cannot know
+        /// what a plausible speed is; a game sets it from its own movement speeds. Carrying a
+        /// teleport's velocity past the destination draws the entity beyond where it landed.
+        /// </remarks>
+        public double MaxExtrapolationSpeed;
+
+        /// <summary>
+        /// Longest last segment, in seconds, whose motion is extrapolated. A longer one is not a
+        /// velocity: the entity stood still in between (no samples are pushed for an unchanged
+        /// position) and then moved or was teleported, and averaging that over the still period
+        /// invents a slow drift past the destination.
+        /// </summary>
+        /// <remarks>
+        /// Default 0.25 s: above two 15 Hz snapshot intervals plus the server's slowest
+        /// replication band (133 ms), so a withheld but moving entity is still carried.
+        /// Zero disables the check.
+        /// </remarks>
+        public double MaxExtrapolationSpan;
+
+        /// <summary>
         /// How hard the render clock is pulled toward its target: fractional rate change
         /// per second of clock error.
         /// </summary>
@@ -111,37 +157,95 @@ namespace Cuvara.Netcode.Interpolation
         /// </remarks>
         public int RingCapacity;
 
+        /// <summary>
+        /// Withhold a remote entity from the view until its buffer can bracket the render
+        /// instant, instead of rendering it frozen at its first sample. <b>Off by default.</b>
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The render clock runs <see cref="TargetDelay"/> behind, so a newly seen entity
+        /// holds at its single sample for that long before interpolation has two samples
+        /// spanning the render instant. It is drawn motionless and then visibly starts
+        /// moving. Measured on the DOTS sample against a live backend: <b>38.2% of the
+        /// frames in an entity's first 0.25s rendered zero displacement, against 0.42% once
+        /// established</b> (rpg-mmo-server BENCHMARK Part XIX §56).
+        /// </para>
+        /// <para>
+        /// With this on, the entity is not shown at all during that window and appears
+        /// already in motion, one render delay later. That trade is not free and not always
+        /// right: it delays the first sight of an entity by up to
+        /// <see cref="TargetDelay"/> plus an interval, which for a mob walking in from the
+        /// map edge is invisible and for a player appearing beside you in combat may not
+        /// be. Hence opt-in.
+        /// </para>
+        /// <para>
+        /// The local entity is never affected: it is predicted rather than interpolated and
+        /// has a position from the first frame.
+        /// </para>
+        /// </remarks>
+        public bool DeferUntilBracketed;
+
         /// <summary>The defaults every field above documents.</summary>
         public static InterpolationConfig Default => new InterpolationConfig
         {
             TargetDelay = 0.100,
             MaxExtrapolation = 0.050,
+            ExtrapolationHold = 0.150,
+            ExtrapolationSettle = 0.100,
+            MaxExtrapolationSpeed = 0.0,
+            MaxExtrapolationSpan = 0.250,
             ClockCatchUpRate = 1.0,
             MaxClockRateAdjust = 0.10,
             MinInterval = 0.001,
             MaxInterval = 0.500,
             DefaultInterval = 1.0 / 15.0,
             IntervalSmoothing = 0.3,
-            RingCapacity = 8
+            RingCapacity = 8,
+            // Explicit rather than left to the zero value: this one changes WHEN an entity
+            // becomes visible, and a reader of Default should see that it is off.
+            DeferUntilBracketed = false
         };
 
         /// <summary>
         /// This config with any non-positive field replaced by its default.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// <c>default(InterpolationConfig)</c> is all zeroes, and a zero
         /// <see cref="DefaultInterval"/> or <see cref="RingCapacity"/> would divide by zero
         /// or buffer nothing. A struct has no constructor that can be made mandatory, so
         /// the guard has to live somewhere the consumer calls; both consumers call this
         /// once at construction. <see cref="MaxExtrapolation"/> is exempt because zero is a
         /// meaningful choice there — it means "never extrapolate".
+        /// </para>
+        /// <para>
+        /// <see cref="ExtrapolationHold"/>, <see cref="ExtrapolationSettle"/> and
+        /// <see cref="MaxExtrapolationSpan"/> also mean something at zero (no hold, snap back,
+        /// no span check), so a configured value keeps a zero there and only a negative or NaN
+        /// takes the default. The one exception is the all-zero struct itself: a caller that
+        /// passes <c>default(InterpolationConfig)</c> asked for netcode's defaults
+        /// (<c>DotsNetcodeBootstrap.Install</c> documents exactly that), so it gets
+        /// <see cref="Default"/>'s values for these three. Every other field follows its own
+        /// rule above in both cases.
+        /// </para>
         /// </remarks>
         public InterpolationConfig Normalized()
         {
             var d = Default;
             var c = this;
+            if (c.Equals(default(InterpolationConfig)))
+            {
+                c.ExtrapolationHold = d.ExtrapolationHold;
+                c.ExtrapolationSettle = d.ExtrapolationSettle;
+                c.MaxExtrapolationSpan = d.MaxExtrapolationSpan;
+            }
+
             if (c.TargetDelay <= 0.0) c.TargetDelay = d.TargetDelay;
             if (c.MaxExtrapolation < 0.0) c.MaxExtrapolation = d.MaxExtrapolation;
+            if (c.ExtrapolationHold < 0.0 || double.IsNaN(c.ExtrapolationHold)) c.ExtrapolationHold = d.ExtrapolationHold;
+            if (c.ExtrapolationSettle < 0.0 || double.IsNaN(c.ExtrapolationSettle)) c.ExtrapolationSettle = d.ExtrapolationSettle;
+            if (c.MaxExtrapolationSpeed < 0.0 || double.IsNaN(c.MaxExtrapolationSpeed)) c.MaxExtrapolationSpeed = 0.0;
+            if (c.MaxExtrapolationSpan < 0.0 || double.IsNaN(c.MaxExtrapolationSpan)) c.MaxExtrapolationSpan = d.MaxExtrapolationSpan;
             if (c.ClockCatchUpRate <= 0.0) c.ClockCatchUpRate = d.ClockCatchUpRate;
             if (c.MaxClockRateAdjust <= 0.0) c.MaxClockRateAdjust = d.MaxClockRateAdjust;
             if (c.MinInterval <= 0.0) c.MinInterval = d.MinInterval;

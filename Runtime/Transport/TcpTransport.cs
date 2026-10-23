@@ -10,7 +10,7 @@ using Cysharp.Threading.Tasks;
 namespace Cuvara.Netcode.Transport
 {
     /// <summary>
-    /// TCP implementation of <see cref="ITransport"/> with the
+    /// TCP implementation of <see cref="ITransport"/> for the <b>gateway hop</b>, with the
     /// <c>[4-byte big-endian length][body]</c> framing both servers use.
     /// </summary>
     /// <remarks>
@@ -33,8 +33,13 @@ namespace Cuvara.Netcode.Transport
     /// transport there would be a second, redundant encryption of the same bytes.
     /// </para>
     /// <para>
-    /// <see cref="System.Net.Sockets"/> is unavailable on WebGL. A WebGL build needs
-    /// a WebSocket transport behind this same interface; see <c>docs/NETCODE.md</c>.
+    /// <b>Gateway hop only.</b> This is not a gameplay transport: realtime gameplay is
+    /// KCP/UDP only (<see cref="KcpTransport"/>), and <c>GameSessionClient</c> refuses TCP.
+    /// </para>
+    /// <para>
+    /// <see cref="System.Net.Sockets"/> is unavailable on WebGL, and so is UDP: a WebGL
+    /// build can reach neither the gateway nor the game server with this package. See
+    /// <c>Documentation~/NETCODE.md</c>.
     /// </para>
     /// </remarks>
     public sealed class TcpTransport : ITransport
@@ -64,17 +69,14 @@ namespace Cuvara.Netcode.Transport
         /// knee. With this buffer the same sweep held 15.0 frames/s down to <b>5 fps</b>,
         /// because a UniTask that completes synchronously never hops the player loop.
         /// </para>
+        /// <para>
+        /// The parsing and growth rules live in <see cref="FrameBuffer"/>, which is plain
+        /// C# and has no UniTask dependency, so the awaits-per-frame property above is
+        /// measurable under <c>dotnet test</c> rather than only in the Editor. See
+        /// <c>Tests~/Headless/</c>.
+        /// </para>
         /// </remarks>
-        private byte[] _receive = new byte[ReceiveBufferSize];
-        private int _receiveStart;
-        private int _receiveEnd;
-
-        /// <summary>
-        /// 16 KiB holds roughly a hundred snapshot frames, so a client that fell behind
-        /// catches up in one player-loop frame instead of one frame per snapshot. It
-        /// grows only for a body that does not fit, which the 1 MiB cap bounds.
-        /// </summary>
-        private const int ReceiveBufferSize = 16 * 1024;
+        private readonly FrameBuffer _receive = new FrameBuffer();
 
         /// <summary>Reusable write buffer (header + body), grown with headroom and never shrunk.</summary>
         private byte[] _writeBuf = Array.Empty<byte>();
@@ -169,50 +171,19 @@ namespace Cuvara.Netcode.Transport
 
             while (true)
             {
-                var buffered = _receiveEnd - _receiveStart;
-                if (buffered >= WireFraming.HeaderSize)
+                // Answered from bytes already in hand whenever possible: this return
+                // path costs no await, and so no player-loop frame.
+                var body = _receive.TryTakeFrame();
+                if (body != null)
                 {
-                    var length = WireFraming.ReadLength(_receive, _receiveStart);
-                    if (!WireFraming.IsValidLength(length))
-                    {
-                        throw new TransportException($"invalid frame length: {length}");
-                    }
-
-                    if (buffered >= WireFraming.HeaderSize + length)
-                    {
-                        var body = new byte[length];
-                        Buffer.BlockCopy(_receive, _receiveStart + WireFraming.HeaderSize, body, 0, length);
-                        _receiveStart += WireFraming.HeaderSize + length;
-                        if (_receiveStart == _receiveEnd)
-                        {
-                            _receiveStart = 0;
-                            _receiveEnd = 0;
-                        }
-
-                        return body;
-                    }
-
-                    if (_receive.Length < WireFraming.HeaderSize + length)
-                    {
-                        // A frame larger than the default buffer. IsValidLength already
-                        // bounded it at 1 MiB, so this cannot be driven by a peer into an
-                        // unbounded allocation.
-                        Array.Resize(ref _receive, WireFraming.HeaderSize + length);
-                    }
+                    return body;
                 }
 
-                if (_receiveStart > 0)
-                {
-                    Buffer.BlockCopy(_receive, _receiveStart, _receive, 0, buffered);
-                    _receiveStart = 0;
-                    _receiveEnd = buffered;
-                }
-
-                var read = await ReadSomeAsync(stream, _receive, _receiveEnd,
-                    _receive.Length - _receiveEnd, cancellationToken);
+                var free = _receive.ReserveForRead();
+                var read = await ReadSomeAsync(stream, free.Array, free.Offset, free.Count, cancellationToken);
                 if (read == 0)
                 {
-                    if (buffered == 0)
+                    if (_receive.Buffered == 0)
                     {
                         return null; // clean EOF between frames
                     }
@@ -220,7 +191,7 @@ namespace Cuvara.Netcode.Transport
                     throw new TransportException("connection closed mid-frame");
                 }
 
-                _receiveEnd += read;
+                _receive.Commit(read);
             }
         }
 
