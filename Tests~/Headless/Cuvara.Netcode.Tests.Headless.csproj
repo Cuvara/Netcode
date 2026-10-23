@@ -61,10 +61,15 @@
     <Compile Include="../../Runtime/Transport/KcpCrypto.cs" />
     <Compile Include="../../Runtime/Transport/KcpClientSession.cs" />
     <Compile Include="../../Runtime/Transport/NetworkEndpoint.cs" />
+    <Compile Include="../../Runtime/Transport/UdpDatagramDrain.cs" />
     <Compile Include="../../Tests/Editor/KcpCoreTests.cs" />
     <Compile Include="../../Tests/Editor/KcpCryptoTests.cs" />
     <Compile Include="../../Tests/Editor/NetworkEndpointTests.cs" />
     <Compile Include="../../Tests/Editor/KcpGameplayTransportTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpReliabilityTests.cs" />
+    <Compile Include="../../Tests/Editor/TransportReceivePacingTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpCloseFlushTests.cs" />
+    <Compile Include="../../Tests/Editor/KcpSilenceTests.cs" />
   </ItemGroup>
 
   <!--
@@ -98,6 +103,7 @@
     <Compile Include="../../Runtime/Prediction/SnapshotStalenessEstimator.cs" />
     <Compile Include="../../Runtime/Prediction/AckLatencyEstimator.cs" />
     <Compile Include="../../Runtime/Prediction/InputCadence.cs" />
+    <Compile Include="../../Runtime/Prediction/PredictorTrace.cs" />
     <Compile Include="../../Runtime/Protocol/*.cs" />
     <Compile Include="../../Runtime/Protocol/Messages/*.cs" />
     <Compile Include="../../Runtime/Snapshot/*.cs" />
@@ -118,6 +124,17 @@
     <Compile Include="../../Tests/Editor/WorldViewBinderLeadTests.cs" />
     <Compile Include="../../Tests/Editor/WorldViewBinderRateGateTests.cs" />
     <Compile Include="../../Tests/Editor/WorldViewBinderTests.cs" />
+    <Compile Include="../../Tests/Editor/StoppedEntityConvergesTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorTickRateTests.cs" />
+    <Compile Include="../../Tests/Editor/ReplayRewindHistoryTests.cs" />
+    <Compile Include="../../Tests/Editor/ReplayHistoryStagingTests.cs" />
+    <Compile Include="../../Tests/Editor/ServerStallRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientHitchRecoveryTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorTraceTests.cs" />
+    <Compile Include="../../Tests/Editor/LiveTraceReplayTests.cs" />
+    <Compile Include="../../Runtime/Json/*.cs" />
+    <Compile Include="../../Tests/Editor/WithheldEntityDoesNotFreezeTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationCoreTests.cs" />
     <Compile Include="../../Tests/Editor/WorldStateTests.cs" />
     <Compile Include="../../Tests/Editor/AckFloorConversionRateTests.cs" />
     <Compile Include="../../Tests/Editor/AckLatencyEstimatorTests.cs" />
@@ -126,6 +143,42 @@
     <Compile Include="../../Tests/Editor/AckAppliedTickReconcileTests.cs" />
     <Compile Include="../../Tests/Editor/PredictionHarness.cs" />
     <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
+  </ItemGroup>
+
+  <!--
+    Unity-free EditMode tests that used to run only inside the Editor: snapshot interning and
+    the abort-on-unknown-handle rule, the remote interpolation continuity and defer-until-
+    bracketed fixtures, and the per-entity counters. They compile against the same sources
+    as everything above, so the headless job is now their earliest gate too.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Tests/Editor/SnapshotResolverInterningTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotSpeedTests.cs" />
+    <Compile Include="../../Tests/Editor/WorldStateEntityCounterTests.cs" />
+    <Compile Include="../../Tests/Editor/RemoteInterpolationContinuityTests.cs" />
+    <Compile Include="../../Tests/Editor/DeferUntilBracketedTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotFreshnessTests.cs" />
+    <Compile Include="../../Tests/Editor/SessionBoundaryResetTests.cs" />
+    <Compile Include="../../Tests/Editor/EntityLifecycleTests.cs" />
+    <Compile Include="../../Tests/Editor/EntityReentryTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationScenarioTests.cs" />
+    <Compile Include="../../Tests/Editor/InterpolationConfigNormalizationTests.cs" />
+    <Compile Include="../../Tests/Editor/PredictorResetHistoryTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientStallInterpolationTests.cs" />
+  </ItemGroup>
+
+  <!--
+    The reconnect policy: a pure cause -> decision table (ReconnectPolicy) and the types it reads.
+    NetworkClient around it is UniTask-bound and stays Editor-only (ReconnectPolicyTests also
+    covers NetworkSettings, so it does too); ReconnectDecisionTableTests pins the table headless.
+  -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Client/ReconnectPolicy.cs" />
+    <Compile Include="../../Runtime/Client/NetworkException.cs" />
+    <Compile Include="../../Runtime/Client/SealedRefusalReason.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectCause.cs" />
+    <Compile Include="../../Runtime/Connection/DisconnectInfo.cs" />
+    <Compile Include="../../Tests/Editor/ReconnectDecisionTableTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

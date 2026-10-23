@@ -86,12 +86,15 @@ namespace Cuvara.Netcode.Tests.Editor
         public void ASkippedTickDoesNotChangeTheSecondsPerTickEstimate()
         {
             var clock = new InterpolationClock();
-            clock.NoteSnapshot(1, 0.0, 1, Config);
-            clock.NoteSnapshot(2, Nominal, 1, Config);
-            var settled = clock.SecondsPerTick;
 
-            // Tick 3's snapshot never arrives; tick 4 turns up at its own natural time.
-            clock.NoteSnapshot(4, Nominal * 3.0, 1, Config);
+            // Settled first: the first measurement spans InterpolationClock.FirstMeasurementSeconds.
+            long tick = 1;
+            for (; tick <= 8; tick++) clock.NoteSnapshot(tick, (tick - 1) * Nominal, 1, Config);
+            var settled = clock.SecondsPerTick;
+            Assume.That(settled, Is.EqualTo(Nominal).Within(1e-9), "precondition: measured");
+
+            // The next snapshot never arrives; the one after turns up at its own natural time.
+            clock.NoteSnapshot(tick + 1, tick * Nominal, 1, Config);
 
             Assert.That(clock.SecondsPerTick, Is.EqualTo(settled).Within(1e-9),
                 $"the estimate moved from {settled * 1000.0:F2} ms to " +
@@ -108,9 +111,13 @@ namespace Cuvara.Netcode.Tests.Editor
             var config = Config;
             var clock = new InterpolationClock();
 
-            // Seeded at the nominal rate, but the server is actually running at half of it.
+            // Seeded at the nominal rate, but the server is actually running at half of it. The
+            // first measurement waits for InterpolationClock.FirstMeasurementSeconds, so it is
+            // taken over the span from the first snapshot (here 0.27 s, two ticks).
             clock.NoteSnapshot(1, 0.0, 1, config);
+            Assume.That(Nominal * 2.0 * 2.0, Is.GreaterThanOrEqualTo(InterpolationClock.FirstMeasurementSeconds));
             clock.NoteSnapshot(2, Nominal * 2.0, 1, config);
+            clock.NoteSnapshot(3, Nominal * 2.0 * 2.0, 1, config);
 
             Assert.That(clock.SecondsPerTick, Is.EqualTo(Nominal * 2.0).Within(1e-9),
                 "the seed is a guess from a nominal rate and a tick gap that may not be " +
@@ -118,8 +125,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 "at a wrong rate for seconds after every join");
 
             // And thereafter it smooths.
-            clock.NoteSnapshot(3, Nominal * 3.0, 1, config);
-            var expected = Nominal * 2.0 * (1.0 - config.IntervalSmoothing) + Nominal * config.IntervalSmoothing;
+            // 1.5x nominal: inside the band the estimate (2x nominal) accepts, not on its edge.
+            clock.NoteSnapshot(4, Nominal * 2.0 * 2.0 + Nominal * 1.5, 1, config);
+            var expected = Nominal * 2.0 * (1.0 - config.IntervalSmoothing) + Nominal * 1.5 * config.IntervalSmoothing;
             Assert.That(clock.SecondsPerTick, Is.EqualTo(expected).Within(1e-9),
                 "after the first measurement the estimate must be smoothed, not replaced, " +
                 "or one jittery arrival would set the whole render rate");
@@ -298,9 +306,11 @@ namespace Cuvara.Netcode.Tests.Editor
             var config = Config;
             var buffer = new ArrayBuffer(Sample(10, 0f), Sample(11, 10f));
 
-            // MaxExtrapolation is 50 ms against a 66.7 ms tick: 0.75 of a tick, 7.5 units.
+            // MaxExtrapolation is 50 ms against a 66.7 ms tick: 0.75 of a tick, 7.5 units. The
+            // cap is held for ExtrapolationHold (150 ms, 2.25 ticks) before it eases back, so
+            // tick 13 (2 ticks past the newest) is still at the cap.
             SnapshotInterpolation.EvaluateAt(buffer, 11.5, Nominal, config, out var carried, out _);
-            SnapshotInterpolation.EvaluateAt(buffer, 99.0, Nominal, config, out var capped, out _);
+            SnapshotInterpolation.EvaluateAt(buffer, 13.0, Nominal, config, out var capped, out _);
 
             Assert.That(carried, Is.EqualTo(15f).Within(1e-3f),
                 "half a tick past the newest sample must carry half a segment, so a single " +
@@ -310,6 +320,73 @@ namespace Cuvara.Netcode.Tests.Editor
                 $"{config.MaxExtrapolation * 1000.0:F0} ms cap. Past the cap the client is " +
                 "inventing motion the server never confirmed, and the further it invents the " +
                 "more there is to take back");
+        }
+
+        /// <summary>
+        /// Long past the newest sample the entity is back on it. An entity that stopped gets no
+        /// new samples (the binder pushes none for an unchanged position), so holding at the cap
+        /// forever drew every stopped entity permanently past where it stopped.
+        /// </summary>
+        [Test]
+        public void LongPastTheNewestSample_TheExtrapolationSettlesBackOntoIt()
+        {
+            var config = Config;
+            var buffer = new ArrayBuffer(Sample(10, 0f), Sample(11, 10f));
+
+            SnapshotInterpolation.EvaluateAt(buffer, 99.0, Nominal, config, out var settled, out _);
+            Assert.That(settled, Is.EqualTo(10f).Within(1e-4f),
+                $"88 ticks past the newest sample the entity is drawn at {settled:F2}, not at the " +
+                "10 the server last confirmed; a stopped entity would be drawn there forever");
+
+            // Monotonic: from the cap back to the newest sample, never past either end.
+            float previous = float.MaxValue;
+            for (double tick = 11.75; tick <= 16.0; tick += 0.05)
+            {
+                SnapshotInterpolation.EvaluateAt(buffer, tick, Nominal, config, out var x, out _);
+                Assert.That(x, Is.LessThanOrEqualTo(previous + 1e-4f), $"moved forward again at tick {tick:F2}");
+                Assert.That(x, Is.InRange(10f - 1e-4f, 17.5f + 1e-4f));
+                previous = x;
+            }
+        }
+
+        [Test]
+        public void InfiniteHold_KeepsTheOldHoldAtTheCapBehaviour()
+        {
+            var config = Config;
+            config.ExtrapolationHold = double.PositiveInfinity;
+            SnapshotInterpolation.EvaluateAt(
+                new ArrayBuffer(Sample(10, 0f), Sample(11, 10f)), 99.0, Nominal, config, out var x, out _);
+            Assert.That(x, Is.EqualTo(17.5f).Within(1e-3f));
+        }
+
+        [Test]
+        public void ASegmentFasterThanTheSpeedGuard_IsATeleport_AndIsNotCarried()
+        {
+            var config = Config;
+            config.MaxExtrapolationSpeed = 100.0; // the segment below is 150 u/s
+            SnapshotInterpolation.EvaluateAt(
+                new ArrayBuffer(Sample(10, 0f), Sample(11, 10f)), 11.5, Nominal, config, out var guarded, out _);
+            Assert.That(guarded, Is.EqualTo(10f), "a teleport has no velocity to carry past the destination");
+
+            config.MaxExtrapolationSpeed = 200.0;
+            SnapshotInterpolation.EvaluateAt(
+                new ArrayBuffer(Sample(10, 0f), Sample(11, 10f)), 11.5, Nominal, config, out var carried, out _);
+            Assert.That(carried, Is.EqualTo(15f).Within(1e-3f), "motion under the guard is carried as before");
+        }
+
+        [Test]
+        public void AStaleLastSegment_IsNotCarried_ItsEntityStoodStillInBetween()
+        {
+            // 20 ticks (1.33 s) between the two samples: the entity stood still, then moved.
+            var config = Config;
+            SnapshotInterpolation.EvaluateAt(
+                new ArrayBuffer(Sample(10, 0f), Sample(30, 10f)), 30.5, Nominal, config, out var x, out _);
+            Assert.That(x, Is.EqualTo(10f), "a segment longer than MaxExtrapolationSpan is not a velocity");
+
+            config.MaxExtrapolationSpan = 0.0; // disabled: the old carry
+            SnapshotInterpolation.EvaluateAt(
+                new ArrayBuffer(Sample(10, 0f), Sample(30, 10f)), 30.5, Nominal, config, out var carried, out _);
+            Assert.That(carried, Is.EqualTo(10.25f).Within(1e-3f));
         }
 
         [Test]

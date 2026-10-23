@@ -1,3 +1,4 @@
+using System;
 namespace Cuvara.Netcode.Interpolation
 {
     /// <summary>
@@ -150,7 +151,9 @@ namespace Cuvara.Netcode.Interpolation
 
         /// <summary>
         /// Carries the last segment's direction past the newest sample, capped by
-        /// <see cref="InterpolationConfig.MaxExtrapolation"/>, then holds.
+        /// <see cref="InterpolationConfig.MaxExtrapolation"/>; holds at the cap for
+        /// <see cref="InterpolationConfig.ExtrapolationHold"/>; then eases back onto the newest
+        /// sample over <see cref="InterpolationConfig.ExtrapolationSettle"/>.
         /// </summary>
         /// <remarks>
         /// Reaching here means the stream has been quiet for longer than
@@ -160,6 +163,22 @@ namespace Cuvara.Netcode.Interpolation
         /// the extrapolated distance is absorbed by the next segment instead of being
         /// stepped back out of. That backward step is precisely what the old <c>t</c>
         /// clamp produced.
+        /// <para>
+        /// The settle exists because "quiet" also means "stopped": the binder pushes no sample
+        /// for an entity whose position did not change, so an entity that stopped is past its
+        /// newest sample permanently. Holding at the cap forever drew it permanently past where
+        /// it stopped (StoppedEntityConvergesTests).
+        /// </para>
+        /// <para>
+        /// <b>The settle moves the rendered entity backward</b>, along the segment it was carried
+        /// on, onto the newest sample. That is a deliberate trade and not the backward step the
+        /// note above rules out: it happens only after the stream has been quiet for the cap plus
+        /// <see cref="InterpolationConfig.ExtrapolationHold"/> (200 ms by default), its distance
+        /// is bounded by the cap (speed x 50 ms, 0.125 units for an enemy), and it is eased over
+        /// <see cref="InterpolationConfig.ExtrapolationSettle"/> rather than stepped. The
+        /// alternative is the entity drawn permanently past where the server says it stopped.
+        /// An entity that resumes moving before the hold expires never settles.
+        /// </para>
         /// </remarks>
         private static void ExtrapolatePastNewest<TBuffer>(in TBuffer buffer, int count, double renderTick,
                                                            double secondsPerTick, in InterpolationConfig config,
@@ -182,15 +201,48 @@ namespace Cuvara.Netcode.Interpolation
                 return;
             }
 
+            if (config.MaxExtrapolationSpan > 0.0 && span * secondsPerTick > config.MaxExtrapolationSpan)
+            {
+                // Stale segment: the entity was still, then moved. No velocity to carry.
+                return;
+            }
+
+            if (config.MaxExtrapolationSpeed > 0.0)
+            {
+                double dx = newest.X - previous.X;
+                double dy = newest.Y - previous.Y;
+                double speed = Math.Sqrt((dx * dx) + (dy * dy)) / (span * secondsPerTick);
+                if (speed > config.MaxExtrapolationSpeed)
+                {
+                    // A teleport, not motion: there is no velocity to carry.
+                    return;
+                }
+            }
+
             double overshoot = renderTick - newest.Tick;
-            double cap = config.MaxExtrapolation / secondsPerTick;
-            if (overshoot > cap) overshoot = cap;
             if (overshoot <= 0.0)
             {
                 return;
             }
 
-            double f = overshoot / span;
+            double cap = config.MaxExtrapolation / secondsPerTick;
+            double carried = Math.Min(overshoot, cap);
+            double settleStart = cap + (config.ExtrapolationHold / secondsPerTick);
+            if (overshoot > settleStart)
+            {
+                double settle = config.ExtrapolationSettle / secondsPerTick;
+                double remaining = settle <= 0.0 ? 0.0 : 1.0 - ((overshoot - settleStart) / settle);
+                if (remaining <= 0.0)
+                {
+                    return;
+                }
+
+                // Smoothstep: no velocity jump where the ease starts or where it lands.
+                remaining = remaining * remaining * (3.0 - (2.0 * remaining));
+                carried *= remaining;
+            }
+
+            double f = carried / span;
             x = (float)(newest.X + (newest.X - previous.X) * f);
             y = (float)(newest.Y + (newest.Y - previous.Y) * f);
         }

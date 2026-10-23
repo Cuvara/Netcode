@@ -2,6 +2,347 @@
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-23
+
+### Fixed
+
+- **A client stall no longer leaves a stream of corrections behind it.** `Advance` discards
+  frame time beyond `MaxCatchUpTicks`. Before this fix, a 0.5 s or 2 s stall therefore left the
+  base tick 15 or 105 ticks behind the server. Below the 2 s `HardResyncTicks`,
+  `SteerToServerTick` closed that gap at 0.5 tick per snapshot, which took about 14 s for a 2 s
+  stall. Meanwhile the reconcile corrected the local player by a whole step 16 to 80 times.
+  This dates from 0.20.0. Now the steer jumps the clock onto the server's tick line in two
+  cases. The first is a clamped frame since the last steer with an error outside the 8-tick
+  steering band. The second is a clock that is behind by more than the catch-up budget before
+  the clamp, because the stalled frame's snapshot arrives before that frame's `Advance`. In the
+  second case the jump is credited against the coming `Advance`. Pending inputs, holds and the
+  history are kept. Each jump is counted in the new `StallResyncs`, and in `HardResyncs`.
+  Ordinary jitter is steered as before. `ClientHitchRecoveryTests` fails before: the clock is
+  still 15 or 105 ticks off at the second snapshot after the stall. Now the clock is within one
+  tick, with at most one correction of two steps or more.
+- **The stall jump is made once, onto the server's real tick line, when the backlog is paced.**
+  Live, the snapshots sent during a stall arrive oldest first, about one every 10 ms. The jump
+  above was then decided against the oldest, stale snapshot. As the backlog kept coming, the
+  clock fell behind it and the jump fired again and again. A 2 s stall cost 6 to 15 corrections
+  of 16 ticks each (rpg-factory testlab S13, runs 20261022T194438Z-S13-vdqw and -q3rr).
+  `PredictionClockSteering.OnSnapshot` now compares each snapshot's arrival gap with its tick
+  gap at the advertised rate, within 0.5x to 2x:
+  - A **late** snapshot is steered to its tick plus the delay times the rate (the server's
+    current tick), so the jump happens on the first snapshot after the stall.
+  - A **bunched** snapshot behind a late one (the backlog) is not measured and not steered on.
+    Its reconcile is skipped, because its acknowledgement maps into the ticks the clock jumped
+    over.
+  - Late snapshots are not measured either: the staleness fit, the acknowledgement floor and
+    the rate scale describe the route, not a delivery stall.
+  - Early arrivals outside such an episode (jitter) are handled as before.
+
+  New counters: `LateSnapshots`, `BunchedSnapshots` and
+  `LocalMovePredictor.BunchedReconcilesSkipped`. `PredictionHarness` gains
+  `BacklogSpacingSeconds` and `MaxFrameDeltaSeconds`.
+  `ClientHitchRecoveryTests.AClientStall_WithTheBacklogDeliveredAtTheTransportsPace_*` fails
+  before (the clock is still 2 to 13 ticks off after the backlog) and now passes.
+- **The input recorded in a stall frame is moved to the end of the clamp (live S13 replayed).**
+  The client records a frame's input and then advances by the frame's delta. In the frame that ends
+  a stall, that delta is the stall itself.
+  - The input was stamped on the stall's first tick, and the clamped catch-up then ran 15 ticks after
+    it.
+  - The next frame's jump restamps only inputs on the clock's current tick, so it missed this one.
+  - The reconcile then replayed the input from the start of the clamp, on top of a server position
+    that did not contain it yet. That was one correction forward, and one back on the next
+    snapshot: 1.0 to 1.33 u each, at 5 of 6 stalls (rpg-factory testlab S13, runs
+    20261023T054220Z-S13-2v6e, -me2y, -wqel).
+  - A clamped `Advance` now moves the inputs recorded since the previous `Advance` to the clamp's
+    end tick (`InputsMovedToClampEnd`).
+
+  `LiveTraceReplayTests` replays the three recorded traces. The fixtures are under
+  `Tests/Editor/Fixtures/S13Traces`, with their provenance and the dev_arena map. With the change
+  off, every reconcile matches the recording bit for bit. With it on, all six stalls have no snap,
+  against 2/2/2/2/2/0 live, and nothing changes outside the stalls. The synthetic harness never
+  showed this, because it does not put the stall's delta in the same frame as the stall-end input.
+- **A client whose session the server dropped during a freeze reconnects within 5 s.** In the
+  S09 soak 20261023T040945Z-S09-e26z, three clients froze for about 4.5 s, and the server's KCP
+  dropped each session about 3.1 s in.
+  - Two clients failed on their own KCP dead-link counter about 3.5 s after waking.
+  - The third kept sending into the dropped session and reconnected only on its 40 s heartbeat
+    timeout (a 31.8 s snapshot gap). An acknowledgement read after a freeze is timed as one long
+    round trip, and the RTO went from 30 ms to seconds (`KcpSilenceTests`: 30 ms to 676 ms after a
+    0.6 s late read). The 20-retransmission dead link then takes minutes.
+  - Now `KcpClientSession` fails the session after `DefaultSilenceTimeoutMs` (5 s) without a
+    datagram, counted only while the client runs: a tick more than 250 ms after the previous one
+    is a freeze and is not counted. That fail is a `TransportError`, which reconnects as before.
+  - Why 5 s: the server sends a snapshot every 66.7 ms and pings every 10 s, and its own dead link
+    at the shared tuning is 3.45 to 4.6 s.
+  - New: `AwakeSilentMs`, `SilenceFailures` and `RtoMs` on `KcpClientSession`, and
+    `KcpTransport(…, silenceTimeoutMs)`.
+  - `KcpSilenceTests` fails before (still alive 6 s after waking).
+- **An entity removed and back within one frame is respawned, not interpolated from where it
+  left.** `WorldViewBinder` polls the world once per frame. When several snapshots merged in one
+  frame, which is what a backlog read after a freeze does, an id that left the area of interest
+  and came back was continued with its old sample ring. Live, such entities were first drawn
+  0.27 u from where they had left and about 4 u from where they were (S09 e26z
+  `entity_lifecycle`, all at the freeze-resume frames). `WorldState.TakeRemovedIds` now reports
+  the removals since the binder's last tick, and the binder despawns and respawns such an id
+  (`RespawnsWithinAFrame`). `EntityReentryTests` fails before (drawn from 9.40 after a return
+  at 40).
+- **A 500 ms stall costs one correction, not two.** The client uses a snapshot one frame after
+  it arrives. A stall's backlog, read in the stall frame, was therefore reconciled in the next
+  frame, after that frame's `Advance`. The restamp above took only inputs recorded since the last
+  `Advance`, so it missed the stall-end input. The first reconcile replayed that input from its
+  old tick, banked hold included: 17 steps forward, and the next snapshot took 15 back. That
+  happened in every 500 ms stall of three live runs (rpg-factory testlab S13, runs
+  20261023T014834Z-S13-bjzo, -82xx, -vf5j), while the 2 s stall was clean. Two changes:
+  - The restamp is deferred to the next reconcile. It covers the last two `Advance` windows and
+    the stall tick or the one before it, and it skips inputs the snapshot acknowledges.
+  - After a clamped frame, a clock error beyond 2 ticks is jumped rather than steered. A 0.4 s
+    stall left the clock 7 or 8 ticks behind, inside the 8-tick steering band, and steering it
+    out cost 3 to 5 corrections when the backlog was paced.
+
+  `PredictionHarness.SnapshotsVisibleNextFrame` reproduces the client's frame order.
+  `ClientHitchRecoveryTests.AClientStall_InTheClientsFullFrameOrder_*` (0.4 / 0.5 / 0.6 / 0.8 / 2 s)
+  fails before (about 28 steps, then 15 or 16 back) and now passes.
+- **A stall jump's credit survives Unity's late `deltaTime`.** `Time.deltaTime` reports the
+  previous frame, so a stall inside a frame reaches `Advance` one frame later. The jump made in
+  the stall frame spent its credit on that frame's 1.3 ms delta and dropped the rest. The next
+  frame then simulated the capped 0.333 s again (15 clamped ticks): the player stepped about
+  1.25 u forward, the clock ran 15 ticks ahead, and the next snapshot took both back. Every
+  stall cost two corrections (rpg-factory testlab S13, runs 20261023T010311Z-S13-3zhl, -j8xw,
+  -9zy5). The credit now lasts for two `Advance` calls (`JumpCreditSpentSeconds`).
+  `PredictionHarness.DeltaTimeLagsOneFrame` reproduces Unity's timing.
+  `ClientHitchRecoveryTests.AClientStall_WithUnitysLateDeltaTime_*` fails before (14 steps,
+  the clock 13 to 15 ticks ahead, then 14 back) and now passes.
+- **A first joiner learns the server's rate through a bunched join.** The render clock took
+  its first two snapshots as the first rate measurement outright. Live, they arrived 31 ms apart
+  for two ticks of a 30 Hz server (15.5 ms per tick). The real 33 ms then sat outside the 2x
+  band and was refused until the 5 s relearn. The first joiner's clock ran at about 60 ticks a
+  second, 93 ticks past the newest snapshot, then froze for about 4.5 s (S12, run
+  20261023T010228Z-S12-qiaw). Two changes:
+  - Until the rate is measured, the seed is the nominal interval over the tick gap actually
+    observed.
+  - The first measurement spans at least `InterpolationClock.FirstMeasurementSeconds` (0.25 s)
+    from the first snapshot.
+
+  `ClientStallInterpolationTests.AFirstJoiner_LearnsTheServersRate_ThroughABunchedJoin` (30 Hz
+  and 60 Hz) fails before and now passes.
+- **The input recorded in the frame that ends a stall moves with the jump.** The client
+  records a frame's input in `DotsWorldBridge.Update`, before `LocalPredictionSystem` steers on
+  and reconciles the frame's snapshot. In the frame that ends a stall, that input was therefore
+  stamped on the old tick line, a whole stall behind. The first reconcile replayed it from there,
+  on top of a server position that did not contain it yet. That moved the player 14 steps too
+  far, and the next snapshot took 12 of them back: two local corrections for one 2 s stall
+  (rpg-factory testlab S13, run 20261022T222006Z-S13-uwrf). A forward stall jump now moves the
+  inputs recorded since the last `Advance`, with the hold and tick-start markers they set, onto
+  the new line (`RestampedInputs`). Inputs recorded before the stall keep their ticks.
+  `PredictionHarness.InputBeforeSnapshot` reproduces the client's frame order.
+  `ClientHitchRecoveryTests.AClientStall_WithTheInputSampledBeforeTheSnapshot_*` fails before
+  (15 to 19 steps, then 16 back) and now passes.
+- **The render clock no longer races ahead after a stall.** `InterpolationClock` took the stall
+  gap (0.5 s per tick) and every backlog arrival (about 2.5 ms per tick) as rate samples. After a
+  2 s stall it measured about 3 ms per tick and ran 91 ticks past the newest snapshot. The 10 %
+  rate cap then needed about 15 s to bring it back, and every remote was held and stepped once
+  per snapshot meanwhile (S13: about 26 remote jumps a second, still 32 to 35 ticks ahead 12 s
+  later). Three changes:
+  - A rate sample is measured from the last accepted arrival, and is taken only within 0.5x to 2x
+    of the estimate when the arrival came on cadence. It relearns after 5 s of continuous
+    rejection.
+  - After an episode of arrivals off cadence, a clock more than 0.5 s behind is set forward once.
+    This is the DOTS path, whose frame delta Unity caps at 0.333 s.
+  - A clock past the newest sample by more than the extrapolation hold window, while snapshots
+    arrive on cadence, holds at the rate floor.
+
+  Both exceptions are forward-only. New counters: `RejectedIntervalSamples`, `ClockResyncs`,
+  `AheadHoldFrames` and `LastArrivalOnCadence`. `ClientStallInterpolationTests` fails before
+  (binder 105 ticks ahead after a 2 s stall, rate estimate 870 % off) and now passes.
+- **The KCP receive loop reads every queued datagram per wake.** It awaited one
+  `UdpClient.ReceiveAsync().AsUniTask()` per datagram, and that continues on Unity's main-thread
+  context: at most one datagram per frame. After a stall, the socket held the snapshots and the
+  server's retransmissions, and the 2 s backlog reached the world over 315 to 353 ms (S13). Now
+  `UdpDatagramDrain.Drain` reads the rest synchronously after each wake, bounded at 4096.
+  `TransportReceivePacingTests` reproduces the one-per-frame pacing headlessly, with a real
+  loopback socket and a frame-pumped synchronization context, and shows the drain reading the
+  backlog in one frame. New diagnostics: `KcpTransport.DatagramsRead`, `ReceiveWakeups` and
+  `MaxDatagramsPerWake`, surfaced as `GameSessionClient.TransportDatagramsRead`,
+  `TransportReceiveWakeups` and `TransportMaxDatagramsPerWake`.
+- **A graceful leave delivers its `disconnect` frame.** `WireConnection.Leave` queued the frame
+  and closed in the same call. The write loop was cancelled before it ran, and `NetworkClient`
+  disposed the socket right after. The game server noticed only on its KCP dead-link timeout
+  (rpg-factory testlab S08G). `LeaveAsync` now:
+  - sends the frame through the send queue (nothing queued after it is sent);
+  - waits for the write loop to write it, for at most 500 ms;
+  - waits for KCP to have it acknowledged, through the new `IFlushableTransport`, bounded by
+    `KcpClientSession.CloseFlushBudget` = `min(max(2 x RTO, 100 ms), 500 ms)`;
+  - then closes.
+
+  `Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
+  leave, which disposes it when done. `WireConnectionLeaveTests` (Editor) fails before: the
+  transport was closed without the frame being written. `KcpCloseFlushTests` (headless) pins the
+  KCP half: a frame whose first datagram is lost is acknowledged within the budget, and is lost
+  when the session is closed at once. New: `WireConnection.LeaveAcknowledged`,
+  `KcpClientSession.PendingSendSegments`, `Kcp.RtoMs`.
+- **`WorldState` drops a snapshot older than its tick.** The shared merger keeps `Tick`
+  monotonic but merged the entities of a late snapshot over newer ones. A remote that had
+  stopped since was then drawn at the stale position until the next keyframe. This is latent,
+  because KCP delivers in order. Such a snapshot is now dropped and counted in the new
+  `StaleSnapshotsDropped`. A new session starts from `Reset()`, and `NetworkClient` resets its
+  world on every connect and reconnect, so a server with lower ticks is accepted.
+  `SnapshotFreshnessTests` fails before.
+- **`WorldState` also drops a second snapshot at the tick it has merged.** The guard rejected
+  only `Tick < WorldState.Tick`, so a repeat at the current tick was merged and could put an
+  older entity state back (independent review R2-1). The server cannot send two different
+  snapshots at one world tick to one connection: it stages at most one per world tick, encodes
+  each staging once (keyframe or delta is decided in that encode), a resync promotes the next
+  staging, and coalescing keeps the newer tick. So an equal tick is a repeat and is now dropped
+  and counted in `StaleSnapshotsDropped`. A fresh or reset world still accepts its first
+  snapshot at any tick, tick 0 included. A snapshot aborted by the resolver (unknown handle)
+  never reaches the world, so the resync keyframe is applied, also at the aborted tick.
+  New `SnapshotFreshnessTests` cases fail before.
+- **`PredictionClockSteering.Reset()` forgets the whole session.** It reset only the tick-rate
+  and staleness estimators. `AckLatency`, the advertised tick rate and `RoundTripMs` survived,
+  so a steering reused across sessions timed new acknowledgements against old sends and kept
+  the old floor in its lead (independent review R2-3). They are now reset. The lifetime counter
+  `AckFloorRateFallbacks` is kept. `WorldViewBinder.Reset()` now calls `ClockSteering.Reset()`
+  and so also forgets `AckLatency`. New `AckFloorConversionRateTests` cases fail before.
+
+- **`default(InterpolationConfig)` now normalises to the default extrapolation shaping.**
+  `Normalized()` filled `ExtrapolationHold`, `ExtrapolationSettle` and `MaxExtrapolationSpan`
+  only when negative, because zero is a meaningful explicit value for each. The all-zero struct
+  therefore got hold 0, settle 0 and span 0, while `WorldViewBinder` ran with
+  `InterpolationConfig.Default`'s 0.15 s, 0.10 s and 0.25 s. `DotsNetcodeBootstrap.Install`
+  passes `default` and promises netcode's defaults (UnityDots audit finding F4). The all-zero
+  struct now takes `Default`'s values for these three fields. A configured value keeps its
+  zeros, and every other field keeps its rule (`MaxExtrapolation` 0 still means "never
+  extrapolate"). `InterpolationConfigNormalizationTests` fails before (hold 0.0, expected 0.15).
+- **`LocalMovePredictor.Reset()` forgets the history ring.** It cleared pending inputs, seeding
+  and counters, but not the 256-tick history. After a reconnect to a server with overlapping
+  ticks, a reconcile that named a tick before the new session's seed could hit an entry that the
+  previous session wrote, and "correct" by the distance between two unrelated positions
+  (finding H5). `PredictorResetHistoryTests` fails before (a history hit on tick 4890 of the old
+  session).
+- **`WorldViewBinder` restarts its render timeline when the world tick goes backwards.** A
+  caller that reset the `WorldState` for a new join but not the binder (the client's reconnect
+  path, finding F2) left `_lastWorldTick` and the interpolation clock in the old session's tick
+  space. With a server whose ticks restart lower, no sample reached the interpolator until the
+  new ticks passed the old ones. Every remote was drawn at its raw snapshot position, and
+  `RenderTick` stayed about 100 000 ticks ahead. A backwards world tick now restarts the render
+  clock, the sample rings and the tick-rate and staleness estimators. It is counted in the new
+  `TickLineRestarts`. Calling `Reset()` on a session boundary is still the correct fix.
+  `SessionBoundaryResetTests` fails before (`LastServerTick` 100236, expected 616).
+
+- **A correction made by the replay fallback is no longer applied a second time.** When a
+  snapshot's tick had left the 256-tick history ring (after a long client stall), the reconcile
+  replayed and moved the prediction correctly but recorded only the current tick; every older
+  history entry kept the uncorrected position, and the next snapshot acknowledging one of those
+  ticks measured the same error again and added it on top. Found by the rpg-factory testlab (run
+  20261022T091437Z-S07-c5hc): a respawn during a 5 s stall drew the local player 2.24 units past
+  the server, then snapped back. The replay path now writes each tick it replayed into the
+  history with its replayed position, and shifts older entries by the correction as the history
+  path always has. `ReplayRewindHistoryTests` (fails before: predicted (-1.63, 0.59)
+  against the server's (0.53, 0)).
+
+- **A predictor registered before the join can now take the server's tick rate, so the local
+  player no longer corrects in whole 15 Hz steps against a 60 Hz server.** `LocalMovePredictor`'s
+  timestep was fixed at construction, and a game builds its one predictor at the composition
+  root - before any join - with a constant: the client used `GameConstants.DefaultTickRate`
+  (15, the world rate) against a server simulating at 60 Hz, and nothing could correct it after
+  the join. The 15 Hz base clock, steered onto the 60 Hz tick line, fell 45 ticks a second
+  behind and hard-resynchronised about once a second (dropping pending inputs and the hold),
+  nearly every reconcile missed the history, `LastCorrection` sat at 0.333 (one 15 Hz step =
+  four 60 Hz steps) on about half of all snapshots with `SmoothedCorrections` climbing at the
+  snapshot rate, and a late snapshot burst drew the local player 1.64 units in one frame. Found
+  by the rpg-factory testlab (run 20261022T042952Z-S09-h87z; a replay of its input and snapshot
+  timings through a 15 Hz predictor reproduced the live corrections and rendered positions
+  exactly, at 60 Hz it corrected nothing of the kind). New `UseServerTickRate` (below); the
+  consumer must call it after every join. Covered by `PredictorTickRateTests`: on a 60 Hz server
+  with 13 Hz sends, a 12 ms round trip and two snapshots delivered 160 ms late in a burst, a
+  predictor built at 15 Hz hard-resyncs 37 times in 30 s, corrects by four or more steps on 212
+  of 404 reconciles and moves the rendered player 9x its normal per-frame distance in one frame;
+  built at 15 and told 60 it is bit-identical to one built at 60 (0 resyncs, max correction one
+  step, max per-frame motion 1.19x). The `NETCODE.md` wiring example that showed
+  `tickRate: 15` now shows the base rate and the adoption call.
+
+- **A remote entity that stops, or is teleported and then stays, is drawn where the server says
+  it is.** `SnapshotInterpolation` held the extrapolation at its 50 ms cap forever once the render
+  clock passed an entity's newest sample - and an entity that stopped never gets a newer sample,
+  because `WorldViewBinder` pushes none for an unchanged position. Every enemy that reached its
+  target was drawn 0.125 units past it (2.5 u/s x 50 ms), and a respawned player was drawn several
+  units past its spawn for as long as it stood there. Found by the rpg-factory testlab (three
+  rendered clients against an isolated stack; scenarios S02/S05). Covered by
+  `StoppedEntityConvergesTests` and new `InterpolationCoreTests` cases; both repro tests failed
+  on 0.47.0 (0.125 and 0.234 units past the stop/destination).
+
+### Added
+
+- **A call trace for replaying a live session headless.** It is a debugging aid, and it is opt-in.
+  - Set `LocalMovePredictor.Trace` and `PredictionClockSteering.Trace` to one `PredictorTraceSink`.
+    Every call is then reported with its arguments, in order, as a `PredictorTraceEvent`: the
+    reconciles as received, plus each reconcile's outcome, and the steering's snapshot, send,
+    tick-rate and round-trip inputs.
+  - `PredictorTraceReplayer` re-executes a recorded sequence. It can replay the predictor's calls
+    exactly, or replay the steering's inputs so that a steering change is judged.
+  - `AppendJson` / `TryParseJson` give one NDJSON line per event.
+  - Off, it costs a null check per call and allocates nothing. On, it builds one struct per call
+    and passes it by reference. Tracing never changes the outcome.
+  - `PredictorTraceTests` pins the record-then-replay identity (predictor and steering modes, and
+    through NDJSON), the on-versus-off identity, and the zero allocation.
+  - Why: three stall fixes passed the synthetic harness and not the live client (rpg-factory
+    testlab S13), because the harness modelled the client's frame order instead of recording it.
+- `LocalMovePredictor.StallResyncs`: clock jumps made for a client stall (also counted in
+  `HardResyncs`).
+- `WorldState.StaleSnapshotsDropped`: snapshots dropped because their tick was not above `Tick`
+  (older, or a repeat of the merged tick).
+- `WorldViewBinder.TickLineRestarts`: times the world tick went backwards and the render
+  timeline restarted on the new tick line.
+- `LocalMovePredictor.UseServerTickRate(uint advertisedTickRate)`: adopts the server's advertised
+  base-tick rate (`NetworkClient.TickRate` / `GameSessionClient.TickRate`). Call after every join,
+  before the first reconcile, next to `UseServerProtocol`. The same rate changes nothing; a new
+  rate re-derives `IntegrationTimestep`, `MaxBankedTicks` and `MaxCatchUpTicks` and resets the
+  predictor, keeping a server speed already adopted from a snapshot; zero ("not sent") keeps the
+  constructed rate. Additive: no existing signature
+  changes. `IsEnabled` now has a private setter so a predictor built with no rate is enabled by
+  the advertised one.
+- `PredictionClockSteering.PredictorRateDisagrees`: true when the measured tick stream contradicts
+  the predictor's rate by more than 15% - the mismatch above, named. Diagnostics only; the
+  measured rate is never adopted.
+- `PredictionHarness`: `PredictorTickRate`, `AdvertisedTickRate`, in-order downlink delivery and a
+  late-snapshot burst; `MaxFrameStep`, `HistoryMisses` and `CorrectionsAtLeastFourSteps` results.
+- `InterpolationConfig.ExtrapolationHold` (default 150 ms) and `ExtrapolationSettle` (default
+  100 ms): after the cap, the entity is held, then eased (smoothstep) back onto its newest sample.
+  The ease is a bounded backward motion (at most the 50 ms cap distance, only after 200 ms of
+  silence), chosen over drawing a stopped entity past its stop forever.
+  `ExtrapolationHold = double.PositiveInfinity` restores the old hold-at-the-cap behaviour.
+- `InterpolationConfig.MaxExtrapolationSpan` (default 250 ms): a last segment longer than this is
+  not a velocity (the entity stood still in between) and is not carried.
+- `InterpolationConfig.MaxExtrapolationSpeed` (default 0 = off): a last segment faster than this,
+  in world units per second, is a teleport and is not carried. Opt-in, because the evaluator
+  cannot know the game's speeds.
+- The headless suite now compiles `InterpolationCoreTests`, `WithheldEntityDoesNotFreezeTests` and
+  `StoppedEntityConvergesTests` (they are Unity-free).
+
+### Tests
+
+- 70 more headless tests (397 to 467, all passing). The Unity-free resolver,
+  interpolation-continuity and defer fixtures now also run headless. New fixtures:
+  - `ReplayHistoryStagingTests`: the staged replay of 0.48.0, which had no test of its own.
+  - `ServerStallRecoveryTests`
+  - `SessionBoundaryResetTests`
+  - `EntityLifecycleTests`
+  - `InterpolationScenarioTests`
+  - `KcpReliabilityTests`: loss, reorder, duplicates and a full receive window.
+  - `ClientHitchRecoveryTests`: a 0.5 s and a 2 s client stall, and a jitter guard.
+  - `SnapshotFreshnessTests`
+  - `ReconnectDecisionTableTests`: every disconnect cause against every close reason.
+  - `InterpolationConfigNormalizationTests`
+  - `PredictorResetHistoryTests`
+
+  `PredictionHarness` gains a client hitch, a server tick stall, frame jitter and a
+  per-reconcile correction log.
+
+### Documentation
+
+- `PREDICTION.md` and `INTERPOLATION.md` no longer name APIs that do not exist
+  (`PredictAndSend`, `RenderPosition`, `MaxSamples`, `ExtrapolationLimit`, the old
+  `InterpolationClock.Advance` signature). Their defaults, the staleness fit and which clock
+  it steers now match the code.
+
 ## [0.47.0] - 2026-10-09
 
 **Realtime gameplay is KCP/UDP only** (`feat/wire/kcp-only`, ADR-32 in

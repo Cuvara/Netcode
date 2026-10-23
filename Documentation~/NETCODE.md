@@ -280,6 +280,24 @@ shipping code.
 
 Both files run headlessly — see [Running the tests without Unity](#running-the-tests-without-unity).
 
+### KCP: one await per datagram (0.48.0)
+
+`KcpTransport`'s receive loop had the same shape for datagrams. It awaited one
+`UdpClient.ReceiveAsync().AsUniTask()` per datagram, and `AsUniTask` continues on the main-thread
+context, so it read at most one datagram per frame. That cost nothing at 15 snapshots a
+second. After a client stall, the socket held the stall's snapshots and the server's KCP
+retransmissions of them. The live client applied the 32-snapshot backlog of a 2 s stall over
+315 to 353 ms (rpg-factory testlab S13). At a vsynced 60 fps that would take seconds.
+
+After each wake the loop now reads every datagram already queued, synchronously
+(`UdpDatagramDrain.Drain`, bounded at 4096). A backlog therefore arrives in the frame the main
+thread wakes in. `TransportReceivePacingTests` reproduces the old pacing headlessly, with a real
+loopback socket continued through a frame-pumped synchronization context, and shows the drain
+reading the whole backlog in one frame. For the test lab, `KcpTransport.DatagramsRead`,
+`ReceiveWakeups` and `MaxDatagramsPerWake` are surfaced as `GameSessionClient.TransportDatagramsRead`,
+`TransportReceiveWakeups` and `TransportMaxDatagramsPerWake`. Sampled per frame, the difference
+of the first is the number of datagrams read that frame.
+
 ## Encoding: sniffed, not negotiated (ADR-9)
 
 The body is either Protobuf or legacy JSON, and the receiver tells them apart
@@ -578,6 +596,52 @@ eviction from a gateway build that predates `kick` — is reported as
 `server_shutdown` are the only reasons emitted today; anything else is handled
 generically.
 
+## A dropped session is detected by silence (0.48.0)
+
+KCP's dead link (20 unacknowledged retransmissions) is not enough after a client freeze. An
+acknowledgement read on waking is timed as one long round trip, the RTO grows to seconds, and the
+20 retransmissions then take minutes. A client whose session the server had already dropped kept
+sending for 31 s, until its heartbeat timeout (S09 soak e26z).
+
+`KcpClientSession` therefore fails the session after `DefaultSilenceTimeoutMs` (5 s) without any
+datagram from the server. The failure is a `TransportError`, and `ReconnectPolicy` reconnects as for
+any transport error.
+
+- **What counts:** only time while the client runs. A `Tick` more than 250 ms after the previous
+  one is a freeze and is not counted, so the freeze itself never trips it. The backlog read on
+  waking resets the count.
+- **Why 5 s:**
+  - A live session hears a snapshot every world tick (66.7 ms) and a ping every 10 s.
+  - The server's own KCP gives up after 3.45 s at a 30 ms RTO, or 4.6 s at 40 ms.
+  - 5 s is past both, and it is 75 world intervals.
+- **Before any datagram has arrived:** the check is off. The join timeout and the 60 s idle
+  timeout cover that phase.
+
+## Leaving: the disconnect frame is delivered (0.48.0)
+
+`WireConnection.Leave` used to queue the `disconnect` frame and close in the same call.
+Closing cancelled the write loop before it ran, so the frame was never written, and
+`NetworkClient` disposed the socket straight after. The game server only noticed on its KCP
+dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
+
+`LeaveAsync` now works in four steps:
+
+1. It sends the frame through the send queue, so the frame is sealed and written after
+   everything queued before it. Nothing queued after it is sent.
+2. It waits for the write loop to hand the frame to the transport, for at most
+   `LeaveWriteTimeoutMs` (500 ms).
+3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
+   acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
+   `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
+   acknowledgement, with a floor for the frame-bound ARQ timer and a cap so leaving never
+   waits on a bad link.
+4. It closes.
+
+`Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
+leave, which disposes it when done, so disposing the session no longer cuts it off.
+`LeaveAcknowledged` reports the outcome. TCP needs no flush: an orderly close sends what is
+queued before its FIN.
+
 ## Join tokens are single-use
 
 30-second TTL, one `jti` the game server consumes exactly once, and a `sid`
@@ -849,6 +913,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
@@ -950,6 +1018,10 @@ continuously; that is 33 ms at 15 Hz and is the price of a target nothing can ji
 |---|---|---|
 | `TargetDelay` | 100 ms | ~1.5 snapshot intervals at 15 Hz. One interval is the *minimum* that can work — below it there is often no newer sample to interpolate toward. The extra half-interval is the jitter margin, sized against the measured 8-13 ms RTT spread plus ±16 ms of scheduling jitter on a 60 Hz client. |
 | `MaxExtrapolation` | 50 ms | Under one interval. Reaching the newest sample at all means the stream has been quiet for longer than the jitter buffer was built for, so this is a real interruption, not jitter. A small carry-over stops one dropped packet reading as a freeze; more would be inventing motion. |
+| `ExtrapolationHold` | 150 ms | How long the cap is held before the entity eases back onto its newest sample. An entity that stops gets no newer sample (none is pushed for an unchanged position), so without it a stopped entity was drawn past where it stopped forever. Longer than a withheld snapshot leaves the clock past the newest sample, so slow replication bands still move smoothly. `double.PositiveInfinity` = old behaviour. |
+| `ExtrapolationSettle` | 100 ms | Duration of the ease back (smoothstep). Zero snaps back in one frame. |
+| `MaxExtrapolationSpan` | 250 ms | A last segment longer than this is not a velocity: the entity stood still in between, then moved or was teleported. Not carried. Zero disables the check. |
+| `MaxExtrapolationSpeed` | 0 (off) | World units per second; a faster last segment is a teleport (respawn, portal) and is not carried. Opt-in: set it a few times above the game's fastest legitimate speed. |
 | `ClockCatchUpRate` | 1.0 /s | 100 ms of clock error asks for a 10 % rate change. |
 | `MaxClockRateAdjust` | 0.10 | 10 % time dilation is below what a player sees on another avatar, and capping it is what keeps catch-up from being a snap under another name. |
 | `RingCapacity` | 8 | ~0.53 s at 15 Hz, far above the 1.5 intervals `TargetDelay` needs, so a batched TCP read is buffered rather than dropped. Also the size that keeps a DOTS `DynamicBuffer` in chunk memory (8 × 24 B). |
@@ -1008,8 +1080,14 @@ any of this.**
 ### Wiring it up
 
 ```csharp
+// The tick rate is the server's BASE tick rate (60 Hz by default), not its 15 Hz
+// world/snapshot rate. Registered before the join, so a placeholder here...
 var predictor = new LocalMovePredictor(
-    new PredictionSettings(tickRate: 15, speed: 5f, MapBounds.Default));
+    new PredictionSettings(tickRate: 60, speed: 5f, MapBounds.Default));
+
+// ...replaced by the server's advertised rate after EVERY join, next to the model:
+predictor.UseServerProtocol(client.ServerProtocolVersion);
+predictor.UseServerTickRate(client.TickRate);
 
 var binder = new WorldViewBinder(view, predictor);
 
@@ -1027,6 +1105,28 @@ calls `SeedBaseTick` — **if you bind views yourself rather than through the bi
 call is yours to make**; see "The prediction contract you must not 'fix'" below. **You must
 call `AdvanceFrame` once per rendered frame.** Pass no predictor and the local entity
 renders at the newest received position, which is 0.4.0's behaviour.
+
+### The predictor's tick rate is the server's, adopted after the join
+
+`LocalMovePredictor` steps once per **base** tick and labels its history with base ticks in
+the server's tick space (snapshot `tick`, `ack_applied_tick`, `SeedBaseTick`). Its rate must be
+the rate the server simulates at — `GameSessionClient.TickRate` / `NetworkClient.TickRate`
+from the join reply — and a composition root that registers the predictor before any join
+cannot know it. **Call `UseServerTickRate(client.TickRate)` after every join, before the first
+reconcile**, next to `UseServerProtocol`. Same rate: nothing changes, so it is safe on every
+join. Different rate: the timestep, `MaxBankedTicks` and `MaxCatchUpTicks` are re-derived and the
+predictor is `Reset`. Zero ("not sent") keeps the constructed rate.
+
+**What skipping it costs, measured** (rpg-factory testlab run `20261022T042952Z-S09-h87z`): a
+game built its predictor with `GameConstants.DefaultTickRate` — **15**, the world rate —
+against a 60 Hz server. The 15 Hz clock, steered onto a 60 Hz tick line, fell 45 ticks a
+second behind and hard-resynchronised about once a second (dropping pending inputs and the
+hold); nearly every reconcile missed the history; corrections came in whole 15 Hz steps
+(`LastCorrection` **0.333** = four 60 Hz steps, on about half of all snapshots,
+`SmoothedCorrections` climbing at the snapshot rate); and a burst of late snapshots drew the
+local player **1.64 units in one frame**. No counter names that as a rate problem;
+`PredictionClockSteering.PredictorRateDisagrees` now does (the measured tick stream against
+`TickRateHz`, 15% tolerance). Pinned by `PredictorTickRateTests`.
 
 ### Why `AdvanceFrame` is not optional
 

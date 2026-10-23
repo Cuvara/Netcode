@@ -44,7 +44,7 @@ namespace Cuvara.Netcode.Transport
     /// its constructor throws <see cref="NotSupportedException"/>. There is no fallback.
     /// </para>
     /// </remarks>
-    public sealed class KcpTransport : ITransport
+    public sealed class KcpTransport : ITransport, IFlushableTransport
     {
         /// <summary>The message a WebGL build gets instead of a transport.</summary>
         public const string WebGlNotSupportedMessage =
@@ -64,11 +64,18 @@ namespace Cuvara.Netcode.Transport
 
         private readonly string _transportKey;
         private readonly int _idleTimeoutMs;
+        private readonly int _silenceTimeoutMs;
 
         private UdpClient _udp;
         private KcpClientSession _session;
         private CancellationTokenSource _cts;
         private int _closed;
+
+        // Scratch for the synchronous drain. Main thread only, like the loop that uses it.
+        private readonly byte[] _drainBuffer = new byte[MtuLimit];
+        private long _datagramsRead;
+        private long _receiveWakeups;
+        private int _maxDatagramsPerWake;
 
         public string RemoteEndPoint { get; private set; } = string.Empty;
 
@@ -91,6 +98,20 @@ namespace Cuvara.Netcode.Transport
         public string FailureReason => _session?.FailureReason;
 
         /// <summary>
+        /// Datagrams read off the socket, accepted or not. Sampled once per frame, the difference
+        /// is the datagrams read that frame: a diagnostic for the test lab, because a receive path
+        /// that reads one per frame looks healthy at the snapshot rate and turns every stall into
+        /// a paced backlog (see <see cref="UdpDatagramDrain"/>).
+        /// </summary>
+        public long DatagramsRead => Interlocked.Read(ref _datagramsRead);
+
+        /// <summary>Times the receive loop woke with at least one datagram.</summary>
+        public long ReceiveWakeups => Interlocked.Read(ref _receiveWakeups);
+
+        /// <summary>The most datagrams one wake has read.</summary>
+        public int MaxDatagramsPerWake => Volatile.Read(ref _maxDatagramsPerWake);
+
+        /// <summary>
         /// Creates a KCP transport with optional encryption.
         /// </summary>
         /// <param name="transportKey">
@@ -103,13 +124,17 @@ namespace Cuvara.Netcode.Transport
         /// <see cref="KcpClientSession.DefaultIdleTimeoutMs"/> by default.
         /// </param>
         /// <exception cref="NotSupportedException">On WebGL, which has no UDP.</exception>
-        public KcpTransport(string transportKey = null, int idleTimeoutMs = KcpClientSession.DefaultIdleTimeoutMs)
+        public KcpTransport(
+            string transportKey = null,
+            int idleTimeoutMs = KcpClientSession.DefaultIdleTimeoutMs,
+            int silenceTimeoutMs = KcpClientSession.DefaultSilenceTimeoutMs)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
             throw new NotSupportedException(WebGlNotSupportedMessage);
 #else
             _transportKey = transportKey;
             _idleTimeoutMs = idleTimeoutMs;
+            _silenceTimeoutMs = silenceTimeoutMs;
 #endif
         }
 
@@ -183,7 +208,9 @@ namespace Cuvara.Netcode.Transport
                 SendDatagram,
                 NowMs,
                 $"{host}:{port} (udp {address})",
-                _idleTimeoutMs);
+                _idleTimeoutMs,
+                KcpClientSession.MaxStreamBytes,
+                _silenceTimeoutMs);
 
             _cts = new CancellationTokenSource();
             ReceiveLoopAsync(_cts.Token).Forget();
@@ -249,6 +276,33 @@ namespace Cuvara.Netcode.Transport
             return UniTask.CompletedTask;
         }
 
+        /// <summary>
+        /// Waits until the peer has acknowledged everything written, for at most
+        /// <see cref="KcpClientSession.CloseFlushBudgetMs"/>. The receive loop and the ARQ timer
+        /// keep running meanwhile, so a lost datagram is resent and its acknowledgement read.
+        /// </summary>
+        public async UniTask<bool> FlushAsync(CancellationToken cancellationToken)
+        {
+            var session = _session;
+            if (session == null)
+            {
+                return false;
+            }
+
+            long deadline = NowMs() + session.CloseFlushBudgetMs;
+            while (session.PendingSendSegments > 0)
+            {
+                if (Volatile.Read(ref _closed) != 0 || session.IsFailed || NowMs() >= deadline)
+                {
+                    return false;
+                }
+
+                await UniTask.Delay(1, DelayType.Realtime, PlayerLoopTiming.Update, cancellationToken);
+            }
+
+            return true;
+        }
+
         public void Close()
         {
             if (Interlocked.Exchange(ref _closed, 1) != 0) return;
@@ -292,14 +346,25 @@ namespace Cuvara.Netcode.Transport
                     continue;
                 }
 
+                int read = 1;
                 try
                 {
                     _session.Input(result.Buffer, result.Buffer.Length);
+
+                    // And everything queued behind it, now: one await per datagram reads one
+                    // datagram per frame, because the await resumes on the player loop.
+                    read += UdpDatagramDrain.Drain(_udp.Client, _drainBuffer, _session);
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Close() disposed the crypto while this datagram was in flight.
+                    // Close() disposed the socket or the crypto while this datagram was in flight.
                     break;
+                }
+                finally
+                {
+                    Interlocked.Add(ref _datagramsRead, read);
+                    Interlocked.Increment(ref _receiveWakeups);
+                    if (read > _maxDatagramsPerWake) Volatile.Write(ref _maxDatagramsPerWake, read);
                 }
             }
         }

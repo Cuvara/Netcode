@@ -44,6 +44,69 @@ namespace Cuvara.Netcode.Prediction
         /// </summary>
         private float _advertisedHz;
 
+        // The previous snapshot OnSnapshot saw, for the cadence test. Session state.
+        private bool _haveLastSnapshot;
+        private long _lastSnapshotTick;
+        private double _lastSnapshotSeconds;
+
+        // Between a late snapshot and the first one back on cadence: the backlog's episode.
+        private bool _recovering;
+
+        /// <summary>
+        /// Snapshots that were not steered on because they arrived bunched up behind an earlier
+        /// one: the backlog a stall leaves. Lifetime total, like <see cref="AckFloorRateFallbacks"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why the arrival pattern matters to the steering.</b> Steering moves the clock onto a
+        /// snapshot's tick plus the lead, which is right only when the snapshot is about as old as
+        /// snapshots usually are. After a client stall the transport delivers the backlog oldest
+        /// first, so the first snapshot the client sees is the stall's length old, and the ones
+        /// behind it arrive four ticks apart every few milliseconds. The stall jump
+        /// (<see cref="LocalMovePredictor.StallResyncs"/>) was decided against those stale ticks:
+        /// the clamp flag was consumed with no jump or with a jump to a stale tick, and as the
+        /// backlog kept coming the clock fell behind it and the "behind by more than the catch-up
+        /// budget" trigger fired again and again, a 16-tick jump each time. Live that was 6 to 15
+        /// hard corrections for one 2 s stall, every one a multiple of 16 ticks (rpg-factory
+        /// testlab S13, runs 20261022T194438Z-S13-vdqw and 20261022T195013Z-S13-q3rr).
+        /// </para>
+        /// <para>
+        /// <b>What is done instead.</b> Each snapshot's arrival gap is compared with its tick gap
+        /// at the advertised rate, within the band the render clock uses
+        /// (<see cref="Interpolation.InterpolationClock.MinSampleRatio"/>):
+        /// </para>
+        /// <list type="bullet">
+        /// <item><b>Late</b> (above the band): the snapshot was delayed, not the server. The
+        /// server's tick now is this snapshot's tick plus the delay times the rate, and that is
+        /// what the clock is steered to. After a stall this is the first snapshot read, so the
+        /// stall jump happens there, once, onto the server's real tick line, before the client
+        /// records inputs on the stale one: the moment the D1 fix was designed and tested
+        /// for.</item>
+        /// <item><b>Bunched</b> (below the band): the backlog. Not steered on; counted here.</item>
+        /// <item><b>On cadence</b>: steered as before.</item>
+        /// </list>
+        /// <para>
+        /// The delay is measured against the previous arrival, which was on time in every case
+        /// this exists for. A frame longer than the snapshot interval merges snapshots, and the
+        /// binder hands the newest over with the whole tick gap, so a slow but steady client stays
+        /// on cadence. Everything else <see cref="OnSnapshot"/> measures still sees every snapshot:
+        /// the staleness and acknowledgement floors are minimum envelopes that a late sample cannot
+        /// lower.
+        /// </para>
+        /// <para>
+        /// <b>Why not the staleness fit.</b> It predicts the server's tick from the client's clock
+        /// too, but only once a line is fitted, about eight seconds into a session, and a stall in
+        /// those first seconds (a loading client) is the likeliest one.
+        /// </para>
+        /// </remarks>
+        public int BunchedSnapshots { get; private set; }
+
+        /// <summary>
+        /// Snapshots delivered late, whose delay was added to their tick before steering (see
+        /// <see cref="BunchedSnapshots"/>). Lifetime total.
+        /// </summary>
+        public int LateSnapshots { get; private set; }
+
         /// <summary>Creates the steering with no predictor known yet; <see cref="OnSnapshot"/> supplies one.</summary>
         public PredictionClockSteering()
         {
@@ -76,7 +139,25 @@ namespace Cuvara.Netcode.Prediction
         /// Set by the consumer; 0 until then, which makes the steering target degrade to one
         /// snapshot interval rather than to something invented.
         /// </remarks>
-        public long RoundTripMs { get; set; }
+        public long RoundTripMs
+        {
+            get => _roundTripMs;
+            set
+            {
+                Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringRoundTripMs, a: value));
+                _roundTripMs = value;
+            }
+        }
+
+        private long _roundTripMs;
+
+        /// <summary>
+        /// Receives this steering's inputs (<see cref="OnSnapshot"/> begin and end, sends, tick-rate
+        /// samples, the round trip, resets); null traces nothing. Set it to the same sink as the
+        /// predictor's <see cref="LocalMovePredictor.Trace"/> so one ordered record holds both. See
+        /// <see cref="PredictorTraceEvent"/>.
+        /// </summary>
+        public PredictorTraceSink Trace { get; set; }
 
         /// <summary>
         /// Measures how old the newest snapshot is by the time it is used. See
@@ -148,12 +229,29 @@ namespace Cuvara.Netcode.Prediction
         /// available. Counted so a fallback that never stops being one is visible.
         /// </summary>
         /// <remarks>
-        /// A handful at the start of a session is the normal case — the tick rate estimator
+        /// A lifetime total: <see cref="Reset"/> keeps it. A handful at the start of each session
+        /// is the normal case — the tick rate estimator
         /// needs snapshots before it can report. A count that keeps climbing means the estimator
         /// never reached an estimate, and every floor on that session was converted with a rate
         /// nobody measured.
         /// </remarks>
         public int AckFloorRateFallbacks { get; private set; }
+
+        /// <summary>
+        /// True when the rate the predictor simulates at (<see cref="LocalMovePredictor.TickRateHz"/>)
+        /// is contradicted by the server's tick stream measured off the wire
+        /// (<see cref="TickRateEstimator.Disagrees"/>, 15% tolerance). False until the estimator has
+        /// an estimate.
+        /// </summary>
+        /// <remarks>
+        /// Diagnostics, and deliberately nothing more: the measured rate is approximate and is never
+        /// adopted. True means the predictor was built at a rate that is not the server's and nobody
+        /// handed it the advertised one -- call <see cref="LocalMovePredictor.UseServerTickRate"/>
+        /// after the join. A predictor built at the 15 Hz world rate against a 60 Hz server reads
+        /// true within a second and corrects by a whole 15 Hz step (0.333 units at 5 u/s) on about
+        /// half of all snapshots.
+        /// </remarks>
+        public bool PredictorRateDisagrees => TickRate.Disagrees((int)_advertisedHz);
 
         /// <summary>
         /// Records that an input has just been sent, so its acknowledgement can be timed.
@@ -169,15 +267,21 @@ namespace Cuvara.Netcode.Prediction
         /// the reconcile returns one step of correction per base tick of it at every start and
         /// stop. Measured live at 2.00 steps against an acknowledgement floor of 1.28 ticks.
         /// </remarks>
-        public void NoteInputSent(long inputTick, double nowSeconds) =>
+        public void NoteInputSent(long inputTick, double nowSeconds)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringNoteInputSent, a: inputTick, t: nowSeconds));
             AckLatency.RecordSent(inputTick, nowSeconds);
+        }
 
         /// <summary>
         /// Folds a new snapshot's base tick into <see cref="TickRate"/>. Call once per new
         /// snapshot, before <see cref="OnSnapshot"/>.
         /// </summary>
-        public void SampleTickRate(long worldTick, double nowSeconds) =>
+        public void SampleTickRate(long worldTick, double nowSeconds)
+        {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringSampleTickRate, a: worldTick, t: nowSeconds));
             TickRate.Sample(worldTick, nowSeconds);
+        }
 
         /// <summary>
         /// Seeds, measures and steers <paramref name="predictor"/>'s clock for one new snapshot.
@@ -188,15 +292,79 @@ namespace Cuvara.Netcode.Prediction
         /// <param name="nowSeconds">Now, in seconds, from the clock <see cref="NoteInputSent"/> uses.</param>
         public void OnSnapshot(LocalMovePredictor predictor, long worldTick, long ackTick, double nowSeconds)
         {
+            var trace = Trace;
+            if (trace == null)
+            {
+                OnSnapshotBody(predictor, worldTick, ackTick, nowSeconds);
+                return;
+            }
+
+            trace(new PredictorTraceEvent(PredictorCall.SteeringOnSnapshotBegin, a: worldTick, b: ackTick, t: nowSeconds));
+            try
+            {
+                OnSnapshotBody(predictor, worldTick, ackTick, nowSeconds);
+            }
+            finally
+            {
+                trace(new PredictorTraceEvent(PredictorCall.SteeringOnSnapshotEnd, a: worldTick));
+            }
+        }
+
+        private void OnSnapshotBody(LocalMovePredictor predictor, long worldTick, long ackTick, double nowSeconds)
+        {
             if (predictor == null || !predictor.IsEnabled)
             {
                 return;
             }
 
+
             _advertisedHz = predictor.TickRateHz;
 
             // Idempotent: only the first positive tick of a session takes effect.
             predictor.SeedBaseTick(worldTick);
+
+            // How this snapshot was delivered (see BunchedSnapshots), at the predictor's rate (the
+            // advertised one, exact), unless the measured rate says it is grossly wrong (a
+            // predictor constructed at the world rate, PredictorTickRateTests). Not the measured
+            // rate itself: it is a session average that has already taken this snapshot in, and a
+            // snapshot two seconds late reads it 14 % low 14 s into a session, which put the stall
+            // jump 17 ticks short.
+            float cadenceHz = predictor.TickRateHz;
+            if (TickRate.HasEstimate
+                && (TickRate.EstimatedHz > cadenceHz * 2f || TickRate.EstimatedHz * 2f < cadenceHz))
+            {
+                cadenceHz = TickRate.EstimatedHz;
+            }
+
+            long delayTicks = DeliveryDelayTicks(worldTick, nowSeconds, cadenceHz);
+            _haveLastSnapshot = true;
+            _lastSnapshotTick = worldTick;
+            _lastSnapshotSeconds = nowSeconds;
+
+            if (delayTicks < 0 && _recovering)
+            {
+                // The backlog behind a late snapshot: neither measured, steered on nor reconciled
+                // against. Outside such an episode a snapshot that merely arrived early (jitter)
+                // is treated as on cadence, exactly as before: skipping the early arrivals would
+                // bias the staleness floor, which is a minimum over them.
+                BunchedSnapshots++;
+                predictor.SkipReconcileForBunchedSnapshot(worldTick, TargetLeadTicks());
+                return;
+            }
+
+            if (delayTicks > 0)
+            {
+                // Late: steered to where the server is now. Not measured: its age is the delivery
+                // stall, not the route, and the staleness fit, the acknowledgement floor and the
+                // rate scale below all describe the route. Measured, a 2 s stall's samples left
+                // the clock three ticks fast for a second after the backlog.
+                LateSnapshots++;
+                _recovering = true;
+                predictor.SteerToServerTick(worldTick + delayTicks, TargetLeadTicks());
+                return;
+            }
+
+            _recovering = false;
 
             // ...and keep them together afterwards. Seeding aligns the two
             // clocks once, at join; from then on each counts base ticks off its
@@ -290,6 +458,40 @@ namespace Cuvara.Netcode.Prediction
             }
 
             predictor.SteerToServerTick(worldTick, TargetLeadTicks());
+        }
+
+        /// <summary>
+        /// How late this snapshot was delivered, in ticks: 0 on cadence, positive when it was held
+        /// up, -1 when it arrived bunched up behind the previous one. See <see cref="BunchedSnapshots"/>.
+        /// </summary>
+        private long DeliveryDelayTicks(long worldTick, double nowSeconds, float tickRateHz)
+        {
+            if (!_haveLastSnapshot || tickRateHz <= 0f)
+            {
+                return 0;
+            }
+
+            long ticks = worldTick - _lastSnapshotTick;
+            if (ticks <= 0)
+            {
+                // A new session's tick line without a Reset: not a delivery question.
+                return 0;
+            }
+
+            double expected = (double)ticks / tickRateHz;
+            double gap = nowSeconds - _lastSnapshotSeconds;
+            double ratio = gap / expected;
+            if (ratio < Interpolation.InterpolationClock.MinSampleRatio)
+            {
+                return -1;
+            }
+
+            if (ratio <= Interpolation.InterpolationClock.MaxSampleRatio)
+            {
+                return 0;
+            }
+
+            return (long)Math.Round((gap - expected) * tickRateHz);
         }
 
         /// <summary>
@@ -518,14 +720,40 @@ namespace Cuvara.Netcode.Prediction
         }
 
         /// <summary>
-        /// Forgets the tick-rate and staleness measurements: they describe one route to one
-        /// server, and carrying them across a session boundary measures the new connection against
-        /// the old one's best case.
+        /// Forgets everything that describes the session: the tick-rate, staleness and
+        /// acknowledgement-latency measurements, the advertised tick rate and the round trip.
+        /// They describe one route to one server, and carrying them across a session boundary
+        /// measures the new connection against the old one's best case.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Session state, reset here.</b> <see cref="AckLatency"/> holds the sent-input
+        /// timestamps and the floor of the old route: kept, a new session's first
+        /// acknowledgements would be timed against inputs the old server received, and its lead
+        /// would carry the old floor until enough new samples displaced it. The advertised rate
+        /// is the old server's <c>tick_rate</c>; it returns to zero ("no predictor known") and
+        /// <see cref="OnSnapshot"/> sets it again from the predictor before the first
+        /// acknowledgement is converted. <see cref="RoundTripMs"/> is the old connection's; the
+        /// consumer sets the new one.
+        /// </para>
+        /// <para>
+        /// <b>Lifetime counters, kept.</b> <see cref="AckFloorRateFallbacks"/> is a total over
+        /// the life of this object, as a consumer reports it: a reset would hide the fallbacks of
+        /// every session but the last one.
+        /// </para>
+        /// </remarks>
         public void Reset()
         {
+            Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SteeringReset));
             TickRate.Reset();
             Staleness.Reset();
+            AckLatency.Reset();
+            _advertisedHz = 0f;
+            _roundTripMs = 0L;
+            _haveLastSnapshot = false;
+            _lastSnapshotTick = 0;
+            _lastSnapshotSeconds = 0.0;
+            _recovering = false;
         }
     }
 }

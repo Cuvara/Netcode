@@ -173,6 +173,9 @@ namespace Cuvara.Netcode.Transport
 
         public int WaitSnd => _sndBuf.Count + _sndQueue.Count;
 
+        /// <summary>The current retransmission timeout, in milliseconds (kcp-go <c>rx_rto</c>).</summary>
+        public uint RtoMs => _rxRto;
+
         // ── Application data in and out ──────────────────────────────────────────
 
         public int PeekSize()
