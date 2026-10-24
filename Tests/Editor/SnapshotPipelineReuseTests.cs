@@ -120,7 +120,7 @@ namespace Cuvara.Netcode.Tests.Editor
             var second = (SnapshotMessage)codec.DecodeBody(SnapshotBody(true, 2, bare)).Payload;
             var e = second.Entities[0];
 
-            Assert.That(e.Speed, Is.Zero, "stale speed would silently override the spawn default");
+            Assert.That(e.Speed, Is.NaN, "absent speed reads as NaN (not sent), never the previous frame's 4.5");
             Assert.That(e.FacingBrad, Is.Zero);
             Assert.That(e.Action, Is.EqualTo(default(SimAction)));
             Assert.That(e.ActionSeq, Is.Zero, "a stale action_seq replays a swing that never happened");
