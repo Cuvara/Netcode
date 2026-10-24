@@ -34,6 +34,8 @@ namespace Cuvara.Netcode.Client
 
         private WireConnection _connection;
         private bool _awaitingKeyframe;
+        private long _keyframeRequestedAtMs;
+        private const long KeyframeRetryIntervalMs = 2000;
 
         public GameSessionClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log)
         {
@@ -615,6 +617,7 @@ namespace Cuvara.Netcode.Client
             }
 
             _awaitingKeyframe = true;
+            _keyframeRequestedAtMs = _settings.MonotonicClock();
             _connection.Send(MsgType.Resync, new ResyncRequest());
         }
 
@@ -684,12 +687,19 @@ namespace Cuvara.Netcode.Client
 
         private void OnFrame(WireFrame frame)
         {
+            if (_awaitingKeyframe && _settings.MonotonicClock() - _keyframeRequestedAtMs >= KeyframeRetryIntervalMs)
+            {
+                _awaitingKeyframe = false;
+                _log.Warn("keyframe resync timed out; requesting another keyframe");
+                RequestResync();
+            }
+
             if (frame.Type == MsgType.CommandResult)
             {
                 if (frame.Payload is CommandResult result)
                 {
                     _commands.Complete(result);
-                    CommandResultReceived?.Invoke(result);
+                    InvokeSafely(CommandResultReceived, result, nameof(CommandResultReceived));
                 }
 
                 return;
@@ -699,7 +709,7 @@ namespace Cuvara.Netcode.Client
             {
                 if (frame.Payload is ServerPush push)
                 {
-                    ServerPushReceived?.Invoke(push);
+                    InvokeSafely(ServerPushReceived, push, nameof(ServerPushReceived));
                 }
 
                 return;
@@ -745,7 +755,7 @@ namespace Cuvara.Netcode.Client
             }
 
             var handler = SnapshotReceived;
-            handler?.Invoke(resolved);
+            InvokeSafely(handler, resolved, nameof(SnapshotReceived));
         }
 
         private void OnClosed(DisconnectInfo info)
@@ -754,7 +764,12 @@ namespace Cuvara.Netcode.Client
             // never observes a command still pending on the dead connection.
             _commands.FailAll(CommandChannelErrors.ConnectionClosed);
             _log.Info($"game session closed: {info}");
-            Closed?.Invoke(info);
+            InvokeSafely(Closed, info, nameof(Closed));
+        }
+
+        private void InvokeSafely<T>(Action<T> handlers, T value, string eventName)
+        {
+            SubscriberInvoker.InvokeSafely(handlers, value, eventName, _log);
         }
     }
 }

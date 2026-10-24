@@ -53,6 +53,35 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void SteadyStateSealAndOpen_AllocatesUnder32BytesPerDatagram()
+        {
+            const int payloadSize = 1200;
+            const int warmup = 2000;
+            const int measuredPairs = 10000;
+            using var crypto = KcpCrypto.TryCreate("allocation-probe-key");
+            var packet = new byte[KcpCrypto.HeaderSize + payloadSize];
+
+            for (int i = 0; i < warmup; i++)
+            {
+                crypto.Seal(packet, 0, packet.Length);
+                Assert.That(crypto.Open(packet, 0, packet.Length), Is.EqualTo(payloadSize));
+            }
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < measuredPairs; i++)
+            {
+                crypto.Seal(packet, 0, packet.Length);
+                if (crypto.Open(packet, 0, packet.Length) != payloadSize)
+                    Assert.Fail("steady-state packet failed checksum");
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            double bytesPerPair = (double)allocated / measuredPairs;
+
+            TestContext.WriteLine($"Seal+Open allocations: {allocated} B / {measuredPairs} pairs = {bytesPerPair:F2} B/pair");
+            Assert.That(bytesPerPair, Is.LessThan(32d), "steady-state Seal+Open must stay below 32 B per datagram pair");
+        }
+
+        [Test]
         public void WrongKey_FailsChecksum()
         {
             using var sender = KcpCrypto.TryCreate("key-A");
@@ -104,6 +133,18 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(derived[0], Is.EqualTo(0x01));
             Assert.That(derived[1], Is.EqualTo(0x23));
             Assert.That(derived[2], Is.EqualTo(0x45));
+        }
+
+        [Test]
+        public void DisposedCrypto_ReturnsClosedResultsWithoutTouchingTheTransform()
+        {
+            var crypto = KcpCrypto.TryCreate("test-key-for-dispose");
+            var packet = new byte[KcpCrypto.HeaderSize + 32];
+            crypto.Dispose();
+
+            Assert.That(crypto.Seal(packet, 0, packet.Length), Is.False);
+            Assert.That(crypto.Open(packet, 0, packet.Length), Is.EqualTo(-1));
+            Assert.DoesNotThrow(() => crypto.Dispose());
         }
 
         [Test]

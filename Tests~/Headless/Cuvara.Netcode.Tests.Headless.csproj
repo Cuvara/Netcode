@@ -35,6 +35,12 @@
        gains a `using UnityEngine`, this project stops compiling, which is the
        earliest and cheapest place for that to be noticed. -->
   <ItemGroup>
+    <Compile Include="../../Runtime/Diagnostics/INetLog.cs" />
+    <Compile Include="../../Runtime/Diagnostics/SubscriberInvoker.cs" />
+    <Compile Include="../../Tests/Editor/SubscriberInvokerTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="../../Runtime/Transport/FrameBuffer.cs" />
     <Compile Include="../../Runtime/Transport/WireFraming.cs" />
     <Compile Include="../../Runtime/Transport/TransportException.cs" />

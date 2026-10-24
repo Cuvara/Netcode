@@ -109,6 +109,9 @@ namespace Cuvara.Netcode.Transport
         private readonly int _maxStreamBytes;
         private readonly string _remote;
         private readonly byte[] _recvScratch = new byte[TuningMtu];
+        // Output is called only while a public session member holds _lock, and the
+        // datagram callback writes synchronously, so this buffer is safe to reuse.
+        private readonly byte[] _sendScratch = new byte[TuningMtu];
 
         private byte[] _stream = new byte[16 * 1024];
         private int _streamStart;
@@ -120,6 +123,7 @@ namespace Cuvara.Netcode.Transport
         private long _datagramsReceived;
         private long _datagramsRejected;
         private string _failure;
+        private bool _disposed;
 
         /// <param name="conv">Conversation id; see <see cref="NewConversationId"/>.</param>
         /// <param name="transportKey">kcp-go-compatible AES key (64 hex chars), or null/empty for plaintext.</param>
@@ -175,6 +179,9 @@ namespace Cuvara.Netcode.Transport
 
         /// <summary>Why the session failed, or null while it is healthy.</summary>
         public string FailureReason { get { lock (_lock) { return _failure; } } }
+
+        /// <summary>True after disposal has closed the session and crypto state.</summary>
+        public bool IsDisposed { get { lock (_lock) { return _disposed; } } }
 
         public bool IsFailed => FailureReason != null;
 
@@ -287,7 +294,7 @@ namespace Cuvara.Netcode.Transport
         {
             lock (_lock)
             {
-                if (_failure != null)
+                if (_disposed || _failure != null)
                 {
                     return;
                 }
@@ -327,7 +334,7 @@ namespace Cuvara.Netcode.Transport
         {
             lock (_lock)
             {
-                if (_failure != null)
+                if (_disposed || _failure != null)
                 {
                     return false;
                 }
@@ -383,6 +390,11 @@ namespace Cuvara.Netcode.Transport
             {
                 while (true)
                 {
+                    if (_disposed)
+                    {
+                        return null;
+                    }
+
                     if (_failure != null)
                     {
                         throw new TransportException(_failure);
@@ -425,6 +437,11 @@ namespace Cuvara.Netcode.Transport
 
             lock (_lock)
             {
+                if (_disposed)
+                {
+                    throw new TransportException("KCP session is closed");
+                }
+
                 if (_failure != null)
                 {
                     throw new TransportException(_failure);
@@ -456,16 +473,31 @@ namespace Cuvara.Netcode.Transport
 
         public void Dispose()
         {
-            _crypto?.Dispose();
+            lock (_lock)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _crypto?.Dispose();
+            }
         }
 
         private void Output(byte[] buf, int size)
         {
             // Called from inside Kcp.Flush/Update, i.e. already under _lock.
-            var packet = new byte[_cryptoHeaderSize + size];
+            int packetLength = _cryptoHeaderSize + size;
+            if (packetLength > _sendScratch.Length)
+            {
+                Fail($"KCP output exceeded the configured MTU: {packetLength} bytes");
+                return;
+            }
+            var packet = _sendScratch;
             Buffer.BlockCopy(buf, 0, packet, _cryptoHeaderSize, size);
-            _crypto?.Seal(packet, 0, packet.Length);
-            _sendDatagram(packet, packet.Length);
+            if (_crypto != null && !_crypto.Seal(packet, 0, packetLength))
+            {
+                return;
+            }
+
+            _sendDatagram(packet, packetLength);
         }
 
         private byte[] TakeBufferedFrame()

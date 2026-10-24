@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Cuvara.Netcode.Transport;
 using NUnit.Framework;
 
@@ -91,6 +92,40 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             Assert.Throws<ArgumentOutOfRangeException>(
                 () => new KcpClientSession(0, null, (_, __) => { }, () => 0, "x"));
+        }
+
+        [Test]
+        public void CloseRacingWithInFlightOpen_DoesNotCreateAFailureReason()
+        {
+            var session = new KcpClientSession(7, Key, (_, __) => { }, () => 0, "loopback");
+            using var start = new ManualResetEventSlim(false);
+            var errors = 0;
+            var workers = new Task[4];
+
+            for (var worker = 0; worker < workers.Length; worker++)
+            {
+                workers[worker] = Task.Run(() =>
+                {
+                    var datagram = new byte[60 * 1024];
+                    start.Wait();
+                    for (var i = 0; i < 100 && !session.IsDisposed; i++)
+                    {
+                        try { session.Input(datagram, datagram.Length); }
+                        catch (Exception) { Interlocked.Increment(ref errors); }
+                    }
+                });
+            }
+
+            start.Set();
+            Thread.SpinWait(100_000);
+            session.Dispose();
+            Task.WaitAll(workers);
+
+            Assert.That(errors, Is.Zero, "a close must serialize behind an in-flight crypto Open");
+            Assert.That(session.FailureReason, Is.Null,
+                "closing while Open is in flight must not record a spurious transport failure");
+            Assert.That(session.Tick(), Is.False);
+            Assert.That(session.TryReadFrame(), Is.Null);
         }
 
         // ---- address selection ----------------------------------------------------------

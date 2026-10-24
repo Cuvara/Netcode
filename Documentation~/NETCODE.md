@@ -606,6 +606,9 @@ sending for 31 s, until its heartbeat timeout (S09 soak e26z).
 `KcpClientSession` therefore fails the session after `DefaultSilenceTimeoutMs` (5 s) without any
 datagram from the server. The failure is a `TransportError`, and `ReconnectPolicy` reconnects as for
 any transport error.
+An unexpected exception from either socket loop also fails the session with a
+`TransportError` reason, so the read path reports the fault instead of leaving a
+silent half-open connection.
 
 - **What counts:** only time while the client runs. A `Tick` more than 250 ms after the previous
   one is a freeze and is not counted, so the freeze itself never trips it. The backlog read on
@@ -728,6 +731,15 @@ its pause ends, `Reconnected` on landing. `State` is `Reconnecting` during the
 pauses and walks `Authenticating → Assigning → Joining` during each round;
 `IsReconnecting` is true for the whole loop.
 
+Reconnect lifecycle callbacks are isolated per subscriber: a faulty progress,
+attempt-start or reconnected handler is logged and cannot turn a successful join
+into another attempt. Before a retry, the previous gateway and gameplay
+connections are torn down. The same per-subscriber guard applies to snapshot,
+push, command-result, state and close notifications; these application callbacks
+do not close the transport. Failures include the exception type and stack trace,
+including when a subscriber throws `OperationCanceledException`; cancellation of
+the network operation itself remains governed by its own token.
+
 **Why the gateway link is not retried in place.** Losing the gateway socket
 while the game session is up costs only eviction notices. Re-authenticating
 would create a *new* gateway session for the same user — and if the gateway has
@@ -776,6 +788,9 @@ real entity in the wrong place and nothing detects it; absent state is loud and
 self-repairing. A resolve failure therefore rejects the **whole** snapshot,
 records no new bindings, and triggers one `resync` — repeated requests are
 suppressed until a keyframe arrives, because a resync costs a full AOI snapshot.
+If the requested keyframe does not resolve, another request is sent after 2
+seconds when a later snapshot arrives, so a bad keyframe cannot leave resync
+disabled indefinitely.
 
 On a keyframe the handle table is cleared **before** resolving, so a handle-only
 entity on a keyframe is unresolvable rather than resolved against the previous
@@ -1826,6 +1841,14 @@ Sample); empty means plaintext (the dev default). Key derivation matches Go's
 `backend/shared/transport/crypto.go` — 64 hex chars decoded verbatim, anything else stretched
 with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
 is why the connect-timeout message names the key.
+Each encrypted session owns and reuses its RNG, AES transform and block scratch
+under the session lock. Disposal takes that same lock, so an in-flight packet
+cannot observe a disposed transform. KCP keeps flushed datagram buffers; the warmed headless
+Seal+Open probe is below 32 B per pair after initialization. KCP output buffers
+are borrowed only for the duration of the output callback.
+Each encrypted session owns and reuses its RNG, AES transform and block scratch
+under the session lock; synchronous KCP output reuses a per-session packet buffer.
+The warmed headless Seal+Open probe is below 32 B per pair after initialization.
 
 **Tuning** matches `KcpTuning` in the server and `backend/shared/transport/transport.go`
 exactly: `NoDelay=1, Interval=10ms, FastResend=2, NoCongestion=1, Wnd=128, MTU=1350`.
