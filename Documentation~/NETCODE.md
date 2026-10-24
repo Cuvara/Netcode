@@ -1839,6 +1839,9 @@ Sample); empty means plaintext (the dev default). Key derivation matches Go's
 `backend/shared/transport/crypto.go` — 64 hex chars decoded verbatim, anything else stretched
 with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
 is why the connect-timeout message names the key.
+Each encrypted session owns and reuses its RNG, AES transform and block scratch
+under the session lock; synchronous KCP output reuses a per-session packet buffer.
+The warmed headless Seal+Open probe is below 32 B per pair after initialization.
 
 **Tuning** matches `KcpTuning` in the server and `backend/shared/transport/transport.go`
 exactly: `NoDelay=1, Interval=10ms, FastResend=2, NoCongestion=1, Wnd=128, MTU=1350`.

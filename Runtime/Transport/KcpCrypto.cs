@@ -36,6 +36,11 @@ namespace Cuvara.Netcode.Transport
         };
 
         private readonly Aes _aes;
+        private readonly RandomNumberGenerator _rng;
+        private readonly ICryptoTransform _encryptor;
+        private readonly byte[] _nonce = new byte[NonceSize];
+        private readonly byte[] _feedback = new byte[16];
+        private readonly byte[] _scratch = new byte[16];
 
         private KcpCrypto(byte[] key)
         {
@@ -43,6 +48,8 @@ namespace Cuvara.Netcode.Transport
             _aes.Key = key;
             _aes.Mode = CipherMode.ECB;
             _aes.Padding = PaddingMode.None;
+            _rng = RandomNumberGenerator.Create();
+            _encryptor = _aes.CreateEncryptor(_aes.Key, null);
         }
 
         /// <summary>
@@ -81,10 +88,8 @@ namespace Cuvara.Netcode.Transport
         public void Seal(byte[] packet, int offset, int length)
         {
             // Fill nonce with random bytes.
-            var rng = RandomNumberGenerator.Create();
-            var nonce = new byte[NonceSize];
-            rng.GetBytes(nonce);
-            Buffer.BlockCopy(nonce, 0, packet, offset, NonceSize);
+            _rng.GetBytes(_nonce);
+            Buffer.BlockCopy(_nonce, 0, packet, offset, NonceSize);
 
             // CRC32 of the KCP payload.
             uint crc = Crc32.Compute(packet, offset + HeaderSize, length - HeaderSize);
@@ -120,40 +125,32 @@ namespace Cuvara.Netcode.Transport
 
         private void CfbEncrypt(byte[] buf, int offset, int length)
         {
-            byte[] tbl = new byte[16];
-            byte[] tmp = new byte[16];
-
-            using var enc = _aes.CreateEncryptor(_aes.Key, null);
-            enc.TransformBlock(InitialVector, 0, 16, tbl, 0);
+            _encryptor.TransformBlock(InitialVector, 0, 16, _feedback, 0);
 
             int i = 0;
             for (; i + 16 <= length; i += 16)
             {
                 int pos = offset + i;
-                for (int j = 0; j < 16; j++) buf[pos + j] ^= tbl[j];
-                enc.TransformBlock(buf, pos, 16, tmp, 0);
-                Buffer.BlockCopy(tmp, 0, tbl, 0, 16);
+                for (int j = 0; j < 16; j++) buf[pos + j] ^= _feedback[j];
+                _encryptor.TransformBlock(buf, pos, 16, _scratch, 0);
+                Buffer.BlockCopy(_scratch, 0, _feedback, 0, 16);
             }
-            for (int j = 0; i + j < length; j++) buf[offset + i + j] ^= tbl[j];
+            for (int j = 0; i + j < length; j++) buf[offset + i + j] ^= _feedback[j];
         }
 
         private void CfbDecrypt(byte[] buf, int offset, int length)
         {
-            byte[] tbl = new byte[16];
-            byte[] next = new byte[16];
-
-            using var enc = _aes.CreateEncryptor(_aes.Key, null);
-            enc.TransformBlock(InitialVector, 0, 16, tbl, 0);
+            _encryptor.TransformBlock(InitialVector, 0, 16, _feedback, 0);
 
             int i = 0;
             for (; i + 16 <= length; i += 16)
             {
                 int pos = offset + i;
-                enc.TransformBlock(buf, pos, 16, next, 0);
-                for (int j = 0; j < 16; j++) buf[pos + j] ^= tbl[j];
-                Buffer.BlockCopy(next, 0, tbl, 0, 16);
+                _encryptor.TransformBlock(buf, pos, 16, _scratch, 0);
+                for (int j = 0; j < 16; j++) buf[pos + j] ^= _feedback[j];
+                Buffer.BlockCopy(_scratch, 0, _feedback, 0, 16);
             }
-            for (int j = 0; i + j < length; j++) buf[offset + i + j] ^= tbl[j];
+            for (int j = 0; i + j < length; j++) buf[offset + i + j] ^= _feedback[j];
         }
 
         private static byte[] TryDecodeHex(string hex)
@@ -221,6 +218,8 @@ namespace Cuvara.Netcode.Transport
 
         public void Dispose()
         {
+            _rng?.Dispose();
+            _encryptor?.Dispose();
             _aes?.Dispose();
         }
     }

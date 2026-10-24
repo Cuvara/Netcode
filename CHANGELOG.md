@@ -16,6 +16,9 @@
   a keyframe request after 2 seconds while later snapshots continue to arrive.
 - **Predictor replay now has an explicit speed-change regression case.** The test checks that
   unacknowledged input replays at the latest server-reported speed.
+- **Encrypted KCP packets reuse their random generator, AES transform and scratch storage.**
+  The session also reuses its synchronous KCP output buffer; the same warmed Seal+Open probe
+  measured 696 B/pair before and 0 B/pair after.
 
 ### Changed
 

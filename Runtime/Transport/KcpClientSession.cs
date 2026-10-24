@@ -109,6 +109,9 @@ namespace Cuvara.Netcode.Transport
         private readonly int _maxStreamBytes;
         private readonly string _remote;
         private readonly byte[] _recvScratch = new byte[TuningMtu];
+        // Output is called only while a public session member holds _lock, and the
+        // datagram callback writes synchronously, so this buffer is safe to reuse.
+        private readonly byte[] _sendScratch = new byte[TuningMtu];
 
         private byte[] _stream = new byte[16 * 1024];
         private int _streamStart;
@@ -462,10 +465,16 @@ namespace Cuvara.Netcode.Transport
         private void Output(byte[] buf, int size)
         {
             // Called from inside Kcp.Flush/Update, i.e. already under _lock.
-            var packet = new byte[_cryptoHeaderSize + size];
+            int packetLength = _cryptoHeaderSize + size;
+            if (packetLength > _sendScratch.Length)
+            {
+                Fail($"KCP output exceeded the configured MTU: {packetLength} bytes");
+                return;
+            }
+            var packet = _sendScratch;
             Buffer.BlockCopy(buf, 0, packet, _cryptoHeaderSize, size);
-            _crypto?.Seal(packet, 0, packet.Length);
-            _sendDatagram(packet, packet.Length);
+            _crypto?.Seal(packet, 0, packetLength);
+            _sendDatagram(packet, packetLength);
         }
 
         private byte[] TakeBufferedFrame()
