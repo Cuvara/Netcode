@@ -41,9 +41,9 @@ namespace Cuvara.Netcode.Prediction
     /// <para>
     /// This value therefore matters in exactly two situations, and it must still be
     /// right in both: before the first snapshot, and against a server predating field 9.
-    /// A zero on the wire means "not sent" rather than "immobile" — proto3 elides a zero
-    /// float — so <see cref="LocalMovePredictor.SetServerSpeed"/> ignores non-positive
-    /// values and this value stands. <see cref="LocalMovePredictor.EffectiveSpeed"/>
+    /// "Not sent" decodes as NaN and a present zero means immobile, so
+    /// <see cref="LocalMovePredictor.SetServerSpeed"/> ignores NaN and negative values
+    /// and this value stands. <see cref="LocalMovePredictor.EffectiveSpeed"/>
     /// reports which one is live; it diverging from this is the normal, healthy case.
     /// </para>
     /// </remarks>

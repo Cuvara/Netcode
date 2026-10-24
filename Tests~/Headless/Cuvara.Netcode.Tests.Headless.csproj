@@ -121,6 +121,7 @@
   <ItemGroup>
     <Compile Include="../../Tests/Editor/PredictionClockRateTests.cs" />
     <Compile Include="../../Tests/Editor/LocalMovePredictorTests.cs" />
+    <Compile Include="../../Tests/Editor/SnapshotSpeedPresenceTests.cs" />
     <Compile Include="../../Tests/Editor/ReconcileLeadTests.cs" />
     <Compile Include="../../Tests/Editor/ReconcileAdoptionTests.cs" />
     <Compile Include="../../Tests/Editor/ReconciliationDivergenceTests.cs" />

@@ -2193,12 +2193,10 @@ namespace Cuvara.Netcode.Prediction
         /// (<c>wire.proto</c> field 9).
         /// </summary>
         /// <param name="speed">
-        /// The value from the snapshot. <b>Non-positive is ignored</b>, because on the
-        /// wire that means "not sent" rather than "immobile": proto3 elides a zero float,
-        /// so a server predating the field is indistinguishable from a stationary entity.
-        /// Accepting a zero would pin the predicted speed to zero against an older server
-        /// and the local player would stop moving — worse than the drift this exists to
-        /// fix.
+        /// The value from the snapshot. A finite value of zero or more is adopted: zero
+        /// means the server says the entity cannot move, so replay predicts no movement.
+        /// <b>NaN is ignored</b> — the codec decodes "not sent" as NaN — as are negative
+        /// and infinite values; the last adopted value (or the configured fallback) stands.
         /// </param>
         /// <remarks>
         /// <para>
@@ -2217,7 +2215,7 @@ namespace Cuvara.Netcode.Prediction
         public void SetServerSpeed(float speed)
         {
             Trace?.Invoke(new PredictorTraceEvent(PredictorCall.SetServerSpeed, x: speed));
-            if (speed > 0f && !float.IsNaN(speed) && !float.IsInfinity(speed))
+            if (speed >= 0f && !float.IsNaN(speed) && !float.IsInfinity(speed))
             {
                 _speed = speed;
             }

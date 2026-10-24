@@ -571,24 +571,66 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         /// <summary>
-        /// The rule that makes the field safe to add to a live protocol: proto3 elides a
-        /// zero float, so an older server is indistinguishable from an immobile entity.
-        /// Accepting the zero would pin the predicted speed to zero and stop the local
-        /// player moving — strictly worse than the drift the field exists to fix.
+        /// A present zero is the server's effective speed for a rooted or stunned entity:
+        /// prediction must stand still, not keep walking at the configured fallback.
+        /// "Not sent" arrives as NaN and is the only thing that leaves the speed alone.
         /// </summary>
         [Test]
-        public void NonPositiveServerSpeedIsIgnoredBecauseItMeansNotSent()
+        public void PresentZeroMeansImmobileAndReplayDoesNotMove()
         {
             var predictor = Seeded(Vec2.Zero);
 
             predictor.SetServerSpeed(0f);
-            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
 
-            predictor.SetServerSpeed(-3f);
-            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+            Assert.That(predictor.EffectiveSpeed, Is.Zero);
+            predictor.RecordInput(1, 1f, 0f);
+            predictor.RecordInput(2, 1f, 0f);
+            Assert.That(predictor.SimulatedPosition.X, Is.Zero,
+                "a server that says speed 0 must not be predicted to move");
+            Assert.That(predictor.SimulatedPosition.Y, Is.Zero);
+        }
+
+        [Test]
+        public void NanNegativeAndInfiniteServerSpeedAreIgnored()
+        {
+            var predictor = Seeded(Vec2.Zero);
 
             predictor.SetServerSpeed(float.NaN);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed), "NaN is 'not sent'");
+            predictor.SetServerSpeed(-3f);
             Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+            predictor.SetServerSpeed(float.PositiveInfinity);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+            predictor.SetServerSpeed(float.NegativeInfinity);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(Speed));
+        }
+
+        [Test]
+        public void PresentZeroThenPositiveRecovers()
+        {
+            var predictor = Seeded(Vec2.Zero);
+
+            predictor.SetServerSpeed(0f);
+            predictor.SetServerSpeed(4f);
+
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(4f));
+            predictor.RecordInput(1, 1f, 0f);
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(4f * Dt).Within(1e-5f));
+        }
+
+        [Test]
+        public void NanAfterAPresentValueKeepsTheLastServerValue()
+        {
+            var predictor = Seeded(Vec2.Zero);
+
+            predictor.SetServerSpeed(0f);
+            predictor.SetServerSpeed(float.NaN);
+            Assert.That(predictor.EffectiveSpeed, Is.Zero, "NaN must not revert a rooted entity to the fallback");
+
+            predictor.SetServerSpeed(7f);
+            predictor.SetServerSpeed(float.NaN);
+            predictor.SetServerSpeed(-1f);
+            Assert.That(predictor.EffectiveSpeed, Is.EqualTo(7f));
         }
 
         [Test]

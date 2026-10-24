@@ -24,9 +24,9 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// <para>
         /// <b>Zero means "not sent", not "no ticks".</b> proto3 elides a zero, so a server
         /// predating this field is indistinguishable from one advertising nothing. Treat a
-        /// non-positive value as absent and fall back to a configured default — the same
-        /// rule as <c>EntitySnapshot.Speed</c>, deliberately, because it is the same
-        /// situation and a second convention for it would be a trap.
+        /// non-positive value as absent and fall back to a configured default. This differs
+        /// from <c>EntitySnapshot.Speed</c>, which now has explicit presence (NaN = not sent,
+        /// 0 = immobile); a tick rate of zero is never meaningful, so it needs no presence.
         /// </para>
         /// <para>
         /// <b>Why this exists.</b> Tick rate was a constant shared by convention across two

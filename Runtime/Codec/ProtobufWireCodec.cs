@@ -438,7 +438,8 @@ namespace Cuvara.Netcode.Codec
 
         /// <summary>
         /// Copies one wire entity onto a decoded one. Every field is written on every call
-        /// — unconditionally, with no "leave it alone when the wire omitted it" branch —
+        /// — unconditionally, with no "leave it alone when the wire omitted it" branch;
+        /// speed is the one that carries presence, as NaN —
         /// because a pooled instance still carries the previous snapshot's values, and a
         /// field left unwritten would read as this tick's state while describing an entity
         /// that may not even be the same one.
@@ -454,7 +455,8 @@ namespace Cuvara.Netcode.Codec
             target.Hp = e.Hp;
             target.MaxHp = e.MaxHp;
             target.Handle = e.Handle;
-            target.Speed = e.Speed;
+            // Presence is carried as NaN, and bit 0x0020 governs on a partial.
+            target.Speed = Msg.EntitySnapshot.DecodeSpeed(e.HasSpeed, e.Speed, e.ChangedFields);
             // Both carried raw: their "zero means not sent" contract lives in the
             // encoding itself (facing is biased so no real angle is zero, action
             // reserves zero), not in a translation here. Applying a fallback at

@@ -9,11 +9,11 @@ namespace Cuvara.Netcode.Snapshot
     public readonly struct ResolvedEntity
     {
         /// <summary>
-        /// Constructs a resolved entity with no speed, leaving <see cref="Speed"/> zero —
+        /// Constructs a resolved entity with no speed, leaving <see cref="Speed"/> NaN —
         /// which consumers read as "the server did not send one".
         /// </summary>
         public ResolvedEntity(string id, string type, float x, float y, int hp, int maxHp)
-            : this(id, type, x, y, hp, maxHp, 0f)
+            : this(id, type, x, y, hp, maxHp, float.NaN)
         {
         }
 
@@ -224,10 +224,10 @@ namespace Cuvara.Netcode.Snapshot
         /// Movement speed in world units per second, for prediction.
         /// </summary>
         /// <remarks>
-        /// <b>Non-positive means "not sent", not "immobile"</b> — proto3 elides a zero
-        /// float, so a server predating the field is indistinguishable from a stationary
-        /// entity. Fall back to a configured default rather than concluding the entity
-        /// cannot move.
+        /// <b>NaN means "not sent"; zero means immobile</b> (the server's effective speed,
+        /// rooted or stunned); a positive value is the speed to predict with. Compare with
+        /// <c>float.IsNaN</c>, never <c>==</c>. Fall back to a configured default only for
+        /// NaN.
         /// </remarks>
         public float Speed { get; }
 

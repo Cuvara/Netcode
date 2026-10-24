@@ -48,7 +48,7 @@ steering.NoteInputSent(inputTick, nowSeconds);   // PredictionClockSteering
 
 // Each NEW snapshot (world.Tick advanced), in this order:
 predictor.SeedBaseTick(world.Tick);              // once per session; later calls do nothing
-predictor.SetServerSpeed(entity.Speed);          // non-positive = not sent, ignored
+predictor.SetServerSpeed(entity.Speed);          // NaN = not sent; 0 = immobile
 steering.OnSnapshot(predictor, world.Tick, world.AckTick, nowSeconds);
 predictor.Reconcile(new Vec2(entity.X, entity.Y), world.AckTick, world.Tick, world.AckAppliedTick);
 
