@@ -73,6 +73,8 @@ namespace Cuvara.Netcode.Transport
 
         // Scratch for the synchronous drain. Main thread only, like the loop that uses it.
         private readonly byte[] _drainBuffer = new byte[MtuLimit];
+        private readonly byte[] _receiveBuffer = new byte[MtuLimit];
+        private readonly ArraySegment<byte> _receiveSegment;
         private long _datagramsRead;
         private long _receiveWakeups;
         private int _maxDatagramsPerWake;
@@ -129,6 +131,7 @@ namespace Cuvara.Netcode.Transport
             int idleTimeoutMs = KcpClientSession.DefaultIdleTimeoutMs,
             int silenceTimeoutMs = KcpClientSession.DefaultSilenceTimeoutMs)
         {
+            _receiveSegment = new ArraySegment<byte>(_receiveBuffer);
 #if UNITY_WEBGL && !UNITY_EDITOR
             throw new NotSupportedException(WebGlNotSupportedMessage);
 #else
@@ -332,10 +335,13 @@ namespace Cuvara.Netcode.Transport
         {
             while (!ct.IsCancellationRequested)
             {
-                UdpReceiveResult result;
+                int datagramLength;
                 try
                 {
-                    result = await _udp.ReceiveAsync().AsUniTask().AttachExternalCancellation(ct);
+                    // The connected socket writes into this reusable buffer. ReceiveAsync's
+                    // UdpClient overload returns a fresh byte[] for every datagram.
+                    datagramLength = await _udp.Client.ReceiveAsync(_receiveSegment)
+                        .AsUniTask().AttachExternalCancellation(ct);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (ObjectDisposedException) { break; }
@@ -354,7 +360,7 @@ namespace Cuvara.Netcode.Transport
                 int read = 1;
                 try
                 {
-                    _session.Input(result.Buffer, result.Buffer.Length);
+                    _session.Input(_receiveBuffer, datagramLength);
 
                     // And everything queued behind it, now: one await per datagram reads one
                     // datagram per frame, because the await resumes on the player loop.

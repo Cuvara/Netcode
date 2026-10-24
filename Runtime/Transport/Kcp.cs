@@ -18,6 +18,10 @@ namespace Cuvara.Netcode.Transport
     /// with kcp-go configured by <c>backend/shared/transport</c>. The two sides
     /// MUST produce identical bytes on the wire.
     /// </para>
+    /// <para>
+    /// The output callback receives a borrowed datagram buffer. Consume it before
+    /// returning, or copy it if the bytes must outlive the callback.
+    /// </para>
     /// </remarks>
     public sealed class Kcp
     {
@@ -86,6 +90,12 @@ namespace Cuvara.Netcode.Transport
             public AckItem(uint sn, uint ts) { Sn = sn; Ts = ts; }
         }
 
+        private struct PendingDatagram
+        {
+            public byte[] Buffer;
+            public int Length;
+        }
+
         private readonly uint _conv;
         private readonly Action<byte[], int> _output;
 
@@ -111,6 +121,8 @@ namespace Cuvara.Netcode.Transport
         private readonly List<Segment> _rcvQueue = new List<Segment>();
         private readonly List<Segment> _rcvBuf = new List<Segment>();
         private readonly List<AckItem> _acklist = new List<AckItem>();
+        private readonly List<PendingDatagram> _pendingDatagrams = new List<PendingDatagram>(2);
+        private readonly List<byte[]> _datagramBuffers = new List<byte[]>(2);
 
         private byte[] _buffer;
 
@@ -482,15 +494,25 @@ namespace Cuvara.Netcode.Transport
             var buffer = _buffer;
             int used = 0;
 
-            var pending = new List<byte[]>(2);
+            var pending = _pendingDatagrams;
+            pending.Clear();
+
+            byte[] PendingBuffer(int index)
+            {
+                while (_datagramBuffers.Count <= index)
+                    _datagramBuffers.Add(new byte[(int)_mtu]);
+                if (_datagramBuffers[index].Length < (int)_mtu)
+                    _datagramBuffers[index] = new byte[(int)_mtu];
+                return _datagramBuffers[index];
+            }
 
             void MakeSpace(int space)
             {
                 if (used + space > (int)_mtu)
                 {
-                    var datagram = new byte[used];
+                    var datagram = PendingBuffer(pending.Count);
                     Buffer.BlockCopy(buffer, 0, datagram, 0, used);
-                    pending.Add(datagram);
+                    pending.Add(new PendingDatagram { Buffer = datagram, Length = used });
                     used = 0;
                 }
             }
@@ -639,9 +661,9 @@ namespace Cuvara.Netcode.Transport
 
             if (used > 0)
             {
-                var datagram = new byte[used];
+                var datagram = PendingBuffer(pending.Count);
                 Buffer.BlockCopy(buffer, 0, datagram, 0, used);
-                pending.Add(datagram);
+                pending.Add(new PendingDatagram { Buffer = datagram, Length = used });
             }
 
             // Phase 6: congestion window response to loss.
@@ -667,7 +689,7 @@ namespace Cuvara.Netcode.Transport
                 }
             }
 
-            foreach (var datagram in pending) _output(datagram, datagram.Length);
+            foreach (var datagram in pending) _output(datagram.Buffer, datagram.Length);
 
             return nextUpdate;
         }
