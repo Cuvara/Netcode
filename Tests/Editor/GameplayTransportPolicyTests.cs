@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading;
 using Cuvara.Netcode.Client;
 using Cuvara.Netcode.Codec;
@@ -24,6 +25,23 @@ namespace Cuvara.Netcode.Tests.Editor
     [TestFixture]
     public sealed class GameplayTransportPolicyTests
     {
+        [Test]
+        public void UnexpectedKcpLoopException_FailsTheSessionWithTransportReason()
+        {
+            var session = new KcpClientSession(1, null, (_, __) => { }, () => 0, "test");
+            var transport = new KcpTransport();
+            typeof(KcpTransport).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(transport, session);
+
+            typeof(KcpTransport).GetMethod("FailUnexpectedLoop", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(transport, new object[] { "update", new InvalidOperationException("injected fault") });
+
+            Assert.That(session.IsFailed, Is.True);
+            Assert.That(session.FailureReason, Does.Contain("KCP update loop failed"));
+            Assert.That(session.FailureReason, Does.Contain("injected fault"));
+            transport.Dispose();
+        }
+
         private sealed class NullLog : INetLog
         {
             public void Info(string message) { }

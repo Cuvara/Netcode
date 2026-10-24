@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
+using System.Reflection;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using NUnit.Framework;
@@ -245,6 +246,55 @@ namespace Cuvara.Netcode.Tests.Editor
         /// </summary>
         private static DateTime Deadline(double seconds = 15) =>
             DateTime.UtcNow.AddSeconds(seconds);
+
+        [Test]
+        public void ThrowingCommandResultSubscriber_DoesNotBlockTheNextSubscriber()
+        {
+            var log = new RecordingLog();
+            var client = new NetworkClient(FastSettings(), null, new JsonWireCodec(), log);
+            var delivered = 0;
+            client.CommandResultReceived += _ => throw new InvalidOperationException("subscriber failure");
+            client.CommandResultReceived += _ => delivered++;
+
+            typeof(NetworkClient).GetMethod("OnCommandResult", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(client, new object[] { new Cuvara.Netcode.Protocol.Messages.CommandResult() });
+
+            Assert.That(delivered, Is.EqualTo(1));
+            Assert.That(log.Lines.Exists(line => line.Contains("subscriber failed")), Is.True);
+            client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator ThrowingReconnectedSubscriber_DoesNotStartAnotherAttempt()
+        {
+            var firstAssignments = new Queue<byte[]>(new[] { AssignOk() });
+            var secondAssignments = new Queue<byte[]>(new[] { AssignOk() });
+            var factory = new ScriptedFactory()
+                .Then(Gateway(firstAssignments))
+                .Then(GameServerJoinOk())
+                .Then(Gateway(secondAssignments))
+                .Then(GameServerJoinOk());
+            var auth = new CountingAuth();
+            var client = new NetworkClient(FastSettings(), factory, new JsonWireCodec(), new SilentLog(), auth);
+            var initialConnected = false;
+            var reconnected = false;
+            Exception failure = null;
+            client.Reconnected += () => throw new InvalidOperationException("subscriber failure");
+            client.Reconnected += () => reconnected = true;
+
+            Connect(client, "map_01").ContinueWith(ex => { initialConnected = ex == null; failure = ex; }).Forget();
+            for (var t = Deadline(); !initialConnected && DateTime.UtcNow < t;) yield return null;
+            Assert.That(initialConnected, Is.True, failure?.ToString());
+
+            factory.Created[1].Deliver(ServerShutdown());
+            for (var t = Deadline(); !reconnected && DateTime.UtcNow < t;) yield return null;
+
+            Assert.That(reconnected, Is.True, "later Reconnected subscribers should still run");
+            Assert.That(factory.Created.Count, Is.EqualTo(4), "a callback failure must not redial");
+            Assert.That(client.State, Is.EqualTo(NetworkClientState.InWorld));
+            Assert.That(auth.Calls, Is.EqualTo(2));
+            client.Dispose();
+        }
 
         [UnityTest]
         public IEnumerator RetryableAssignmentRefusal_ConsumesAnAttempt_AndSucceedsOnTheNext()
