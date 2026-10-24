@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Move the keyframe retry interval into `NetworkSettings` with its existing 2 second default, reject nonpositive values, and check expiry after handling a snapshot so a timely keyframe clears the latch before retry.
 - Pin the UnityDots compile-gate dependency in CI to the released `v0.33.0` tag.
 
 ## [0.49.0] - 2026-10-24

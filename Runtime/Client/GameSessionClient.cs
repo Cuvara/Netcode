@@ -35,7 +35,6 @@ namespace Cuvara.Netcode.Client
         private WireConnection _connection;
         private bool _awaitingKeyframe;
         private long _keyframeRequestedAtMs;
-        private const long KeyframeRetryIntervalMs = 2000;
 
         public GameSessionClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log)
         {
@@ -687,13 +686,6 @@ namespace Cuvara.Netcode.Client
 
         private void OnFrame(WireFrame frame)
         {
-            if (_awaitingKeyframe && _settings.MonotonicClock() - _keyframeRequestedAtMs >= KeyframeRetryIntervalMs)
-            {
-                _awaitingKeyframe = false;
-                _log.Warn("keyframe resync timed out; requesting another keyframe");
-                RequestResync();
-            }
-
             if (frame.Type == MsgType.CommandResult)
             {
                 if (frame.Payload is CommandResult result)
@@ -734,6 +726,7 @@ namespace Cuvara.Netcode.Client
                 // guessing would attribute an update to the wrong entity.
                 _log.Warn($"snapshot at tick {snapshot.Tick} referenced an unknown handle; requesting a keyframe");
                 RequestResync();
+                RetryKeyframeIfTimedOut();
                 return;
             }
 
@@ -756,6 +749,18 @@ namespace Cuvara.Netcode.Client
 
             var handler = SnapshotReceived;
             InvokeSafely(handler, resolved, nameof(SnapshotReceived));
+            RetryKeyframeIfTimedOut();
+        }
+
+        private void RetryKeyframeIfTimedOut()
+        {
+            if (_awaitingKeyframe && _settings.MonotonicClock() - _keyframeRequestedAtMs >=
+                _settings.KeyframeRetryInterval.TotalMilliseconds)
+            {
+                _awaitingKeyframe = false;
+                _log.Warn("keyframe resync timed out; requesting another keyframe");
+                RequestResync();
+            }
         }
 
         private void OnClosed(DisconnectInfo info)

@@ -788,9 +788,12 @@ real entity in the wrong place and nothing detects it; absent state is loud and
 self-repairing. A resolve failure therefore rejects the **whole** snapshot,
 records no new bindings, and triggers one `resync` — repeated requests are
 suppressed until a keyframe arrives, because a resync costs a full AOI snapshot.
-If the requested keyframe does not resolve, another request is sent after 2
-seconds when a later snapshot arrives, so a bad keyframe cannot leave resync
-disabled indefinitely.
+If the requested keyframe does not resolve, another request is sent after the
+configurable `NetworkSettings.KeyframeRetryInterval` (2 seconds by default),
+after processing a later snapshot. The interval must be positive; assigning zero or a negative
+value throws `ArgumentOutOfRangeException`. A full keyframe arriving at the timeout
+clears the latch before the retry check, so it does not trigger a redundant
+request.
 
 On a keyframe the handle table is cleared **before** resolving, so a handle-only
 entity on a keyframe is unresolvable rather than resolved against the previous

@@ -14,6 +14,7 @@ using Cuvara.Netcode.Codec;
 using Cuvara.Netcode.Connection;
 using Cuvara.Netcode.Diagnostics;
 using Cuvara.Netcode.Protocol;
+using Cuvara.Netcode.Protocol.Messages;
 using Cuvara.Netcode.Transport;
 
 namespace Cuvara.Netcode.Tests.Editor
@@ -288,11 +289,13 @@ namespace Cuvara.Netcode.Tests.Editor
             var onFrame = typeof(GameSessionClient)
                 .GetMethod("OnFrame", BindingFlags.Instance | BindingFlags.NonPublic);
             now = 1999;
-            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Ping, null, WireEncoding.Json) });
+            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Snapshot,
+                new SnapshotMessage { Tick = 1, Full = false }, WireEncoding.Json) });
             Assert.That(sendQueue.Count, Is.EqualTo(0), "do not retry before the bounded wait expires");
 
             now = 2000;
-            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Ping, null, WireEncoding.Json) });
+            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Snapshot,
+                new SnapshotMessage { Tick = 2, Full = false }, WireEncoding.Json) });
             Assert.That(sendQueue.Count, Is.EqualTo(1), "send a second resync after the keyframe timeout");
             session.Dispose();
         }
