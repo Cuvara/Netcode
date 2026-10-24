@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Pin the UnityDots compile-gate dependency in CI to the released `v0.33.0` tag.
+
 ## [0.49.0] - 2026-10-24
 
 ### Changed
