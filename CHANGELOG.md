@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Move the keyframe retry interval into `NetworkSettings` with its existing 2 second default, and check expiry after handling a snapshot so a timely keyframe clears the latch before retry.
+
 ## [0.49.0] - 2026-10-24
 
 ### Changed

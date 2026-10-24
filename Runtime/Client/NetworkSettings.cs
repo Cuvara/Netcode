@@ -306,6 +306,12 @@ namespace Cuvara.Netcode.Client
         public TimeSpan ReconnectBudget { get; set; } = TimeSpan.FromSeconds(60);
 
         /// <summary>
+        /// How long the client waits for a keyframe before asking again while snapshots
+        /// continue to arrive. The default preserves the 2 second retry interval.
+        /// </summary>
+        public TimeSpan KeyframeRetryInterval { get; set; } = TimeSpan.FromMilliseconds(2000);
+
+        /// <summary>
         /// Keep the gateway connection open for the whole session.
         /// </summary>
         /// <remarks>

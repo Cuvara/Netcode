@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using System.Collections;
@@ -98,6 +99,14 @@ namespace Cuvara.Netcode.Tests.Editor
         {
             public void Info(string message) { }
             public void Warn(string message) { }
+            public void Error(string message, Exception exception = null) { }
+        }
+
+        private sealed class CapturingLog : INetLog
+        {
+            public readonly List<string> Warnings = new List<string>();
+            public void Info(string message) { }
+            public void Warn(string message) => Warnings.Add(message);
             public void Error(string message, Exception exception = null) { }
         }
 
@@ -298,6 +307,57 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(client.ServerTick, Is.EqualTo(2));
             client.Dispose();
         }
+
+        [Test]
+        public void FullKeyframeAtRetryBoundaryClearsLatchBeforeRetryCheck()
+        {
+            var now = 2500L;
+            var settings = new NetworkSettings { MonotonicClock = () => now };
+            var log = new CapturingLog();
+            using var client = new GameSessionClient(settings, new DefaultTransportFactory(), Codec, log);
+            SetPrivateField(client, "_awaitingKeyframe", true);
+            SetPrivateField(client, "_keyframeRequestedAtMs", 500L);
+
+            InvokeOnFrame(client, new WireFrame(MsgType.Snapshot,
+                new SnapshotMessage { Tick = 1, Full = true }, WireEncoding.Json));
+
+            Assert.That(GetPrivateField<bool>(client, "_awaitingKeyframe"), Is.False);
+            Assert.That(log.Warnings, Does.Not.Contain("keyframe resync timed out; requesting another keyframe"));
+            Assert.That(settings.KeyframeRetryInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2000)));
+        }
+
+        [Test]
+        public void ConfiguredRetryIntervalIsCheckedAfterDeltaSnapshot()
+        {
+            var now = 1000L;
+            var settings = new NetworkSettings
+            {
+                MonotonicClock = () => now,
+                KeyframeRetryInterval = TimeSpan.FromMilliseconds(500),
+            };
+            var log = new CapturingLog();
+            using var client = new GameSessionClient(settings, new DefaultTransportFactory(), Codec, log);
+            SetPrivateField(client, "_awaitingKeyframe", true);
+            SetPrivateField(client, "_keyframeRequestedAtMs", 500L);
+
+            InvokeOnFrame(client, new WireFrame(MsgType.Snapshot,
+                new SnapshotMessage { Tick = 1, Full = false }, WireEncoding.Json));
+
+            Assert.That(log.Warnings, Does.Contain("keyframe resync timed out; requesting another keyframe"));
+            Assert.That(GetPrivateField<bool>(client, "_awaitingKeyframe"), Is.False);
+        }
+
+        private static void InvokeOnFrame(GameSessionClient client, WireFrame frame) =>
+            typeof(GameSessionClient).GetMethod("OnFrame", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(client, new object[] { frame });
+
+        private static void SetPrivateField<T>(GameSessionClient client, string name, T value) =>
+            typeof(GameSessionClient).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(client, value);
+
+        private static T GetPrivateField<T>(GameSessionClient client, string name) =>
+            (T)typeof(GameSessionClient).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                .GetValue(client);
 
         [Test]
         public void DecodeFaultClosesTheLinkAsAProtocolError()
