@@ -297,6 +297,13 @@ namespace Cuvara.Netcode.Codec
             }
         }
 
+        private static float DecodeJsonSpeed(JsonValue item)
+        {
+            // JSON cannot carry NaN, so NaN from the fallback means the key was absent.
+            var raw = item.GetFloat("speed", float.NaN);
+            return EntitySnapshot.DecodeSpeed(!float.IsNaN(raw), raw, item.GetUInt("changed_fields"));
+        }
+
         private static SnapshotMessage ReadSnapshot(JsonValue payload)
         {
             var snapshot = new SnapshotMessage
@@ -324,11 +331,6 @@ namespace Cuvara.Netcode.Codec
                     // resolution path rather than silently dropping to id-only.
                     Handle = item.GetUInt("handle"),
 
-                    // JSON does not elide zero the way proto3 does, so this key is
-                    // present with 0 from a server that has the field and simply has
-                    // nothing to say. Same rule either way: non-positive means "no
-                    // value", not "cannot move".
-                    Speed = item.GetFloat("speed"),
 
                     // Absent leaves 0, which both fields define as "not sent" — so the
                     // two encodings agree here without a second rule. Note this is the
@@ -346,6 +348,11 @@ namespace Cuvara.Netcode.Codec
                     // Absent leaves 0, "every field present" -- the same reading a server that
                     // never sends a partial update needs, so no second rule.
                     ChangedFields = item.GetUInt("changed_fields"),
+
+                    // A present zero means immobile; an absent key means not sent. JSON
+                    // writes "speed" on every entity, partials included, so on a partial
+                    // the changed_fields bit 0x0020 decides, exactly as for protobuf.
+                    Speed = DecodeJsonSpeed(item),
 
                     // Protocol version 3. Names are wire.proto's snake_case, identical to the Go
                     // struct tags. owner_id is the JSON twin of the interned `owner` handle: this

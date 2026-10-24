@@ -1255,22 +1255,29 @@ the client kept a hand-maintained copy of the spawn default. Anything changing a
 player's speed at runtime — a buff, a mount, a slow — desynced prediction with no error
 on either side (rpg-mmo-server#91).
 
-`EntitySnapshot.Speed` and `ResolvedEntity.Speed` now carry it, on every mention
-including handle-only ones.
+`EntitySnapshot.Speed` and `ResolvedEntity.Speed` carry it as the server's *effective*
+speed (slows and roots applied).
 
-> **`speed <= 0` means "not sent", not "immobile".** proto3 elides a zero float, so a
-> server predating field 9 is indistinguishable from a stationary entity. The decode
-> path deliberately does **not** substitute a default — it passes the zero through, and
-> the fallback decision belongs to the prediction layer, where the configured default
-> actually lives. Trusting the wire value unconditionally means an old server pins the
-> predicted speed to zero and the local player stops moving.
+> **`NaN` means "not sent"; `0` means immobile; `> 0` is the speed.** Field 9 has explicit
+> presence, and the decoder maps an absent value to `float.NaN` (check with
+> `float.IsNaN`, never `==`). The decode path deliberately does **not** substitute a
+> default; the fallback decision belongs to the prediction layer, where the configured
+> default actually lives. `SetServerSpeed` adopts any finite value `>= 0` and ignores NaN,
+> negative and infinite values.
+>
+> **On a field-delta partial, `changed_fields` bit `0x0020` governs speed in both
+> encodings.** The JSON encoding writes `"speed"` on every entity, so `"speed":0` with the
+> bit clear means "unchanged", not "immobile"; the decoder turns it into NaN and the merge
+> keeps the previous value. A server that predates explicit presence sends a JSON `"speed":0` for
+> "no value"; against it a present zero now reads as immobile, so deploy the server
+> change first.
 
 **Consumed since 0.8.0.** `WorldState` carries speed into
 `Shared.GameLogic.EntitySnapshotData` (needs `sgl-v0.1.7` or newer), the binder calls
 `LocalMovePredictor.SetServerSpeed` for the local entity on every snapshot, and replay
 integrates at the server's value. `PredictionSettings.Speed` is now the **fallback**: it
 governs before the first snapshot and against a server predating field 9, and is
-superseded as soon as a positive speed arrives. `LocalMovePredictor.EffectiveSpeed`
+superseded as soon as a finite speed (zero included) arrives. `LocalMovePredictor.EffectiveSpeed`
 reports which is live.
 
 ### Rendering: the step is spread across the interval

@@ -44,13 +44,28 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// for this entity right now — not the spawn default.
         /// </summary>
         /// <remarks>
-        /// <b>Zero means "not sent", not "immobile".</b> proto3 elides a zero float, so a
-        /// server predating this field (anything before the field-9 change) is
-        /// indistinguishable from a stationary entity. Treat a non-positive value as
-        /// absent and fall back to a configured default: trusting it outright means an
-        /// old server pins a predicted speed to zero and the local player stops moving.
+        /// NaN means "not sent"; zero means immobile; a positive value is the server's
+        /// effective movement speed. On field-delta partials, changed_fields bit 0x0020
+        /// governs this value in both encodings; ignore speed when that bit is clear.
         /// </remarks>
         public float Speed { get; set; }
+
+        /// <summary>
+        /// Decodes the wire speed under both rules at once, so the two encodings cannot
+        /// disagree: an absent value is <see cref="float.NaN"/>, and on a field-delta
+        /// partial (non-zero <see cref="ChangedFields"/>) a value whose bit
+        /// <c>0x0020</c> is clear is also <see cref="float.NaN"/> — a present zero the
+        /// server did not flag as changed must not read as "immobile".
+        /// </summary>
+        public static float DecodeSpeed(bool present, float value, uint changedFields)
+        {
+            if (!present) return float.NaN;
+            if (changedFields != 0u && (changedFields & SpeedFieldBit) == 0u) return float.NaN;
+            return value;
+        }
+
+        /// <summary><c>changed_fields</c> bit that marks speed as carried (<c>SnapshotFieldBits.Speed</c>).</summary>
+        public const uint SpeedFieldBit = 0x0020u;
 
         /// <summary>
         /// Facing as 16-bit binary radians BIASED BY ONE: 0 means "not sent", and a real

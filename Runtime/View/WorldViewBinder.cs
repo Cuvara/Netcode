@@ -633,8 +633,8 @@ namespace Cuvara.Netcode.View
                         // Adopt the server's speed before replaying: a buff, mount or
                         // slow changes what the server integrates with, and predicting
                         // at the old value desyncs every tick with no error on either
-                        // side. Non-positive is ignored inside — on the wire that means
-                        // "not sent", so the configured fallback stands.
+                        // side. NaN is ignored inside — "not sent" decodes as NaN, so
+                        // the configured fallback stands; a present zero means immobile.
                         _predictor.SeedBaseTick(world.Tick);
                         _predictor.SetServerSpeed(e.Speed);
 
