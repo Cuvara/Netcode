@@ -1840,10 +1840,9 @@ Sample); empty means plaintext (the dev default). Key derivation matches Go's
 with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
 is why the connect-timeout message names the key.
 Each encrypted session owns and reuses its RNG, AES transform and block scratch
-under the session lock. KCP keeps flushed datagram buffers, and the UDP receive
-loop reads into a reusable buffer; the warmed headless Seal+Open probe is below
-32 B per pair after initialization. KCP output buffers are borrowed only for the
-duration of the output callback.
+under the session lock. KCP keeps flushed datagram buffers; the warmed headless
+Seal+Open probe is below 32 B per pair after initialization. KCP output buffers
+are borrowed only for the duration of the output callback.
 Each encrypted session owns and reuses its RNG, AES transform and block scratch
 under the session lock; synchronous KCP output reuses a per-session packet buffer.
 The warmed headless Seal+Open probe is below 32 B per pair after initialization.
