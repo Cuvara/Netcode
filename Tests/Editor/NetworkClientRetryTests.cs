@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Reflection;
 using System.Threading;
@@ -262,6 +263,38 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(delivered, Is.EqualTo(1));
             Assert.That(log.Lines.Exists(line => line.Contains("subscriber failed")), Is.True);
             client.Dispose();
+        }
+
+        [Test]
+        public void RejectedKeyframe_AllowsAnotherResyncAfterTwoSeconds()
+        {
+            long now = 0;
+            var settings = FastSettings();
+            settings.MonotonicClock = () => now;
+            var log = new SilentLog();
+            var codec = new JsonWireCodec();
+            var transport = new RespondingTransport(_ => null);
+            var wire = new WireConnection("test", transport, codec, settings, log);
+            var session = new GameSessionClient(settings, null, codec, log);
+            typeof(GameSessionClient).GetField("_connection", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(session, wire);
+            typeof(GameSessionClient).GetField("_awaitingKeyframe", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(session, true);
+            typeof(GameSessionClient).GetField("_keyframeRequestedAtMs", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(session, 0L);
+
+            var sendQueue = (ConcurrentQueue<byte[]>)typeof(WireConnection)
+                .GetField("_sendQueue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(wire);
+            var onFrame = typeof(GameSessionClient)
+                .GetMethod("OnFrame", BindingFlags.Instance | BindingFlags.NonPublic);
+            now = 1999;
+            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Ping, null, WireEncoding.Json) });
+            Assert.That(sendQueue.Count, Is.EqualTo(0), "do not retry before the bounded wait expires");
+
+            now = 2000;
+            onFrame.Invoke(session, new object[] { new WireFrame(MsgType.Ping, null, WireEncoding.Json) });
+            Assert.That(sendQueue.Count, Is.EqualTo(1), "send a second resync after the keyframe timeout");
+            session.Dispose();
         }
 
         [UnityTest]
