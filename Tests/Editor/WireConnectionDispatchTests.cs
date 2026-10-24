@@ -281,10 +281,11 @@ namespace Cuvara.Netcode.Tests.Editor
             transport.Enqueue(Inbound(MsgType.JoinTokenResp,
                 "{\"ok\":true,\"user_id\":\"test-user\",\"protocol_version\":3,\"tick_rate\":60}"));
             transport.Enqueue(Inbound(MsgType.Snapshot, "{\"tick\":1,\"full\":true}"));
+            transport.Enqueue(Inbound(MsgType.Snapshot, "{\"tick\":2,\"full\":true}"));
             var client = new GameSessionClient(
                 new NetworkSettings(), new FixedTransportFactory(transport), Codec, new SilentLog());
             var delivered = 0;
-            client.SnapshotReceived += _ => throw new InvalidOperationException("snapshot consumer fault");
+            client.SnapshotReceived += _ => throw new OperationCanceledException("snapshot consumer cancel");
             client.SnapshotReceived += _ => delivered++;
 
             client.JoinAsync(
@@ -293,8 +294,8 @@ namespace Cuvara.Netcode.Tests.Editor
 
             Assert.That(client.IsConnected, Is.True);
             Assert.That(transport.IsConnected, Is.True);
-            Assert.That(delivered, Is.EqualTo(1), "later snapshot subscribers still run");
-            Assert.That(client.ServerTick, Is.EqualTo(1));
+            Assert.That(delivered, Is.EqualTo(2), "later subscribers and later frames still run");
+            Assert.That(client.ServerTick, Is.EqualTo(2));
             client.Dispose();
         }
 

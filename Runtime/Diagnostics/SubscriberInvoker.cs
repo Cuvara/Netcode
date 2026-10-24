@@ -1,5 +1,4 @@
 using System;
-using System.Threading;
 
 namespace Cuvara.Netcode.Diagnostics
 {
@@ -15,12 +14,11 @@ namespace Cuvara.Netcode.Diagnostics
                 {
                     handler(value);
                 }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
                 catch (Exception ex)
                 {
+                    // This exception came from user code, not from the caller's
+                    // cancellation token. Treat it as a subscriber fault so it cannot
+                    // silently terminate a transport or reconnect loop.
                     log.Warn($"{eventName} subscriber failed ({ex.GetType().FullName}): {ex}");
                 }
             }
@@ -34,10 +32,6 @@ namespace Cuvara.Netcode.Diagnostics
                 try
                 {
                     handler();
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
                 }
                 catch (Exception ex)
                 {

@@ -6,7 +6,8 @@
 
 - **A throwing game-side event subscriber no longer closes the gameplay link.** Snapshot, push,
   command result, state, reconnect, and close notifications isolate each subscriber and log its
-  exception type and stack before continuing to the next one. Cancellation exceptions propagate.
+  exception type and stack before continuing to the next one, including subscriber-thrown
+  cancellation exceptions.
 - **Closing KCP cannot race shared crypto disposal.** Session disposal serializes with packet
   Open/Seal, and exceptions observed after transport close no longer create a failure reason.
 - **Reconnect notifications cannot turn a successful reconnect into another attempt.** Progress,

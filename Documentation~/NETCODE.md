@@ -736,8 +736,9 @@ attempt-start or reconnected handler is logged and cannot turn a successful join
 into another attempt. Before a retry, the previous gateway and gameplay
 connections are torn down. The same per-subscriber guard applies to snapshot,
 push, command-result, state and close notifications; these application callbacks
-do not close the transport. Failures include the exception type and stack trace;
-`OperationCanceledException` propagates to preserve cancellation semantics.
+do not close the transport. Failures include the exception type and stack trace,
+including when a subscriber throws `OperationCanceledException`; cancellation of
+the network operation itself remains governed by its own token.
 
 **Why the gateway link is not retried in place.** Losing the gateway socket
 while the game session is up costs only eviction notices. Re-authenticating

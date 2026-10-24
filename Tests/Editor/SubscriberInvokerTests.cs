@@ -31,11 +31,16 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
-        public void InvokeSafely_DoesNotSwallowOperationCanceledException()
+        public void InvokeSafely_LogsSubscriberCancellationAndContinues()
         {
-            Action handlers = () => throw new OperationCanceledException();
-            Assert.Throws<OperationCanceledException>(() =>
-                SubscriberInvoker.InvokeSafely(handlers, "event", new TestLog()));
+            var log = new TestLog();
+            var laterSubscriberCalled = false;
+            Action handlers = () => throw new OperationCanceledException("from subscriber");
+            handlers += () => laterSubscriberCalled = true;
+
+            Assert.DoesNotThrow(() => SubscriberInvoker.InvokeSafely(handlers, "event", log));
+            Assert.That(laterSubscriberCalled, Is.True);
+            Assert.That(log.Warning, Does.Contain(nameof(OperationCanceledException)));
         }
     }
 }
