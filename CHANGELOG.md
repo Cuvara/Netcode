@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A throwing game-side event subscriber no longer closes the gameplay link.** Snapshot, push,
+  command result, state, reconnect, and close notifications isolate each subscriber and log its
+  failure before continuing to the next one.
+- **Reconnect notifications cannot turn a successful reconnect into another attempt.** Progress,
+  attempt-start, and reconnected callbacks run behind individual exception guards, and old
+  connections are torn down before another attempt begins.
+- **Unexpected KCP loop exceptions now fail the session.** Receive and update loop faults retain
+  a `TransportError` reason and close the socket instead of leaving a silent half-open link.
+- **A missing or rejected keyframe no longer leaves resync disabled forever.** The client retries
+  a keyframe request after 2 seconds while later snapshots continue to arrive.
+- **Predictor replay now has an explicit speed-change regression case.** The test checks that
+  unacknowledged input replays at the latest server-reported speed.
+
 ### Changed
 
 - **The `com.cuvara.dots` compile gate now uses v0.32.0**, checking Netcode against the

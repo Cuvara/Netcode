@@ -187,8 +187,8 @@ namespace Cuvara.Netcode.Client
                 _state = value;
                 var reason = _lastTransitionReason;
                 _lastTransitionReason = "";
-                StateChanged?.Invoke(value);
-                ConnectionStateChanged?.Invoke(new ConnectionStateChangedEvent(previous, value, reason));
+                InvokeSafely(StateChanged, value, nameof(StateChanged));
+                InvokeSafely(ConnectionStateChanged, new ConnectionStateChangedEvent(previous, value, reason), nameof(ConnectionStateChanged));
             }
         }
 
@@ -719,19 +719,19 @@ namespace Cuvara.Netcode.Client
             // subscriber that reads World during the callback must see this snapshot
             // already applied.
             World.Apply(snapshot);
-            SnapshotReceived?.Invoke(snapshot);
+            InvokeSafely(SnapshotReceived, snapshot, nameof(SnapshotReceived));
         }
 
         private void OnCommandResult(Protocol.Messages.CommandResult result) =>
-            CommandResultReceived?.Invoke(result);
+            InvokeSafely(CommandResultReceived, result, nameof(CommandResultReceived));
 
         private void OnServerPush(Protocol.Messages.ServerPush push) =>
-            ServerPushReceived?.Invoke(push);
+            InvokeSafely(ServerPushReceived, push, nameof(ServerPushReceived));
 
         private void OnSessionClosed(DisconnectInfo info)
         {
             SetState(NetworkClientState.Ended, info.ToString());
-            SessionClosed?.Invoke(info);
+            InvokeSafely(SessionClosed, info, nameof(SessionClosed));
 
             var decision = DecideRecovery(info);
             if (decision == ReconnectDecision.Never)
@@ -827,7 +827,7 @@ namespace Cuvara.Netcode.Client
                         break;
                     }
 
-                    ReconnectProgress?.Invoke(new ReconnectionProgress(attempt, maxAttempts, (float)pause.TotalSeconds));
+                    InvokeSafely(ReconnectProgress, new ReconnectionProgress(attempt, maxAttempts, (float)pause.TotalSeconds), nameof(ReconnectProgress));
                     if (pause > TimeSpan.Zero)
                     {
                         await _settings.DelayScheduler(pause, ct);
@@ -835,9 +835,11 @@ namespace Cuvara.Netcode.Client
 
                     Guard(generation, ct);
                     attempts = attempt;
-                    ReconnectAttemptStarted?.Invoke(attempt);
+                    InvokeSafely(ReconnectAttemptStarted, attempt, nameof(ReconnectAttemptStarted));
                     _log.Info($"reconnect attempt {attempt}/{maxAttempts} to '{mapId}'");
 
+                    TeardownConnections();
+                    bool connected = false;
                     try
                     {
                         // Always through the provider: the join token that got us in
@@ -846,10 +848,7 @@ namespace Cuvara.Netcode.Client
                         // JWT costs the provider nothing; a cold re-auth is its
                         // business, not this loop's.
                         await RunConnectAsync(generation, null, mapId, partyId, characterId, ct, inReconnect: true);
-                        _reconnectCts?.Dispose();
-                        _reconnectCts = null;
-                        Reconnected?.Invoke();
-                        return;
+                        connected = true;
                     }
                     catch (OperationCanceledException)
                     {
@@ -875,6 +874,14 @@ namespace Cuvara.Netcode.Client
 
                         SetState(NetworkClientState.Reconnecting, ex.Message);
                     }
+
+                    if (connected)
+                    {
+                        _reconnectCts?.Dispose();
+                        _reconnectCts = null;
+                        InvokeSafely(Reconnected, nameof(Reconnected));
+                        return;
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -899,7 +906,27 @@ namespace Cuvara.Netcode.Client
             _reconnectCts?.Dispose();
             _reconnectCts = null;
             SetState(NetworkClientState.Ended, "reconnect exhausted");
-            ReconnectFailed?.Invoke(failure);
+            InvokeSafely(ReconnectFailed, failure, nameof(ReconnectFailed));
+        }
+
+        private void InvokeSafely<T>(Action<T> handlers, T value, string eventName)
+        {
+            if (handlers == null) return;
+            foreach (Action<T> handler in handlers.GetInvocationList())
+            {
+                try { handler(value); }
+                catch (Exception ex) { _log.Warn($"{eventName} subscriber failed: {ex.Message}"); }
+            }
+        }
+
+        private void InvokeSafely(Action handlers, string eventName)
+        {
+            if (handlers == null) return;
+            foreach (Action handler in handlers.GetInvocationList())
+            {
+                try { handler(); }
+                catch (Exception ex) { _log.Warn($"{eventName} subscriber failed: {ex.Message}"); }
+            }
         }
 
         private void OnGatewayClosed(DisconnectInfo info)
@@ -916,7 +943,7 @@ namespace Cuvara.Netcode.Client
                 _log.Warn($"evicted by the gateway: {info.Reason}; the session that follows will not be retried");
             }
 
-            GatewayClosed?.Invoke(info);
+            InvokeSafely(GatewayClosed, info, nameof(GatewayClosed));
         }
     }
 }

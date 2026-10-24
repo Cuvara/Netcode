@@ -619,6 +619,25 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void SpeedChangeReplaysUnacknowledgedInputsAtTheReportedSpeed()
+        {
+            const float firstSpeed = 5f;
+            const float nextSpeed = 7f;
+            var predictor = new LocalMovePredictor(new PredictionSettings(TickRate, firstSpeed, Bounds));
+            predictor.Reconcile(Vec2.Zero, 0);
+            predictor.RecordInput(1, 1f, 0f);
+            predictor.RecordInput(2, 1f, 0f);
+
+            Vec2 serverAtAck = ServerWalk(Vec2.Zero, new[] { (1f, 0f) }, firstSpeed);
+            predictor.SetServerSpeed(nextSpeed);
+            predictor.Reconcile(serverAtAck, 1);
+
+            Vec2 expected = ServerWalk(serverAtAck, new[] { (1f, 0f) }, nextSpeed);
+            Assert.That(predictor.SimulatedPosition.X, Is.EqualTo(expected.X).Within(1e-5f));
+            Assert.That(predictor.SimulatedPosition.Y, Is.EqualTo(expected.Y).Within(1e-5f));
+        }
+
+        [Test]
         public void ResetReturnsToTheConfiguredFallbackSpeed()
         {
             var predictor = Seeded(Vec2.Zero);

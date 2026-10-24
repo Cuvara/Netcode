@@ -606,6 +606,9 @@ sending for 31 s, until its heartbeat timeout (S09 soak e26z).
 `KcpClientSession` therefore fails the session after `DefaultSilenceTimeoutMs` (5 s) without any
 datagram from the server. The failure is a `TransportError`, and `ReconnectPolicy` reconnects as for
 any transport error.
+An unexpected exception from either socket loop also fails the session with a
+`TransportError` reason, so the read path reports the fault instead of leaving a
+silent half-open connection.
 
 - **What counts:** only time while the client runs. A `Tick` more than 250 ms after the previous
   one is a freeze and is not counted, so the freeze itself never trips it. The backlog read on
@@ -728,6 +731,13 @@ its pause ends, `Reconnected` on landing. `State` is `Reconnecting` during the
 pauses and walks `Authenticating → Assigning → Joining` during each round;
 `IsReconnecting` is true for the whole loop.
 
+Reconnect lifecycle callbacks are isolated per subscriber: a faulty progress,
+attempt-start or reconnected handler is logged and cannot turn a successful join
+into another attempt. Before a retry, the previous gateway and gameplay
+connections are torn down. The same per-subscriber guard applies to snapshot,
+push, command-result, state and close notifications; these application callbacks
+do not close the transport.
+
 **Why the gateway link is not retried in place.** Losing the gateway socket
 while the game session is up costs only eviction notices. Re-authenticating
 would create a *new* gateway session for the same user — and if the gateway has
@@ -776,6 +786,9 @@ real entity in the wrong place and nothing detects it; absent state is loud and
 self-repairing. A resolve failure therefore rejects the **whole** snapshot,
 records no new bindings, and triggers one `resync` — repeated requests are
 suppressed until a keyframe arrives, because a resync costs a full AOI snapshot.
+If the requested keyframe does not resolve, another request is sent after 2
+seconds when a later snapshot arrives, so a bad keyframe cannot leave resync
+disabled indefinitely.
 
 On a keyframe the handle table is cleared **before** resolving, so a handle-only
 entity on a keyframe is unresolvable rather than resolved against the previous

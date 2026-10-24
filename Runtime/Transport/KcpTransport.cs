@@ -345,6 +345,11 @@ namespace Cuvara.Netcode.Transport
                     // refusing shows up as the idle timeout / KCP connect timeout instead.
                     continue;
                 }
+                catch (Exception ex)
+                {
+                    FailUnexpectedLoop("receive", ex);
+                    break;
+                }
 
                 int read = 1;
                 try
@@ -358,6 +363,11 @@ namespace Cuvara.Netcode.Transport
                 catch (ObjectDisposedException)
                 {
                     // Close() disposed the socket or the crypto while this datagram was in flight.
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    FailUnexpectedLoop("receive", ex);
                     break;
                 }
                 finally
@@ -378,16 +388,38 @@ namespace Cuvara.Netcode.Transport
                     await UniTask.Delay(KcpClientSession.TuningInterval, DelayType.Realtime, PlayerLoopTiming.Update, ct);
                 }
                 catch (OperationCanceledException) { break; }
-
-                if (!_session.Tick())
+                catch (Exception ex)
                 {
-                    // Failed: stop the socket but keep the reason. The next read throws it,
-                    // so WireConnection closes with TransportError and logs why.
-                    try { _cts?.Cancel(); } catch { }
-                    try { _udp?.Close(); } catch { }
+                    FailUnexpectedLoop("update", ex);
+                    break;
+                }
+
+                try
+                {
+                    if (!_session.Tick())
+                    {
+                        StopFailedSession();
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    FailUnexpectedLoop("update", ex);
                     return;
                 }
             }
+        }
+
+        private void FailUnexpectedLoop(string loop, Exception ex)
+        {
+            _session?.Fail($"KCP {loop} loop failed: {ex.GetType().Name}: {ex.Message}");
+            StopFailedSession();
+        }
+
+        private void StopFailedSession()
+        {
+            try { _cts?.Cancel(); } catch { }
+            try { _udp?.Close(); } catch { }
         }
     }
 }
