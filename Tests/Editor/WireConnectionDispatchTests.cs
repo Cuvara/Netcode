@@ -326,6 +326,17 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(settings.KeyframeRetryInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2000)));
         }
 
+        [TestCase(0)]
+        [TestCase(-1)]
+        public void RetryIntervalMustBePositive(int milliseconds)
+        {
+            var settings = new NetworkSettings();
+
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                settings.KeyframeRetryInterval = TimeSpan.FromMilliseconds(milliseconds));
+            Assert.That(settings.KeyframeRetryInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2000)));
+        }
+
         [Test]
         public void ConfiguredRetryIntervalIsCheckedAfterDeltaSnapshot()
         {

@@ -790,7 +790,8 @@ records no new bindings, and triggers one `resync` — repeated requests are
 suppressed until a keyframe arrives, because a resync costs a full AOI snapshot.
 If the requested keyframe does not resolve, another request is sent after the
 configurable `NetworkSettings.KeyframeRetryInterval` (2 seconds by default),
-after processing a later snapshot. A full keyframe arriving at the timeout
+after processing a later snapshot. The interval must be positive; assigning zero or a negative
+value throws `ArgumentOutOfRangeException`. A full keyframe arriving at the timeout
 clears the latch before the retry check, so it does not trigger a redundant
 request.
 

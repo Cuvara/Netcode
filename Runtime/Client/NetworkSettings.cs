@@ -307,9 +307,20 @@ namespace Cuvara.Netcode.Client
 
         /// <summary>
         /// How long the client waits for a keyframe before asking again while snapshots
-        /// continue to arrive. The default preserves the 2 second retry interval.
+        /// continue to arrive. Must be positive; the default preserves the 2 second retry interval.
         /// </summary>
-        public TimeSpan KeyframeRetryInterval { get; set; } = TimeSpan.FromMilliseconds(2000);
+        public TimeSpan KeyframeRetryInterval
+        {
+            get => _keyframeRetryInterval;
+            set
+            {
+                if (value <= TimeSpan.Zero)
+                    throw new ArgumentOutOfRangeException(nameof(value), value, "Keyframe retry interval must be positive.");
+                _keyframeRetryInterval = value;
+            }
+        }
+
+        private TimeSpan _keyframeRetryInterval = TimeSpan.FromMilliseconds(2000);
 
         /// <summary>
         /// Keep the gateway connection open for the whole session.
