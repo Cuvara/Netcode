@@ -1,10 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.49.0] - 2026-10-24
 
 ### Changed
 
 - **Snapshot speed has explicit presence (server effective speed).** The decoder maps an absent speed to `NaN` and a present value to itself, so a present `0` now means *immobile* (rooted, stunned) instead of "not sent". `LocalMovePredictor.SetServerSpeed` adopts any finite value `>= 0` (zero predicts no movement) and ignores NaN, negative and infinite values. On field-delta partials, `changed_fields` bit `0x0020` governs speed in both encodings: a JSON partial with `"speed":0` and the bit clear keeps the previous speed. `ResolvedEntity`'s speedless constructor now leaves `NaN`. `EntitySnapshotData.Speed` stays a float (no Shared.GameLogic pin bump), `WireProtocolVersion` stays 3. Generated `Wire.cs` re-synced to the server's field-9 presence (`HasSpeed`). Consumers comparing `Speed` with `==` must use `float.IsNaN`.
+
+- **Compatibility:** effective speed requires server develop `8d08b93` or later; older servers continue sending base speed and retain the previous behavior.
 
 ### Fixed
 

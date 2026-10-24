@@ -53,8 +53,8 @@ namespace Cuvara.Netcode.Protocol.Messages
         /// <para>
         /// <b>Zero means "not advertised", not "version zero".</b> Real versions start
         /// at 1 precisely so the two are distinguishable, since proto3 elides a zero.
-        /// Same rule as <c>Speed</c> and <c>TickRate</c>, deliberately — a second
-        /// convention for the same situation would be a trap.
+        /// ProtocolVersion uses the same rule as <c>TickRate</c>; snapshot speed has separate
+        /// explicit presence.
         /// </para>
         /// <para>
         /// Present on a REJECTION too, unlike <c>TickRate</c>: a client refused for a
