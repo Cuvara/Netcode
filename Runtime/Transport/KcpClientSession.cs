@@ -123,6 +123,7 @@ namespace Cuvara.Netcode.Transport
         private long _datagramsReceived;
         private long _datagramsRejected;
         private string _failure;
+        private bool _disposed;
 
         /// <param name="conv">Conversation id; see <see cref="NewConversationId"/>.</param>
         /// <param name="transportKey">kcp-go-compatible AES key (64 hex chars), or null/empty for plaintext.</param>
@@ -178,6 +179,9 @@ namespace Cuvara.Netcode.Transport
 
         /// <summary>Why the session failed, or null while it is healthy.</summary>
         public string FailureReason { get { lock (_lock) { return _failure; } } }
+
+        /// <summary>True after disposal has closed the session and crypto state.</summary>
+        public bool IsDisposed { get { lock (_lock) { return _disposed; } } }
 
         public bool IsFailed => FailureReason != null;
 
@@ -290,7 +294,7 @@ namespace Cuvara.Netcode.Transport
         {
             lock (_lock)
             {
-                if (_failure != null)
+                if (_disposed || _failure != null)
                 {
                     return;
                 }
@@ -330,7 +334,7 @@ namespace Cuvara.Netcode.Transport
         {
             lock (_lock)
             {
-                if (_failure != null)
+                if (_disposed || _failure != null)
                 {
                     return false;
                 }
@@ -386,6 +390,11 @@ namespace Cuvara.Netcode.Transport
             {
                 while (true)
                 {
+                    if (_disposed)
+                    {
+                        return null;
+                    }
+
                     if (_failure != null)
                     {
                         throw new TransportException(_failure);
@@ -428,6 +437,11 @@ namespace Cuvara.Netcode.Transport
 
             lock (_lock)
             {
+                if (_disposed)
+                {
+                    throw new TransportException("KCP session is closed");
+                }
+
                 if (_failure != null)
                 {
                     throw new TransportException(_failure);
@@ -459,7 +473,12 @@ namespace Cuvara.Netcode.Transport
 
         public void Dispose()
         {
-            _crypto?.Dispose();
+            lock (_lock)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _crypto?.Dispose();
+            }
         }
 
         private void Output(byte[] buf, int size)
@@ -473,7 +492,11 @@ namespace Cuvara.Netcode.Transport
             }
             var packet = _sendScratch;
             Buffer.BlockCopy(buf, 0, packet, _cryptoHeaderSize, size);
-            _crypto?.Seal(packet, 0, packetLength);
+            if (_crypto != null && !_crypto.Seal(packet, 0, packetLength))
+            {
+                return;
+            }
+
             _sendDatagram(packet, packetLength);
         }
 

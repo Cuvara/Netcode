@@ -911,22 +911,12 @@ namespace Cuvara.Netcode.Client
 
         private void InvokeSafely<T>(Action<T> handlers, T value, string eventName)
         {
-            if (handlers == null) return;
-            foreach (Action<T> handler in handlers.GetInvocationList())
-            {
-                try { handler(value); }
-                catch (Exception ex) { _log.Warn($"{eventName} subscriber failed: {ex.Message}"); }
-            }
+            SubscriberInvoker.InvokeSafely(handlers, value, eventName, _log);
         }
 
         private void InvokeSafely(Action handlers, string eventName)
         {
-            if (handlers == null) return;
-            foreach (Action handler in handlers.GetInvocationList())
-            {
-                try { handler(); }
-                catch (Exception ex) { _log.Warn($"{eventName} subscriber failed: {ex.Message}"); }
-            }
+            SubscriberInvoker.InvokeSafely(handlers, eventName, _log);
         }
 
         private void OnGatewayClosed(DisconnectInfo info)

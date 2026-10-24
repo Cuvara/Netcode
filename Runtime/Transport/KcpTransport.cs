@@ -412,6 +412,13 @@ namespace Cuvara.Netcode.Transport
 
         private void FailUnexpectedLoop(string loop, Exception ex)
         {
+            // A close may race a receive/update operation. Exceptions raised by the
+            // already-closing session are teardown noise, not a transport failure.
+            if (Volatile.Read(ref _closed) != 0 || _session == null || _session.IsDisposed)
+            {
+                return;
+            }
+
             _session?.Fail($"KCP {loop} loop failed: {ex.GetType().Name}: {ex.Message}");
             StopFailedSession();
         }

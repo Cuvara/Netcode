@@ -41,6 +41,7 @@ namespace Cuvara.Netcode.Transport
         private readonly byte[] _nonce = new byte[NonceSize];
         private readonly byte[] _feedback = new byte[16];
         private readonly byte[] _scratch = new byte[16];
+        private bool _disposed;
 
         private KcpCrypto(byte[] key)
         {
@@ -85,8 +86,10 @@ namespace Cuvara.Netcode.Transport
         /// Encrypts <paramref name="packet"/> in place. The caller must have reserved
         /// <see cref="HeaderSize"/> bytes at the front for the nonce and CRC.
         /// </summary>
-        public void Seal(byte[] packet, int offset, int length)
+        public bool Seal(byte[] packet, int offset, int length)
         {
+            if (_disposed) return false;
+
             // Fill nonce with random bytes.
             _rng.GetBytes(_nonce);
             Buffer.BlockCopy(_nonce, 0, packet, offset, NonceSize);
@@ -99,15 +102,17 @@ namespace Cuvara.Netcode.Transport
             packet[offset + NonceSize + 3] = (byte)((crc >> 24) & 0xFF);
 
             CfbEncrypt(packet, offset, length);
+            return true;
         }
 
         /// <summary>
         /// Decrypts <paramref name="packet"/> in place and returns the length of the
         /// KCP byte range (starting at <paramref name="offset"/> + <see cref="HeaderSize"/>),
-        /// or 0 if the datagram is too short or fails the checksum.
+        /// 0 if the datagram is too short or fails the checksum, or -1 after disposal.
         /// </summary>
         public int Open(byte[] packet, int offset, int length)
         {
+            if (_disposed) return -1;
             if (length < HeaderSize) return 0;
 
             CfbDecrypt(packet, offset, length);
@@ -218,6 +223,8 @@ namespace Cuvara.Netcode.Transport
 
         public void Dispose()
         {
+            if (_disposed) return;
+            _disposed = true;
             _rng?.Dispose();
             _encryptor?.Dispose();
             _aes?.Dispose();

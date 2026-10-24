@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using System.Collections;
+using Cuvara.Netcode.Client;
 using NUnit.Framework;
 using UnityEngine.TestTools;
 using Cuvara.Netcode.Client;
@@ -59,12 +60,13 @@ namespace Cuvara.Netcode.Tests.Editor
             // parks on it exactly as it would park on a quiet socket.
             private readonly UniTaskCompletionSource<byte[]> _parked =
                 new UniTaskCompletionSource<byte[]>();
+            private bool _closed;
 
             public readonly List<byte[]> Written = new List<byte[]>();
 
             public string RemoteEndPoint => "scripted";
 
-            public bool IsConnected => true;
+            public bool IsConnected => !_closed;
 
             public int ReadCalls { get; private set; }
 
@@ -87,9 +89,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 return UniTask.CompletedTask;
             }
 
-            public void Close() { }
+            public void Close() => _closed = true;
 
-            public void Dispose() { }
+            public void Dispose() => _closed = true;
         }
 
         private sealed class SilentLog : INetLog
@@ -97,6 +99,13 @@ namespace Cuvara.Netcode.Tests.Editor
             public void Info(string message) { }
             public void Warn(string message) { }
             public void Error(string message, Exception exception = null) { }
+        }
+
+        private sealed class FixedTransportFactory : ITransportFactory
+        {
+            private readonly ITransport _transport;
+            public FixedTransportFactory(ITransport transport) => _transport = transport;
+            public ITransport Create(TransportKind kind) => _transport;
         }
 
         private static readonly JsonWireCodec Codec = new JsonWireCodec();
@@ -247,6 +256,57 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(delivered, Is.Zero,
                 "a snapshot decoded after the eviction was handed to a consumer that " +
                 "believes the session is over — whatever it does with it is wrong");
+        }
+
+        [Test]
+        public void AThrowingSnapshotSubscriberDoesNotCloseTheLink()
+        {
+            var (conn, _) = Connect(Snapshot(1), Snapshot(2));
+            conn.FrameReceived += frame =>
+            {
+                if (frame.Type == MsgType.Snapshot) throw new InvalidOperationException("subscriber fault");
+            };
+            conn.Start();
+
+            Assert.That(conn.IsRunning, Is.True,
+                "a consumer exception must not be reported as a transport or protocol fault");
+            Assert.That(conn.CloseInfo, Is.Null);
+            Assert.That(conn.FramesReceived, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void AThrowingSnapshotReceivedSubscriberLeavesTheGameplayLinkUp()
+        {
+            var transport = new ScriptedTransport();
+            transport.Enqueue(Inbound(MsgType.JoinTokenResp,
+                "{\"ok\":true,\"user_id\":\"test-user\",\"protocol_version\":3,\"tick_rate\":60}"));
+            transport.Enqueue(Inbound(MsgType.Snapshot, "{\"tick\":1,\"full\":true}"));
+            var client = new GameSessionClient(
+                new NetworkSettings(), new FixedTransportFactory(transport), Codec, new SilentLog());
+            var delivered = 0;
+            client.SnapshotReceived += _ => throw new InvalidOperationException("snapshot consumer fault");
+            client.SnapshotReceived += _ => delivered++;
+
+            client.JoinAsync(
+                new MapAssignment(new NetworkEndpoint("127.0.0.1", 9000), "token", TransportKind.Kcp),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.That(client.IsConnected, Is.True);
+            Assert.That(transport.IsConnected, Is.True);
+            Assert.That(delivered, Is.EqualTo(1), "later snapshot subscribers still run");
+            Assert.That(client.ServerTick, Is.EqualTo(1));
+            client.Dispose();
+        }
+
+        [Test]
+        public void DecodeFaultClosesTheLinkAsAProtocolError()
+        {
+            var (conn, _) = Connect(new byte[] { 0x00 });
+            conn.Start();
+
+            Assert.That(conn.IsRunning, Is.False);
+            Assert.That(conn.CloseInfo.HasValue, Is.True);
+            Assert.That(conn.CloseInfo.Value.Cause, Is.EqualTo(DisconnectCause.ProtocolError));
         }
     }
 }

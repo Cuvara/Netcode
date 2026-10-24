@@ -42,6 +42,23 @@ namespace Cuvara.Netcode.Tests.Editor
             transport.Dispose();
         }
 
+        [Test]
+        public void UnexpectedKcpLoopExceptionAfterClose_DoesNotCreateAFailureReason()
+        {
+            var session = new KcpClientSession(1, null, (_, __) => { }, () => 0, "test");
+            var transport = new KcpTransport();
+            typeof(KcpTransport).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(transport, session);
+            transport.Close();
+
+            typeof(KcpTransport).GetMethod("FailUnexpectedLoop", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(transport, new object[] { "receive", new InvalidOperationException("close race") });
+
+            Assert.That(session.FailureReason, Is.Null,
+                "exceptions reported after Close are teardown noise and must not change the reason");
+            transport.Dispose();
+        }
+
         private sealed class NullLog : INetLog
         {
             public void Info(string message) { }

@@ -736,7 +736,8 @@ attempt-start or reconnected handler is logged and cannot turn a successful join
 into another attempt. Before a retry, the previous gateway and gameplay
 connections are torn down. The same per-subscriber guard applies to snapshot,
 push, command-result, state and close notifications; these application callbacks
-do not close the transport.
+do not close the transport. Failures include the exception type and stack trace;
+`OperationCanceledException` propagates to preserve cancellation semantics.
 
 **Why the gateway link is not retried in place.** Losing the gateway socket
 while the game session is up costs only eviction notices. Re-authenticating
@@ -1840,7 +1841,8 @@ Sample); empty means plaintext (the dev default). Key derivation matches Go's
 with HKDF-SHA256. A wrong key fails the CRC on both ends and every datagram is dropped, which
 is why the connect-timeout message names the key.
 Each encrypted session owns and reuses its RNG, AES transform and block scratch
-under the session lock. KCP keeps flushed datagram buffers; the warmed headless
+under the session lock. Disposal takes that same lock, so an in-flight packet
+cannot observe a disposed transform. KCP keeps flushed datagram buffers; the warmed headless
 Seal+Open probe is below 32 B per pair after initialization. KCP output buffers
 are borrowed only for the duration of the output callback.
 Each encrypted session owns and reuses its RNG, AES transform and block scratch

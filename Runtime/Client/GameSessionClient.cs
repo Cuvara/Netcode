@@ -769,12 +769,7 @@ namespace Cuvara.Netcode.Client
 
         private void InvokeSafely<T>(Action<T> handlers, T value, string eventName)
         {
-            if (handlers == null) return;
-            foreach (Action<T> handler in handlers.GetInvocationList())
-            {
-                try { handler(value); }
-                catch (Exception ex) { _log.Warn($"{eventName} subscriber failed: {ex.Message}"); }
-            }
+            SubscriberInvoker.InvokeSafely(handlers, value, eventName, _log);
         }
     }
 }

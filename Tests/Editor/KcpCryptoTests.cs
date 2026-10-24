@@ -136,6 +136,18 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void DisposedCrypto_ReturnsClosedResultsWithoutTouchingTheTransform()
+        {
+            var crypto = KcpCrypto.TryCreate("test-key-for-dispose");
+            var packet = new byte[KcpCrypto.HeaderSize + 32];
+            crypto.Dispose();
+
+            Assert.That(crypto.Seal(packet, 0, packet.Length), Is.False);
+            Assert.That(crypto.Open(packet, 0, packet.Length), Is.EqualTo(-1));
+            Assert.DoesNotThrow(() => crypto.Dispose());
+        }
+
+        [Test]
         public void NonHexKey_IsStretchedWithHkdf()
         {
             var key1 = KcpCrypto.DeriveKey("my-passphrase");

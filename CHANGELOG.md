@@ -6,12 +6,15 @@
 
 - **A throwing game-side event subscriber no longer closes the gameplay link.** Snapshot, push,
   command result, state, reconnect, and close notifications isolate each subscriber and log its
-  failure before continuing to the next one.
+  exception type and stack before continuing to the next one. Cancellation exceptions propagate.
+- **Closing KCP cannot race shared crypto disposal.** Session disposal serializes with packet
+  Open/Seal, and exceptions observed after transport close no longer create a failure reason.
 - **Reconnect notifications cannot turn a successful reconnect into another attempt.** Progress,
   attempt-start, and reconnected callbacks run behind individual exception guards, and old
   connections are torn down before another attempt begins.
 - **Unexpected KCP loop exceptions now fail the session.** Receive and update loop faults retain
   a `TransportError` reason and close the socket instead of leaving a silent half-open link.
+  Exceptions caused by an already-closing session are ignored.
 - **A missing or rejected keyframe no longer leaves resync disabled forever.** The client retries
   a keyframe request after 2 seconds while later snapshots continue to arrive.
 - **Predictor replay now has an explicit speed-change regression case.** The test checks that
