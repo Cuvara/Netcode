@@ -200,6 +200,19 @@ namespace Cuvara.Netcode.Tests.Editor
             /// <summary>Length of the server stall. 0 = no stall.</summary>
             public double ServerStallSeconds;
 
+            /// <summary>
+            /// When <see cref="RateStepSeconds"/> is positive, the server's tick rate is
+            /// <see cref="RateStepHz"/> for the window starting at this time and <see cref="ServerHz"/>
+            /// before and after it: a server clock-rate step (a VM time-sync correction), not a stall.
+            /// </summary>
+            public double RateStepAtSeconds;
+
+            /// <summary>Length of the rate step. 0 = none.</summary>
+            public double RateStepSeconds;
+
+            /// <summary>Server tick rate inside the step, in ticks per client second.</summary>
+            public double RateStepHz;
+
             public static Config Default => new Config
             {
                 ServerHz = 60.0,
@@ -505,7 +518,10 @@ namespace Cuvara.Netcode.Tests.Editor
                         });
                     }
 
-                    nextServerTick += serverPeriod;
+                    nextServerTick += c.RateStepSeconds > 0.0 && nextServerTick >= c.RateStepAtSeconds
+                        && nextServerTick < c.RateStepAtSeconds + c.RateStepSeconds
+                        ? 1.0 / c.RateStepHz
+                        : serverPeriod;
                 }
 
                 // ── The backlog of a hitch, delivered at the transport's pace ──

@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Test only: pin the prediction's behaviour under a server tick-rate step (`ServerTickRateStepTests`, harness `RateStep*` knobs). A +18% step for 6 s forces one clock jump and one hard snap of about 1.25 units (steering is capped at 0.5 tick per snapshot); steps inside the steering budget do not. No runtime change.
 - Move the keyframe retry interval into `NetworkSettings` with its existing 2 second default, reject nonpositive values, and check expiry after handling a snapshot so a timely keyframe clears the latch before retry.
 - Pin the UnityDots compile-gate dependency in CI to the released `v0.33.0` tag.
 
