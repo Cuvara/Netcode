@@ -149,6 +149,7 @@
     <Compile Include="../../Tests/Editor/TickRateEstimatorTests.cs" />
     <Compile Include="../../Tests/Editor/AckAppliedTickReconcileTests.cs" />
     <Compile Include="../../Tests/Editor/PredictionHarness.cs" />
+    <Compile Include="../../Tests/Editor/ServerTickRateStepTests.cs" />
     <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
   </ItemGroup>
 
