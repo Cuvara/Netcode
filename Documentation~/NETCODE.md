@@ -629,16 +629,27 @@ dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
 
 `LeaveAsync` now works in four steps:
 
-1. It sends the frame through the send queue, so the frame is sealed and written after
-   everything queued before it. Nothing queued after it is sent.
-2. It waits for the write loop to hand the frame to the transport, for at most
-   `LeaveWriteTimeoutMs` (500 ms).
+1. It writes everything still queued, in order, then the `disconnect` frame, straight to the
+   transport **on the calling thread**. It does not go through the write loop (below).
+2. If the transport cannot complete a write at once (KCP can, TCP may not), it waits for it, for
+   at most `LeaveWriteTimeoutMs` (500 ms).
 3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
    acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
    `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
    acknowledgement, with a floor for the frame-bound ARQ timer and a cap so leaving never
    waits on a bad link.
 4. It closes.
+
+Step 1 does not use the write loop because the loop resumes on the player loop, and
+`Application.Quit` ends it: a scope disposed in the last frame queued the frame, the loop never
+ran, and the game server saw a KCP dead link instead of a leave (#182). `KcpClientSession`
+flushes on write, so the datagram is on the wire when `LeaveAsync` returns its task. The ack wait
+of step 3 needs the player loop, so on quit it is best effort: one datagram can be lost on a
+lossy link, and the server then falls back to its dead-link timeout.
+
+`NetworkClient.Dispose` leaves politely too, like `Disconnect`, so a root scope that disposes
+the client without calling `Disconnect` first still tells the server. After `Disconnect` nothing
+is connected, so a second call sends nothing.
 
 `Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
 leave, which disposes it when done, so disposing the session no longer cuts it off.

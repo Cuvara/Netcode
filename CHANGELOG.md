@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A client that quits now tells the server it left (#182).** `WireConnection.LeaveAsync` writes the queued frames and the `disconnect` frame to the transport on the calling thread instead of queuing it for the write loop, which never runs again after `Application.Quit`. `NetworkClient.Dispose` now leaves politely like `Disconnect` (it did not before). Without this, the server saw a KCP dead link and held the entity for its reconnect window. The wire format is unchanged. A client pin bump and the testlab S01 check (zero `dead_link` closes) remain.
+
 ### Changed
 
 - Test only: pin the prediction's behaviour under a server tick-rate step (`ServerTickRateStepTests`, harness `RateStep*` knobs). A +18% step for 6 s forces one clock jump and one hard snap of about 1.25 units. Steering has separate 0.5 tick-per-call proportional and integral caps; at 15 snapshots/s the integral cap is 7.5 ticks/s, not the total available correction. Chrony's maxslewrate applies to wall-clock adjustment and does not bound or validate the monotonic scheduler; a VM/host clock-correction cause remains a hypothesis. No runtime change.
