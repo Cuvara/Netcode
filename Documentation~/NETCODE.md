@@ -898,14 +898,13 @@ snapshot: **18,208 B → 10,512 B** when the entity count is steady, and
 **10,025 B → 7,353 B** when it varies. `SnapshotPipelineReuseTests` guards the
 content, not the byte counts.
 
-Those tests are pure C# but they are **not** in `Tests~/Headless`, and cannot be
-until that project can resolve `Shared.GameLogic`. `WorldState`, `ResolvedEntity`
-and `Msg.EntitySnapshot` all name `Shared.GameLogic` types, and that assembly
-arrives as a UPM **git** dependency Unity resolves into `PackageCache` — there is
-nothing for `dotnet restore` to fetch. Adding them to the headless project fails
-to compile with `CS0246: The type or namespace name 'Shared' could not be found`.
-They run in the Editor suite, and in the scratch project below, which reaches the
-`PackageCache` copy.
+`SnapshotPipelineReuseTests` now also runs in `Tests~/Headless`. The headless
+project compiles the codec and generated protocol sources and references the
+vendored `Runtime/Plugins/Google.Protobuf.dll`. As with the prediction tests,
+`Shared.GameLogic` must be available through `SglDir`; the default points at the
+sibling server checkout, while CI checks out the package-pinned tag and passes
+`-p:SglDir=...` explicitly. For a local run, pass `-p:SglDir=<path-to-Shared.GameLogic>`
+when that sibling checkout is not present.
 
 ## Remote entity interpolation
 
