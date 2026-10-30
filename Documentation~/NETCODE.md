@@ -629,16 +629,35 @@ dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
 
 `LeaveAsync` now works in four steps:
 
-1. It sends the frame through the send queue, so the frame is sealed and written after
-   everything queued before it. Nothing queued after it is sent.
-2. It waits for the write loop to hand the frame to the transport, for at most
-   `LeaveWriteTimeoutMs` (500 ms).
+1. It writes everything still queued, in order, then the `disconnect` frame, straight to the
+   transport **on the calling thread**. It does not go through the write loop (below).
+2. Only one transport write runs at a time: the write loop and the leave share a write gate.
+   `TcpTransport` reuses one buffer per write and has no lock, so the TCP gateway connection
+   (`GatewayClient.Close` leaves it) must not start a second write while the loop's write is
+   pending. The leave takes the gate at once when no write is in flight (always so for KCP, whose
+   writes complete synchronously) and otherwise waits for that write, then writes. If the
+   transport cannot complete a write at once (TCP may not), the leave waits for its own write too.
+   Each wait is bounded by `LeaveWriteTimeoutMs` (500 ms): one for the gate, then one per
+   frame written (each queued frame and the `disconnect`). When the gate is busy (TCP only),
+   the frame is not on the wire before the first suspension, so a goodbye on the gateway
+   connection can be lost if the process exits during that wait; the socket close follows.
 3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
    acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
    `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
    acknowledgement, with a floor for the frame-bound ARQ timer and a cap so leaving never
    waits on a bad link.
 4. It closes.
+
+Step 1 does not use the write loop because the loop resumes on the player loop, and
+`Application.Quit` ends it: a scope disposed in the last frame queued the frame, the loop never
+ran, and the game server saw a KCP dead link instead of a leave (#182). `KcpClientSession`
+flushes on write, so the datagram is on the wire when `LeaveAsync` returns its task. The ack wait
+of step 3 needs the player loop, so on quit it is best effort: one datagram can be lost on a
+lossy link, and the server then falls back to its dead-link timeout.
+
+`NetworkClient.Dispose` leaves politely too, like `Disconnect`, so a root scope that disposes
+the client without calling `Disconnect` first still tells the server. After `Disconnect` nothing
+is connected, so a second call sends nothing.
 
 `Leave()` starts that and returns. `GameSessionClient.Leave` hands the connection over to the
 leave, which disposes it when done, so disposing the session no longer cuts it off.
@@ -897,14 +916,13 @@ snapshot: **18,208 B → 10,512 B** when the entity count is steady, and
 **10,025 B → 7,353 B** when it varies. `SnapshotPipelineReuseTests` guards the
 content, not the byte counts.
 
-Those tests are pure C# but they are **not** in `Tests~/Headless`, and cannot be
-until that project can resolve `Shared.GameLogic`. `WorldState`, `ResolvedEntity`
-and `Msg.EntitySnapshot` all name `Shared.GameLogic` types, and that assembly
-arrives as a UPM **git** dependency Unity resolves into `PackageCache` — there is
-nothing for `dotnet restore` to fetch. Adding them to the headless project fails
-to compile with `CS0246: The type or namespace name 'Shared' could not be found`.
-They run in the Editor suite, and in the scratch project below, which reaches the
-`PackageCache` copy.
+`SnapshotPipelineReuseTests` now also runs in `Tests~/Headless`. The headless
+project compiles the codec and generated protocol sources and references the
+vendored `Runtime/Plugins/Google.Protobuf.dll`. As with the prediction tests,
+`Shared.GameLogic` must be available through `SglDir`; the default points at the
+sibling server checkout, while CI checks out the package-pinned tag and passes
+`-p:SglDir=...` explicitly. For a local run, pass `-p:SglDir=<path-to-Shared.GameLogic>`
+when that sibling checkout is not present.
 
 ## Remote entity interpolation
 

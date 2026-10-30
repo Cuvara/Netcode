@@ -40,6 +40,17 @@
     <Compile Include="../../Tests/Editor/SubscriberInvokerTests.cs" />
   </ItemGroup>
 
+  <!-- Codec and generated protobuf messages are pure C#; reference the vendored
+       runtime that Unity uses so codec tests run in the same headless suite. -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Codec/*.cs" />
+    <Compile Include="../../Runtime/Protocol/Generated/*.cs" />
+    <Reference Include="Google.Protobuf">
+      <HintPath>../../Runtime/Plugins/Google.Protobuf.dll</HintPath>
+    </Reference>
+    <Compile Include="../../Tests/Editor/SnapshotPipelineReuseTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="../../Runtime/Transport/FrameBuffer.cs" />
     <Compile Include="../../Runtime/Transport/WireFraming.cs" />

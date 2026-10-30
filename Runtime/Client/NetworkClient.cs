@@ -430,9 +430,16 @@ namespace Cuvara.Netcode.Client
             SetState(NetworkClientState.Ended, "user");
         }
 
+        /// <summary>
+        /// Drops both connections. Leaves politely when connected, like <see cref="Disconnect"/>:
+        /// a scope disposed on <c>Application.Quit</c> reaches here without a prior
+        /// <c>Disconnect</c>, and the disconnect frame is written before this returns because the
+        /// player loop does not run again to send it (Netcode #182). Safe after
+        /// <see cref="Disconnect"/>: nothing is connected by then, so no second frame is sent.
+        /// </summary>
         public void Dispose()
         {
-            BeginOperation(userClosed: true);
+            BeginOperation(userClosed: true, leavePolitely: true);
             SetState(NetworkClientState.Disconnected, "disposed");
         }
 

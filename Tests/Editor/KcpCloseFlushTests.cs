@@ -141,6 +141,28 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void AFrameWritten_IsOnTheWire_BeforeAnyTick_AndSurvivesDisposeAtOnce()
+        {
+            // The quit path (#182): the frame is written, the player loop never runs again, and the
+            // session is disposed. The datagram must already have left, with no Tick or pump.
+            var link = new Link();
+            link.Warm();
+            int before = link.UplinkSent + link.Uplink.Count;
+
+            link.Session.WriteFrame(Bye);
+            link.Session.Dispose();
+
+            Assert.That(link.UplinkSent + link.Uplink.Count, Is.GreaterThan(before),
+                "WriteFrame flushed a datagram without waiting for the ARQ timer");
+            foreach (var d in link.Uplink) link.Server.Input(d, 0, d.Length, ackNoDelay: true);
+            link.Server.Update();
+
+            var frame = link.ServerFrame();
+            Assert.That(frame, Is.Not.Null, "the server reads the frame from that one datagram");
+            Assert.That(WireFraming.ReadLength(frame, 0), Is.EqualTo(Bye.Length));
+        }
+
+        [Test]
         public void ClosingAtOnce_LosesAFrameWhoseFirstDatagramIsLost()
         {
             // The old Leave: write, then close in the same call. The first transmission is the only
