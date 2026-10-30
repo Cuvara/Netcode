@@ -348,6 +348,45 @@ namespace Cuvara.Netcode.Tests.Editor
             client.Dispose();
         }
 
+        // ── polite leave on dispose (Netcode #182) ───────────────────────
+
+        private static int Disconnects(RespondingTransport transport) =>
+            transport.Written.FindAll(t => t == (byte)MsgType.Disconnect).Count;
+
+        [UnityTest]
+        public IEnumerator Dispose_WhileConnected_SendsExactlyOneDisconnect_BeforeItReturns()
+        {
+            var factory = new ScriptedFactory().Then(GatewayOk()).Then(GameServerJoinOk());
+            var log = new RecordingLog();
+            var client = new NetworkClient(FastSettings(), factory, new JsonWireCodec(), log, new CountingAuth());
+
+            yield return LandInWorld(client, log);
+            Assert.That(Disconnects(factory.Created[1]), Is.EqualTo(0));
+
+            client.Dispose();
+
+            Assert.That(Disconnects(factory.Created[1]), Is.EqualTo(1),
+                "the quit path writes the goodbye on the calling thread: no player loop runs after it");
+            client.Dispose();
+            Assert.That(Disconnects(factory.Created[1]), Is.EqualTo(1), "a second Dispose sends nothing");
+        }
+
+        [UnityTest]
+        public IEnumerator Dispose_AfterDisconnect_SendsNoSecondDisconnect()
+        {
+            var factory = new ScriptedFactory().Then(GatewayOk()).Then(GameServerJoinOk());
+            var log = new RecordingLog();
+            var client = new NetworkClient(FastSettings(), factory, new JsonWireCodec(), log, new CountingAuth());
+
+            yield return LandInWorld(client, log);
+            client.Disconnect();
+            Assert.That(Disconnects(factory.Created[1]), Is.EqualTo(1));
+
+            client.Dispose();
+
+            Assert.That(Disconnects(factory.Created[1]), Is.EqualTo(1));
+        }
+
         [UnityTest]
         public IEnumerator DuplicateLoginKick_NeverReconnects()
         {

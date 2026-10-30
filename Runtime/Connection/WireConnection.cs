@@ -61,14 +61,14 @@ namespace Cuvara.Netcode.Connection
         private int _queueDepth;
         private int _started;
 
-        // Set once the disconnect frame of a graceful leave is queued: nothing may follow it.
+        // Set once a graceful leave has begun: nothing may be queued after its disconnect frame.
         private int _leaving;
 
-        // The disconnect frame of a graceful leave, and the signal the write loop sets once it has
-        // handed that frame to the transport.
-        private byte[] _leaveFrame;
-        private readonly TaskCompletionSource<bool> _leaveFrameWritten =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // One transport write at a time. The write loop holds it around each queued frame and a
+        // leave holds it for its own writes: TcpTransport reuses one buffer per write and has no
+        // lock, and a TLS stream rejects a second write while one is pending.
+        private readonly SemaphoreSlim _writeGate = new SemaphoreSlim(1, 1);
+
         private int _closeSignalled;
         private int _disposed;
         // Monotonic milliseconds (NetworkSettings.MonotonicClock), never wall
@@ -300,8 +300,8 @@ namespace Cuvara.Netcode.Connection
         }
 
         /// <summary>
-        /// Longest a leave waits for the write loop to hand its disconnect frame to the
-        /// transport. The loop resumes on the player loop, so this is normally one frame.
+        /// Longest a leave waits for a transport write that does not complete on the calling
+        /// thread. KCP writes complete at once, so this only bounds other transports.
         /// </summary>
         public const int LeaveWriteTimeoutMs = 500;
 
@@ -327,62 +327,113 @@ namespace Cuvara.Netcode.Connection
         }
 
         /// <summary>
-        /// Sends a polite <c>disconnect</c>, waits until the transport has delivered it, then
-        /// closes. Bounded: at most <see cref="LeaveWriteTimeoutMs"/> for the write loop to take
-        /// the frame, then the transport's own flush budget (KCP:
+        /// Sends a polite <c>disconnect</c> on the calling thread, waits until the transport has
+        /// delivered it, then closes. When no transport write is in flight (always so for KCP,
+        /// whose writes complete synchronously) the frame is handed to the transport before the
+        /// first suspension, so it is on the wire when this returns its task even if the player
+        /// loop never runs again. Otherwise it first waits on the write gate for the in-flight
+        /// write (bounded by <c>LeaveWriteTimeoutMs</c>). The wait is bounded by the transport's own flush budget (KCP:
         /// <see cref="KcpClientSession.CloseFlushBudget"/>, at most 500 ms).
         /// </summary>
         /// <remarks>
         /// <para>
         /// This used to queue the frame and close in the same call. Closing cancelled the write
-        /// loop before it ever ran, so the frame was never written, and on KCP even a written frame
+        /// loop before it ran, so the frame was never written, and on KCP even a written frame
         /// needs the socket alive until it is acknowledged. The server therefore never saw a
         /// graceful leave: both rpg-factory testlab S08G runs ended on the server's KCP dead-link
         /// timeout instead.
         /// </para>
         /// <para>
-        /// The frame goes through the send queue rather than straight to the transport, so it is
-        /// sealed and written in order after everything queued before it. Nothing queued after it
-        /// is sent.
+        /// A later version still queued the frame and let the write loop send it. That loop
+        /// resumes on the player loop, which does not run after <c>Application.Quit</c>: a
+        /// quitting client left no datagram behind and the server saw a dead link (Netcode #182).
+        /// The write loop is bypassed now. Frames already queued are written first, in order, then
+        /// the disconnect. Nothing queued after it is sent.
         /// </para>
         /// </remarks>
         public async UniTask LeaveAsync(string reason = "")
         {
             if (IsRunning && Interlocked.Exchange(ref _leaving, 1) == 0)
             {
-                byte[] bye = Enqueue(MsgType.Disconnect, new DisconnectMessage { Reason = reason });
-                if (bye != null)
+                try
                 {
-                    // Set before the write loop can run: it resumes on the same context as this.
-                    Volatile.Write(ref _leaveFrame, bye);
-                    try
+                    // Takes the gate and writes synchronously when nothing is in flight, which is
+                    // always so for a transport whose writes complete at once (KCP). Otherwise it
+                    // waits, bounded, for the write loop's current write to finish first.
+                    var written = false;
+                    if (await _writeGate.WaitAsync(LeaveWriteTimeoutMs, _cts.Token))
                     {
-                        // A Task timer rather than a player-loop delay, so the wait also ends in an
-                        // edit-mode Editor, where only the synchronization context is pumped.
-                        await Task.WhenAny(
-                                _leaveFrameWritten.Task,
-                                Task.Delay(LeaveWriteTimeoutMs, _cts.Token))
-                            .AsUniTask();
-
-                        if (_leaveFrameWritten.Task.IsCompleted
-                            && IsRunning
-                            && _transport is IFlushableTransport flushable)
+                        try
                         {
-                            LeaveAcknowledged = await flushable.FlushAsync(_cts.Token);
+                            written = await WriteLeaveFramesAsync(reason);
+                        }
+                        finally
+                        {
+                            _writeGate.Release();
                         }
                     }
-                    catch (OperationCanceledException)
+
+                    if (written && IsRunning && _transport is IFlushableTransport flushable)
                     {
-                        // Closed or disposed meanwhile: nothing left to wait for.
+                        LeaveAcknowledged = await flushable.FlushAsync(_cts.Token);
                     }
-                    catch (Exception ex)
-                    {
-                        _log.Warn($"{_name}: leave did not complete cleanly: {ex.Message}");
-                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Closed or disposed meanwhile: nothing left to wait for.
+                }
+                catch (Exception ex)
+                {
+                    _log.Warn($"{_name}: leave did not complete cleanly: {ex.Message}");
                 }
             }
 
             Close(reason);
+        }
+
+        /// <summary>
+        /// Writes what is queued, then the disconnect, straight to the transport. Returns whether
+        /// the disconnect was handed over.
+        /// </summary>
+        private async UniTask<bool> WriteLeaveFramesAsync(string reason)
+        {
+            while (_sendQueue.TryDequeue(out var queued))
+            {
+                Interlocked.Decrement(ref _queueDepth);
+                if (!await WriteBoundedAsync(queued))
+                {
+                    return false;
+                }
+            }
+
+            byte[] bye;
+            try
+            {
+                bye = SealIfNeeded(_outbound.EncodeBody(MsgType.Disconnect, new DisconnectMessage { Reason = reason }));
+            }
+            catch (WireCodecException ex)
+            {
+                _log.Error($"{_name}: cannot encode {MsgType.Disconnect}", ex);
+                return false;
+            }
+
+            return await WriteBoundedAsync(bye);
+        }
+
+        private async UniTask<bool> WriteBoundedAsync(byte[] body)
+        {
+            var write = _transport.WriteFrameAsync(body, CancellationToken.None);
+            if (write.Status.IsCompleted())
+            {
+                write.GetAwaiter().GetResult();
+                return true;
+            }
+
+            // A Task timer rather than a player-loop delay, so the wait also ends in an edit-mode
+            // Editor, where only the synchronization context is pumped.
+            var task = write.AsTask();
+            await Task.WhenAny(task, Task.Delay(LeaveWriteTimeoutMs, _cts.Token)).AsUniTask();
+            return task.Status == TaskStatus.RanToCompletion;
         }
 
         public void Dispose()
@@ -446,13 +497,22 @@ namespace Cuvara.Netcode.Connection
                 {
                     await _sendSignal.WaitAsync(token).AsUniTask();
 
-                    while (_sendQueue.TryDequeue(out var body))
+                    while (true)
                     {
-                        Interlocked.Decrement(ref _queueDepth);
-                        await _transport.WriteFrameAsync(body, token);
-                        if (ReferenceEquals(body, Volatile.Read(ref _leaveFrame)))
+                        await _writeGate.WaitAsync(token);
+                        try
                         {
-                            _leaveFrameWritten.TrySetResult(true);
+                            if (!_sendQueue.TryDequeue(out var body))
+                            {
+                                break;
+                            }
+
+                            Interlocked.Decrement(ref _queueDepth);
+                            await _transport.WriteFrameAsync(body, token);
+                        }
+                        finally
+                        {
+                            _writeGate.Release();
                         }
                     }
                 }
