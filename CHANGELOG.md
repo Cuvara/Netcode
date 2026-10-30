@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **A client that quits now tells the server it left (#182).** `WireConnection.LeaveAsync` writes the queued frames and the `disconnect` frame to the transport on the calling thread instead of queuing it for the write loop, which never runs again after `Application.Quit`. `NetworkClient.Dispose` now leaves politely like `Disconnect` (it did not before). Without this, the server saw a KCP dead link and held the entity for its reconnect window. The wire format is unchanged. A client pin bump and the testlab S01 check (zero `dead_link` closes) remain.
+- **A client that quits now tells the server it left (#182).** `WireConnection.LeaveAsync` writes the queued frames and the `disconnect` frame to the transport on the calling thread instead of queuing it for the write loop, which never runs again after `Application.Quit`. The leave and the write loop share a write gate, so a leave never writes while the loop is mid-write (the TCP gateway connection reuses one write buffer): it waits for that write, for at most 500 ms. `NetworkClient.Dispose` now leaves politely like `Disconnect` (it did not before). Without this, the server saw a KCP dead link and held the entity for its reconnect window. The wire format is unchanged. A client pin bump and the testlab S01 check (zero `dead_link` closes) remain.
 
 ### Changed
 

@@ -64,6 +64,11 @@ namespace Cuvara.Netcode.Connection
         // Set once a graceful leave has begun: nothing may be queued after its disconnect frame.
         private int _leaving;
 
+        // One transport write at a time. The write loop holds it around each queued frame and a
+        // leave holds it for its own writes: TcpTransport reuses one buffer per write and has no
+        // lock, and a TLS stream rejects a second write while one is pending.
+        private readonly SemaphoreSlim _writeGate = new SemaphoreSlim(1, 1);
+
         private int _closeSignalled;
         private int _disposed;
         // Monotonic milliseconds (NetworkSettings.MonotonicClock), never wall
@@ -350,8 +355,21 @@ namespace Cuvara.Netcode.Connection
             {
                 try
                 {
-                    // Runs synchronously for a transport whose writes complete at once (KCP).
-                    var written = await WriteLeaveFramesAsync(reason);
+                    // Takes the gate and writes synchronously when nothing is in flight, which is
+                    // always so for a transport whose writes complete at once (KCP). Otherwise it
+                    // waits, bounded, for the write loop's current write to finish first.
+                    var written = false;
+                    if (await _writeGate.WaitAsync(LeaveWriteTimeoutMs, _cts.Token))
+                    {
+                        try
+                        {
+                            written = await WriteLeaveFramesAsync(reason);
+                        }
+                        finally
+                        {
+                            _writeGate.Release();
+                        }
+                    }
 
                     if (written && IsRunning && _transport is IFlushableTransport flushable)
                     {
@@ -477,10 +495,23 @@ namespace Cuvara.Netcode.Connection
                 {
                     await _sendSignal.WaitAsync(token).AsUniTask();
 
-                    while (_sendQueue.TryDequeue(out var body))
+                    while (true)
                     {
-                        Interlocked.Decrement(ref _queueDepth);
-                        await _transport.WriteFrameAsync(body, token);
+                        await _writeGate.WaitAsync(token);
+                        try
+                        {
+                            if (!_sendQueue.TryDequeue(out var body))
+                            {
+                                break;
+                            }
+
+                            Interlocked.Decrement(ref _queueDepth);
+                            await _transport.WriteFrameAsync(body, token);
+                        }
+                        finally
+                        {
+                            _writeGate.Release();
+                        }
                     }
                 }
             }

@@ -631,8 +631,13 @@ dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
 
 1. It writes everything still queued, in order, then the `disconnect` frame, straight to the
    transport **on the calling thread**. It does not go through the write loop (below).
-2. If the transport cannot complete a write at once (KCP can, TCP may not), it waits for it, for
-   at most `LeaveWriteTimeoutMs` (500 ms).
+2. Only one transport write runs at a time: the write loop and the leave share a write gate.
+   `TcpTransport` reuses one buffer per write and has no lock, so the TCP gateway connection
+   (`GatewayClient.Close` leaves it) must not start a second write while the loop's write is
+   pending. The leave takes the gate at once when no write is in flight (always so for KCP, whose
+   writes complete synchronously) and otherwise waits for that write, then writes. If the
+   transport cannot complete a write at once (TCP may not), the leave waits for its own write too.
+   Both waits together are bounded by `LeaveWriteTimeoutMs` (500 ms) each.
 3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
    acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
    `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
