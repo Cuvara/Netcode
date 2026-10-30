@@ -123,7 +123,7 @@ namespace Cuvara.Netcode.Tests.Editor
             using (var transport = new TcpTransport(Pinned(_serverCert.RawData)))
             {
                 var task = StartConnect(transport, port, _cts.Token);
-                Assert.That(task.Wait(Bound), Is.True, "connect did not finish within the bound");
+                Assert.That(WaitSettled(task, Bound), Is.True, "connect did not finish within the bound");
                 Assert.That(task.IsFaulted, Is.False, task.Exception?.ToString());
                 Assert.That(transport.IsConnected, Is.True);
                 Assert.That(transport.NegotiatedProtocol, Is.Not.EqualTo(SslProtocols.None));
@@ -231,7 +231,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 var task = StartConnect(transport, port, timeout.Token);
 
                 // Bounded twice: the token ends the handshake, the wait ends the test.
-                Assert.That(task.Wait(Bound + TimeSpan.FromSeconds(5)), Is.True,
+                Assert.That(WaitSettled(task, Bound + TimeSpan.FromSeconds(5)), Is.True,
                     "connect neither finished nor honoured its cancellation token");
                 Assert.That(task.IsFaulted, Is.True,
                     task.IsCanceled ? "connect timed out (cancelled)" : "connect unexpectedly succeeded");
@@ -262,6 +262,19 @@ namespace Cuvara.Netcode.Tests.Editor
                     SetSynchronizationContext(this);
                     d(state);
                 });
+        }
+
+        /// <summary>Waits for the task to settle; a fault counts as settled (Wait would rethrow it).</summary>
+        private static bool WaitSettled(Task task, TimeSpan bound)
+        {
+            try
+            {
+                return task.Wait(bound);
+            }
+            catch (AggregateException)
+            {
+                return true;
+            }
         }
 
         private static string Describe(Exception ex)
