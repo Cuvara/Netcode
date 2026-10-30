@@ -122,17 +122,17 @@ namespace Cuvara.Netcode.Client
         public event Action<Protocol.Messages.ServerPush> ServerPushReceived;
 
         /// <summary>
-        /// Raised before each automatic reconnect round (1-based attempt number),
-        /// after its backoff pause. Fires only when the policy chose to reconnect
-        /// (see <see cref="ReconnectPolicy"/>) and an <c>IAuthProvider</c> is
-        /// registered.
+        /// Raised before each retry round (1-based attempt number), after its
+        /// backoff pause. Fires for automatic reconnects and transient first-connect
+        /// retries, including connects supplied with a JWT directly.
         /// </summary>
         public event Action<int> ReconnectAttemptStarted;
 
         /// <summary>
-        /// Raised when a reconnect round is scheduled, before its pause, with the
-        /// attempt number, the round cap and the pause length — what a
-        /// "Reconnecting… attempt 2/8 (next in 3 s)" overlay binds to.
+        /// Raised when a retry round is scheduled, before its pause, with the
+        /// attempt number, the round cap and the pause length. Fires for automatic
+        /// reconnects and transient first-connect retries while the client is
+        /// Authenticating, so an overlay can show retry progress.
         /// </summary>
         public event Action<ReconnectionProgress> ReconnectProgress;
 
@@ -492,10 +492,7 @@ namespace Cuvara.Netcode.Client
                     Guard(generation, ct);
                 }
 
-                gateway = new GatewayClient(_settings, _transports, _codec, _log);
-                gateway.Closed += OnGatewayClosed;
-                await gateway.AuthenticateAsync(jwt, ct);
-                Guard(generation, ct);
+                gateway = await AuthenticateGatewayWithRetryAsync(jwt, generation, ct, inReconnect);
 
                 NetworkException lastFailure = null;
                 var attempts = Math.Max(1, _settings.JoinAttempts);
@@ -603,6 +600,79 @@ namespace Cuvara.Netcode.Client
                     }
                 }
             }
+        }
+
+        private async UniTask<GatewayClient> AuthenticateGatewayWithRetryAsync(
+            string jwt, int generation, CancellationToken ct, bool inReconnect)
+        {
+            var maxAttempts = inReconnect ? 1 : Math.Max(1, _settings.ReconnectAttempts);
+            var startedMs = _settings.MonotonicClock();
+            Exception lastFailure = null;
+
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                Guard(generation, ct);
+                var gateway = new GatewayClient(_settings, _transports, _codec, _log);
+                gateway.Closed += OnGatewayClosed;
+                try
+                {
+                    await gateway.AuthenticateAsync(jwt, ct);
+                    Guard(generation, ct);
+                    return gateway;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested || generation != _generation)
+                {
+                    gateway.Closed -= OnGatewayClosed;
+                    gateway.Dispose();
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    gateway.Closed -= OnGatewayClosed;
+                    gateway.Dispose();
+                    lastFailure = ex;
+
+                    if (inReconnect || !ReconnectPolicy.ShouldRetryInitialConnect(ex))
+                    {
+                        throw;
+                    }
+
+                    if (attempt >= maxAttempts)
+                    {
+                        LogInitialConnectExhausted(attempt, startedMs, ex, "attempt cap");
+                        throw;
+                    }
+
+                    var pause = WithJitter(ReconnectPolicy.Backoff(
+                        attempt, _settings.ReconnectDelay, _settings.ReconnectMaxDelay));
+                    var elapsedMs = _settings.MonotonicClock() - startedMs;
+                    if (elapsedMs + (long)pause.TotalMilliseconds > _settings.ReconnectBudget.TotalMilliseconds)
+                    {
+                        LogInitialConnectExhausted(attempt, startedMs, ex, "budget");
+                        throw;
+                    }
+
+                    _log.Warn($"initial gateway attempt {attempt}/{maxAttempts} failed: {ex.Message}");
+                    InvokeSafely(ReconnectProgress,
+                        new ReconnectionProgress(attempt + 1, maxAttempts, (float)pause.TotalSeconds),
+                        nameof(ReconnectProgress));
+                    if (pause > TimeSpan.Zero)
+                    {
+                        await _settings.DelayScheduler(pause, ct);
+                    }
+
+                    Guard(generation, ct);
+                    InvokeSafely(ReconnectAttemptStarted, attempt + 1, nameof(ReconnectAttemptStarted));
+                }
+            }
+
+            throw lastFailure ?? new TransportException("initial gateway authentication failed");
+        }
+
+        private void LogInitialConnectExhausted(int attempts, long startedMs, Exception failure, string reason)
+        {
+            var elapsed = TimeSpan.FromMilliseconds(_settings.MonotonicClock() - startedMs);
+            _log.Warn($"initial gateway retries exhausted after {attempts} attempt(s) and {elapsed.TotalMilliseconds:F0} ms ({reason}): {failure.Message}");
         }
 
         /// <summary>

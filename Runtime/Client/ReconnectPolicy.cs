@@ -125,6 +125,11 @@ namespace Cuvara.Netcode.Client
         /// </remarks>
         public static bool IsPermanentFailure(Exception failure)
         {
+            if (failure is TlsPinMismatchException)
+            {
+                return true;
+            }
+
             if (failure is NetworkException ex)
             {
                 return IsPermanentServerError(ex.ServerError);
@@ -134,6 +139,12 @@ namespace Cuvara.Netcode.Client
             // refused, no session). Retrying the network hop cannot fix a missing
             // credential; the caller has to re-login.
             return failure is InvalidOperationException;
+        }
+
+        /// <summary>Whether an initial gateway connect failure may succeed on a fresh connection.</summary>
+        public static bool ShouldRetryInitialConnect(Exception failure)
+        {
+            return failure != null && !IsPermanentFailure(failure);
         }
 
         /// <summary>The server error strings after which a reconnect is pointless.</summary>

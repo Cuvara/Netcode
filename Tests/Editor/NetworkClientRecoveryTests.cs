@@ -42,10 +42,15 @@ namespace Cuvara.Netcode.Tests.Editor
         private sealed class RespondingTransport : ITransport
         {
             private readonly Func<byte, List<byte[]>> _respond;
+            private readonly Exception _connectFailure;
             private readonly Queue<byte[]> _inbound = new Queue<byte[]>();
             private UniTaskCompletionSource<byte[]> _parked;
 
-            public RespondingTransport(Func<byte, List<byte[]>> respond) => _respond = respond;
+            public RespondingTransport(Func<byte, List<byte[]>> respond, Exception connectFailure = null)
+            {
+                _respond = respond;
+                _connectFailure = connectFailure;
+            }
 
             public string RemoteEndPoint => "scripted";
             public bool IsConnected => !Closed;
@@ -57,7 +62,12 @@ namespace Cuvara.Netcode.Tests.Editor
             public bool Hold;
             private readonly Queue<byte[]> _held = new Queue<byte[]>();
 
-            public UniTask ConnectAsync(string host, int port, CancellationToken ct) => UniTask.CompletedTask;
+            public UniTask ConnectAsync(string host, int port, CancellationToken ct)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_connectFailure != null) throw _connectFailure;
+                return UniTask.CompletedTask;
+            }
 
             public UniTask<byte[]> ReadFrameAsync(CancellationToken ct)
             {
@@ -145,6 +155,12 @@ namespace Cuvara.Netcode.Tests.Editor
             public ScriptedFactory Then(Func<byte, List<byte[]>> responder)
             {
                 _script.Add(() => new RespondingTransport(responder));
+                return this;
+            }
+
+            public ScriptedFactory ThenConnectFailure(Exception failure)
+            {
+                _script.Add(() => new RespondingTransport(null, failure));
                 return this;
             }
 
@@ -556,6 +572,150 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(client.State, Is.EqualTo(NetworkClientState.Ended));
             Assert.That(factory.Created.Count, Is.EqualTo(3));
             client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator InitialGatewayTransportRefusal_RetriesWithBackoff_AndConnects()
+        {
+            var factory = new ScriptedFactory()
+                .ThenConnectFailure(new TransportException("connection refused"))
+                .Then(GatewayOk()).Then(GameServerJoinOk());
+            var delays = new List<TimeSpan>();
+            var settings = FastSettings();
+            settings.DelayScheduler = (delay, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                delays.Add(delay);
+                return UniTask.CompletedTask;
+            };
+            var log = new RecordingLog();
+            var client = new NetworkClient(settings, factory, new JsonWireCodec(), log, new CountingAuth());
+            var attempts = new List<int>();
+            var progress = new List<ReconnectionProgress>();
+            var progressStates = new List<NetworkClientState>();
+            client.ReconnectProgress += value => { progress.Add(value); progressStates.Add(client.State); };
+            client.ReconnectAttemptStarted += attempts.Add;
+
+            Exception failure = null;
+            var done = false;
+            Connect(client, "map_01").ContinueWith(ex => { failure = ex; done = true; }).Forget();
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
+
+            Assert.That(done, Is.True, log.ToString());
+            Assert.That(failure, Is.Null, failure?.ToString() + "\n" + log);
+            Assert.That(client.State, Is.EqualTo(NetworkClientState.InWorld));
+            Assert.That(factory.Created.Count, Is.EqualTo(3));
+            Assert.That(factory.Created[0].Disposed, Is.True);
+            Assert.That(delays, Is.EqualTo(new[] { TimeSpan.FromSeconds(1) }));
+            Assert.That(attempts, Is.EqualTo(new[] { 2 }));
+            Assert.That(progress, Has.Count.EqualTo(1));
+            Assert.That(progress[0].Attempt, Is.EqualTo(2));
+            Assert.That(progress[0].MaxAttempts, Is.EqualTo(settings.ReconnectAttempts));
+            Assert.That(progress[0].DelaySeconds, Is.EqualTo(1f));
+            Assert.That(progress[0].IsLastAttempt, Is.False);
+            Assert.That(progressStates, Is.EqualTo(new[] { NetworkClientState.Authenticating }));
+            client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator InitialGatewayAttemptCap_RethrowsFinalFailureAndLogsCountAndElapsed()
+        {
+            var failure = new TransportException("connection refused");
+            var factory = new ScriptedFactory()
+                .ThenConnectFailure(new TransportException("connection refused"))
+                .ThenConnectFailure(failure);
+            var settings = FastSettings();
+            settings.ReconnectAttempts = 2;
+            var log = new RecordingLog();
+            var client = new NetworkClient(settings, factory, new JsonWireCodec(), log, new CountingAuth());
+            Exception observed = null;
+            var done = false;
+            Connect(client, "map_01").ContinueWith(ex => { observed = ex; done = true; }).Forget();
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
+
+            Assert.That(done, Is.True, log.ToString());
+            Assert.That(observed, Is.SameAs(failure), "the final underlying exception is rethrown");
+            Assert.That(factory.Created.Count, Is.EqualTo(settings.ReconnectAttempts));
+            Assert.That(log.Lines.FindAll(line => line.Contains("initial gateway retries exhausted")), Has.Count.EqualTo(1));
+            Assert.That(log.ToString(), Does.Contain("2 attempt(s)"));
+            Assert.That(log.ToString(), Does.Contain("ms (attempt cap)"));
+            client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator InitialGatewayBudgetExhaustion_RethrowsFailureAndLogsElapsed()
+        {
+            var failure = new TransportException("connection refused");
+            var factory = new ScriptedFactory().ThenConnectFailure(failure);
+            var settings = FastSettings();
+            settings.ReconnectBudget = TimeSpan.FromMilliseconds(500);
+            var log = new RecordingLog();
+            var client = new NetworkClient(settings, factory, new JsonWireCodec(), log, new CountingAuth());
+            Exception observed = null;
+            var done = false;
+            Connect(client, "map_01").ContinueWith(ex => { observed = ex; done = true; }).Forget();
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
+
+            Assert.That(done, Is.True, log.ToString());
+            Assert.That(observed, Is.SameAs(failure));
+            Assert.That(factory.Created.Count, Is.EqualTo(1));
+            Assert.That(log.Lines.FindAll(line => line.Contains("initial gateway retries exhausted")), Has.Count.EqualTo(1));
+            Assert.That(log.ToString(), Does.Contain("1 attempt(s)"));
+            Assert.That(log.ToString(), Does.Contain("ms (budget)"));
+            client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator InitialGatewayPermanentAuthRefusal_DoesNotRetry()
+        {
+            var factory = new ScriptedFactory().Then(GatewayAuthRefuses("invalid token"));
+            var settings = FastSettings();
+            var delays = 0;
+            settings.DelayScheduler = (delay, ct) => { delays++; return UniTask.CompletedTask; };
+            var client = new NetworkClient(settings, factory, new JsonWireCodec(), new RecordingLog(), new CountingAuth());
+
+            Exception failure = null;
+            var done = false;
+            Connect(client, "map_01").ContinueWith(ex => { failure = ex; done = true; }).Forget();
+            for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
+
+            Assert.That(done, Is.True);
+            Assert.That(failure, Is.InstanceOf<NetworkException>());
+            Assert.That(((NetworkException)failure).ServerError, Is.EqualTo("invalid token"));
+            Assert.That(factory.Created.Count, Is.EqualTo(1));
+            Assert.That(delays, Is.Zero);
+            client.Dispose();
+        }
+
+        [UnityTest]
+        public IEnumerator InitialGatewayRetry_CancellationStopsBeforeNextDial()
+        {
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var factory = new ScriptedFactory()
+                    .ThenConnectFailure(new TransportException("connection refused"));
+                var settings = FastSettings();
+                settings.DelayScheduler = (delay, ct) =>
+                {
+                    cancellation.Cancel();
+                    ct.ThrowIfCancellationRequested();
+                    return UniTask.CompletedTask;
+                };
+                var client = new NetworkClient(settings, factory, new JsonWireCodec(), new RecordingLog(), new CountingAuth());
+
+                Exception failure = null;
+                var done = false;
+                Connect(client, "map_01", cancellation.Token)
+                    .ContinueWith(ex => { failure = ex; done = true; }).Forget();
+                for (var t = Deadline(); !done && DateTime.UtcNow < t;) yield return null;
+
+                Assert.That(done, Is.True);
+                Assert.That(failure, Is.InstanceOf<OperationCanceledException>());
+                Assert.That(factory.Created.Count, Is.EqualTo(1));
+                Assert.That(client.State, Is.EqualTo(NetworkClientState.Disconnected));
+                client.Dispose();
+            }
+            yield break;
         }
 
         [UnityTest]

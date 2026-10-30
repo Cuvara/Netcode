@@ -90,6 +90,37 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(ReconnectPolicy.IsPermanentServerError(null), Is.False);
         }
 
+        [TestCaseSource(nameof(InitialConnectRetryCases))]
+        public void InitialConnectRetry_UsesReconnectClassification(Exception failure, bool retry)
+        {
+            Assert.That(ReconnectPolicy.ShouldRetryInitialConnect(failure), Is.EqualTo(retry));
+        }
+
+        [Test]
+        public void TlsPinMismatch_IsPermanentForInitialConnectAndReconnect()
+        {
+            var failure = new Cuvara.Netcode.Transport.TlsPinMismatchException(
+                "pinned certificate mismatch", new System.Security.Authentication.AuthenticationException());
+
+            Assert.That(ReconnectPolicy.IsPermanentFailure(failure), Is.True);
+            Assert.That(ReconnectPolicy.ShouldRetryInitialConnect(failure), Is.False);
+        }
+
+        private static IEnumerable<TestCaseData> InitialConnectRetryCases()
+        {
+            yield return new TestCaseData(new Cuvara.Netcode.Transport.TransportException("refused"), true)
+                .SetName("InitialConnectRetry_TransportRefusalIsTransient");
+            yield return new TestCaseData(new Cuvara.Netcode.Transport.TlsPinMismatchException(
+                    "pinned certificate mismatch", new System.Security.Authentication.AuthenticationException()), false)
+                .SetName("InitialConnectRetry_TlsPinMismatchIsPermanent");
+            yield return new TestCaseData(new NetworkException("invalid token", "invalid token"), false)
+                .SetName("InitialConnectRetry_InvalidTokenIsPermanent");
+            yield return new TestCaseData(new NetworkException("version mismatch", KickReasons.ProtocolVersionMismatch), false)
+                .SetName("InitialConnectRetry_VersionMismatchIsPermanent");
+            yield return new TestCaseData(new OperationCanceledException(), true)
+                .SetName("InitialConnectRetry_UnclassifiedTimeoutIsTransient");
+        }
+
         [Test]
         public void TheBackoff_DoublesAndCaps()
         {

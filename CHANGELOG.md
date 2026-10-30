@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **A transient refusal on the initial gateway connection no longer ends login immediately.** The client retries the gateway authentication on a fresh connection with the existing reconnect backoff, attempt cap and budget; permanent auth and protocol-version refusals still fail immediately, and cancellation stops the retry.
+- **Pinned TLS certificate mismatches are permanent transport failures.** Initial-connect and session-reconnect loops surface the failure without spending the retry budget; platform certificate validation failures without a configured pin retain existing retry behavior.
+- **Exhausted first-connect retries are logged once with attempt count and elapsed time.** Retry progress events also describe first-connect retries while the client is Authenticating.
 - **A client that quits now tells the server it left (#182).** `WireConnection.LeaveAsync` writes the queued frames and the `disconnect` frame to the transport on the calling thread instead of queuing it for the write loop, which never runs again after `Application.Quit`. The leave and the write loop share a write gate, so a leave never writes while the loop is mid-write (the TCP gateway connection reuses one write buffer): it waits for that write, for at most 500 ms. `NetworkClient.Dispose` now leaves politely like `Disconnect` (it did not before). Without this, the server saw a KCP dead link and held the entity for its reconnect window. The wire format is unchanged. A client pin bump and the testlab S01 check (zero `dead_link` closes) remain.
 
 ### Changed

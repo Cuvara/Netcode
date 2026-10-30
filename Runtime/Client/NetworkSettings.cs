@@ -253,12 +253,14 @@ namespace Cuvara.Netcode.Client
         /// mobile disconnections (NAT expiry, Wi-Fi hand-off, app suspend). The
         /// first round is immediate; backoff starts from the second. Requires an
         /// <c>IAuthProvider</c>. Never applies to a user-initiated close, an
-        /// eviction, or a protocol fault — see <see cref="ReconnectPolicy"/>.
+        /// eviction, or a protocol fault — see <see cref="ReconnectPolicy"/>. This
+        /// setting controls session-loss reconnects only; it does not disable
+        /// bounded transient retries during a first connect.
         /// </summary>
         public bool ReconnectOnConnectionLoss { get; set; } = true;
 
         /// <summary>
-        /// Upper bound on reconnect rounds. <see cref="ReconnectBudget"/> is the
+        /// Upper bound on reconnect rounds and transient first-connect retries. <see cref="ReconnectBudget"/> is the
         /// bound that normally ends the loop; this one exists so a budget set very
         /// large cannot turn into an unbounded retry.
         /// </summary>
@@ -280,10 +282,11 @@ namespace Cuvara.Netcode.Client
         public TimeSpan ReconnectMaxDelay { get; set; } = TimeSpan.FromSeconds(8);
 
         /// <summary>
-        /// Total time the automatic reconnect may keep trying, measured from the
-        /// close. A round whose pause would end past the budget is not started;
+        /// Total time automatic reconnects or transient first-connect retries may
+        /// keep trying, measured from the start of the operation. A round whose pause would end past the budget is not started;
         /// <see cref="NetworkClient.ReconnectFailed"/> fires with a
-        /// <see cref="ReconnectExhaustedException"/> instead.
+        /// <see cref="ReconnectExhaustedException"/> instead. Initial-connect
+        /// retries rethrow the final underlying failure after logging the count and elapsed time.
         /// </summary>
         /// <remarks>
         /// 60 s. The game server holds a dropped player's entity for 30 s — but

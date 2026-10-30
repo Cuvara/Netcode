@@ -283,7 +283,10 @@ namespace Cuvara.Netcode.Transport
             // null, so the platform's own validation decides and nothing here can weaken
             // it -- there is no code path in this class that returns true for a
             // certificate the platform rejected.
-            RemoteCertificateValidationCallback validate = _tls.IsPinned ? PinValidator(_tls) : null;
+            var pinMismatch = false;
+            RemoteCertificateValidationCallback validate = _tls.IsPinned
+                ? PinValidator(_tls, () => pinMismatch = true)
+                : null;
 
             var ssl = new SslStream(client.GetStream(), false, validate);
             try
@@ -304,11 +307,18 @@ namespace Cuvara.Netcode.Transport
             {
                 ssl.Dispose();
                 client.Close();
-                var why = _tls.IsPinned
+                var why = pinMismatch
                     ? "the server did not present the pinned certificate"
-                    : "the server certificate was refused by platform validation";
-                throw new TransportException(
-                    $"TLS handshake with {targetHost} failed: {why} ({ex.GetType().Name}: {ex.Message})", ex);
+                    : _tls.IsPinned
+                        ? "the TLS handshake failed while certificate pinning was enabled"
+                        : "the server certificate was refused by platform validation";
+                var message = $"TLS handshake with {targetHost} failed: {why} ({ex.GetType().Name}: {ex.Message})";
+                if (pinMismatch)
+                {
+                    throw new TlsPinMismatchException(message, ex);
+                }
+
+                throw new TransportException(message, ex);
             }
 
             _stream = ssl;
@@ -316,10 +326,11 @@ namespace Cuvara.Netcode.Transport
         }
 
         /// <summary>
-        /// Builds the pin check. Static-shaped on purpose: it closes over the options and
-        /// nothing else, so it cannot be influenced by transport state at handshake time.
+        /// Builds the pin check. Static-shaped on purpose: it closes over the options and the
+        /// mismatch callback only, so it cannot be influenced by transport state at handshake
+        /// time. The callback runs on the reject paths alone and never changes the verdict.
         /// </summary>
-        private static RemoteCertificateValidationCallback PinValidator(TlsOptions tls)
+        private static RemoteCertificateValidationCallback PinValidator(TlsOptions tls, Action onMismatch)
         {
             var pinned = tls.PinnedCertificate;
             return (sender, certificate, chain, errors) =>
@@ -330,12 +341,14 @@ namespace Cuvara.Netcode.Transport
                 // without the matching private key, whatever the chain says.
                 if (certificate == null)
                 {
+                    onMismatch();
                     return false;
                 }
 
                 var presented = certificate.GetRawCertData();
                 if (presented == null || presented.Length != pinned.Length)
                 {
+                    onMismatch();
                     return false;
                 }
 
@@ -345,7 +358,13 @@ namespace Cuvara.Netcode.Transport
                     diff |= presented[i] ^ pinned[i];
                 }
 
-                return diff == 0;
+                if (diff != 0)
+                {
+                    onMismatch();
+                    return false;
+                }
+
+                return true;
             };
         }
 
