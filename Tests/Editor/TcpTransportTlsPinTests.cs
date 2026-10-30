@@ -255,7 +255,13 @@ namespace Cuvara.Netcode.Tests.Editor
         private sealed class PoolContext : SynchronizationContext
         {
             public override void Post(SendOrPostCallback d, object state)
-                => ThreadPool.QueueUserWorkItem(_ => d(state));
+                => ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    // Pool threads start without a context; later awaits in the same flow
+                    // need this one to be current again.
+                    SetSynchronizationContext(this);
+                    d(state);
+                });
         }
 
         private static string Describe(Exception ex)
