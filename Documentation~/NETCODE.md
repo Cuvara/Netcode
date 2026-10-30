@@ -705,11 +705,16 @@ call.
 first world entry (including a map transfer), a failed gateway dial or
 authentication classified as transient by `ReconnectPolicy.IsPermanentFailure`
 gets a fresh gateway connection and the same bounded exponential backoff, jitter,
-attempt cap and budget above. `ReconnectProgress` and
+attempt cap and budget above. With defaults, a fast refusal can keep login in
+`Authenticating` for about one minute before failure. `ReconnectProgress` and
 `ReconnectAttemptStarted` report these retries, and a warning log records each
-failed attempt. Permanent auth refusals and protocol-version mismatches fail
-immediately; cancellation stops the delay or connection attempt promptly. The
-client remains in `Authenticating` while it waits.
+failed attempt; exhaustion is logged once with the final attempt count and elapsed
+time. Permanent auth refusals, protocol-version mismatches and pinned TLS
+certificate mismatches fail immediately; cancellation stops the delay or
+connection attempt promptly. `ReconnectOnConnectionLoss = false` only disables
+session-loss reconnects and does not disable these first-connect retries. The
+client remains in `Authenticating` while it waits, so consumers can display retry
+progress during the initial login.
 
 **Stopping early.** A round that fails with one of the servers' *permanent*
 answers ends the loop at once, so the real error surfaces instead of 60 s of
@@ -737,9 +742,11 @@ and, if the hold has expired, joins a body rebuilt from persisted state.
 
 **Progress.** `ReconnectProgress(ReconnectionProgress)` fires when a round is
 scheduled (attempt, cap, pause in seconds), `ReconnectAttemptStarted(int)` when
-its pause ends, `Reconnected` on landing. `State` is `Reconnecting` during the
-pauses and walks `Authenticating → Assigning → Joining` during each round;
-`IsReconnecting` is true for the whole loop.
+its pause ends, `Reconnected` on landing. These first two events also fire for
+first-connect retries (including direct-JWT connects without an auth provider);
+the client remains `Authenticating` during those pauses. During session recovery,
+`State` is `Reconnecting` during pauses and walks `Authenticating → Assigning →
+Joining` during each round; `IsReconnecting` is true for the whole loop.
 
 Reconnect lifecycle callbacks are isolated per subscriber: a faulty progress,
 attempt-start or reconnected handler is logged and cannot turn a successful join

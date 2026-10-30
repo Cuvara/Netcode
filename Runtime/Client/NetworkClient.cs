@@ -122,17 +122,17 @@ namespace Cuvara.Netcode.Client
         public event Action<Protocol.Messages.ServerPush> ServerPushReceived;
 
         /// <summary>
-        /// Raised before each automatic reconnect round (1-based attempt number),
-        /// after its backoff pause. Fires only when the policy chose to reconnect
-        /// (see <see cref="ReconnectPolicy"/>) and an <c>IAuthProvider</c> is
-        /// registered.
+        /// Raised before each retry round (1-based attempt number), after its
+        /// backoff pause. Fires for automatic reconnects and transient first-connect
+        /// retries, including connects supplied with a JWT directly.
         /// </summary>
         public event Action<int> ReconnectAttemptStarted;
 
         /// <summary>
-        /// Raised when a reconnect round is scheduled, before its pause, with the
-        /// attempt number, the round cap and the pause length — what a
-        /// "Reconnecting… attempt 2/8 (next in 3 s)" overlay binds to.
+        /// Raised when a retry round is scheduled, before its pause, with the
+        /// attempt number, the round cap and the pause length. Fires for automatic
+        /// reconnects and transient first-connect retries while the client is
+        /// Authenticating, so an overlay can show retry progress.
         /// </summary>
         public event Action<ReconnectionProgress> ReconnectProgress;
 
@@ -625,8 +625,14 @@ namespace Cuvara.Netcode.Client
                     gateway.Dispose();
                     lastFailure = ex;
 
-                    if (inReconnect || !ReconnectPolicy.ShouldRetryInitialConnect(ex) || attempt >= maxAttempts)
+                    if (inReconnect || !ReconnectPolicy.ShouldRetryInitialConnect(ex))
                     {
+                        throw;
+                    }
+
+                    if (attempt >= maxAttempts)
+                    {
+                        LogInitialConnectExhausted(attempt, startedMs, ex, "attempt cap");
                         throw;
                     }
 
@@ -635,6 +641,7 @@ namespace Cuvara.Netcode.Client
                     var elapsedMs = _settings.MonotonicClock() - startedMs;
                     if (elapsedMs + (long)pause.TotalMilliseconds > _settings.ReconnectBudget.TotalMilliseconds)
                     {
+                        LogInitialConnectExhausted(attempt, startedMs, ex, "budget");
                         throw;
                     }
 
@@ -653,6 +660,12 @@ namespace Cuvara.Netcode.Client
             }
 
             throw lastFailure ?? new TransportException("initial gateway authentication failed");
+        }
+
+        private void LogInitialConnectExhausted(int attempts, long startedMs, Exception failure, string reason)
+        {
+            var elapsed = TimeSpan.FromMilliseconds(_settings.MonotonicClock() - startedMs);
+            _log.Warn($"initial gateway retries exhausted after {attempts} attempt(s) and {elapsed.TotalMilliseconds:F0} ms ({reason}): {failure.Message}");
         }
 
         /// <summary>

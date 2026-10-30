@@ -5,6 +5,8 @@
 ### Fixed
 
 - **A transient refusal on the initial gateway connection no longer ends login immediately.** The client retries the gateway authentication on a fresh connection with the existing reconnect backoff, attempt cap and budget; permanent auth and protocol-version refusals still fail immediately, and cancellation stops the retry.
+- **Pinned TLS certificate mismatches are permanent transport failures.** Initial-connect and session-reconnect loops surface the failure without spending the retry budget; platform certificate validation failures without a configured pin retain existing retry behavior.
+- **Exhausted first-connect retries are logged once with attempt count and elapsed time.** Retry progress events also describe first-connect retries while the client is Authenticating.
 
 ### Changed
 

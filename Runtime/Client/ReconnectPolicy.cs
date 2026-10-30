@@ -125,6 +125,11 @@ namespace Cuvara.Netcode.Client
         /// </remarks>
         public static bool IsPermanentFailure(Exception failure)
         {
+            if (failure is TlsPinMismatchException)
+            {
+                return true;
+            }
+
             if (failure is NetworkException ex)
             {
                 return IsPermanentServerError(ex.ServerError);
