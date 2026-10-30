@@ -726,6 +726,7 @@ identical refusals (`ReconnectPolicy.IsPermanentFailure`):
 | `invalid auth request` | gateway `auth_resp` | malformed auth frame: a client bug |
 | `map is not available` | gateway `enter_world_resp` | no fleet hosts the map |
 | any `InvalidOperationException` from the provider | `IAuthProvider` | no credential could be produced (Nakama refused, RPC returned no token) |
+| `TlsPinMismatchException` | `TcpTransport` TLS handshake | the gateway presented a certificate that does not match the configured pin; retrying cannot change it |
 
 Everything else — `session expired`, `rate limited`, `not authenticated`,
 `server is starting, retry shortly`, `no server available for map`,

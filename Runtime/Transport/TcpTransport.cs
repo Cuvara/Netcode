@@ -326,8 +326,9 @@ namespace Cuvara.Netcode.Transport
         }
 
         /// <summary>
-        /// Builds the pin check. Static-shaped on purpose: it closes over the options and
-        /// nothing else, so it cannot be influenced by transport state at handshake time.
+        /// Builds the pin check. Static-shaped on purpose: it closes over the options and the
+        /// mismatch callback only, so it cannot be influenced by transport state at handshake
+        /// time. The callback runs on the reject paths alone and never changes the verdict.
         /// </summary>
         private static RemoteCertificateValidationCallback PinValidator(TlsOptions tls, Action onMismatch)
         {
