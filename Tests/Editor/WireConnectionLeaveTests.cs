@@ -162,6 +162,59 @@ namespace Cuvara.Netcode.Tests.Editor
             Assert.That(conn.LeaveAcknowledged, Is.False);
         }
 
+        // Netcode #182: the player loop never runs again after Application.Quit. Plain [Test]s with
+        // no pump or yield: whatever is recorded here was written on the calling thread.
+
+        [Test]
+        public void ALeave_WritesTheDisconnect_BeforeItReturns_WithoutAnyPump()
+        {
+            var transport = new RecordingTransport();
+            var conn = Started(transport);
+
+            conn.Leave("bye");
+
+            Assert.That(transport.Events, Does.Contain("write:" + MsgType.Disconnect),
+                "the disconnect is on the transport synchronously, not queued for the write loop");
+        }
+
+        [Test]
+        public void ALeave_FlushesInTheSameCall_WithoutAnyPump()
+        {
+            var transport = new FlushingTransport();
+            var conn = Started(transport);
+
+            conn.Leave("bye");
+
+            Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "flush" }),
+                "written, and the acknowledgement wait has begun, all before the first suspension");
+        }
+
+        [Test]
+        public void FramesQueuedBeforeTheLeave_AreWrittenFirst_WithoutAnyPump()
+        {
+            var transport = new RecordingTransport();
+            var conn = Started(transport);
+
+            conn.Send(MsgType.Resync, new ResyncRequest());
+            conn.Leave("bye");
+            conn.Send(MsgType.Resync, new ResyncRequest()); // after the goodbye: dropped
+
+            Assert.That(transport.Events,
+                Is.EqualTo(new[] { "write:" + MsgType.Resync, "write:" + MsgType.Disconnect, "close" }));
+        }
+
+        [Test]
+        public void ASecondLeave_SendsNoSecondDisconnect()
+        {
+            var transport = new RecordingTransport();
+            var conn = Started(transport);
+
+            conn.Leave("bye");
+            conn.Leave("again");
+
+            Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "close" }));
+        }
+
         [Test]
         public void ALeaveBeforeStart_ClosesAtOnce()
         {
