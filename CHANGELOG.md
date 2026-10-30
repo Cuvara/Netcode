@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Test only: `TcpTransportTlsPinTests` run `TcpTransport` against an in-process loopback TLS server in the EditMode suite (#214), using fixed PKCS#12 test certificates because Unity Mono cannot load `CertificateRequest`. A wrong or truncated pin raises `TlsPinMismatchException`; a matching pin connects; a non-TLS peer, a reset during the handshake and an unpinned self-signed certificate raise the generic `TransportException`. No runtime change.
 - Run `SnapshotPipelineReuseTests` in the headless suite by compiling `Runtime/Codec` and generated protocol sources against the vendored Google.Protobuf assembly; document the pinned Shared.GameLogic path for local runs.
 - Test only: pin the prediction's behaviour under a server tick-rate step (`ServerTickRateStepTests`, harness `RateStep*` knobs). A +18% step for 6 s forces one clock jump and one hard snap of about 1.25 units. Steering has separate 0.5 tick-per-call proportional and integral caps; at 15 snapshots/s the integral cap is 7.5 ticks/s, not the total available correction. Chrony's maxslewrate applies to wall-clock adjustment and does not bound or validate the monotonic scheduler; a VM/host clock-correction cause remains a hypothesis. No runtime change.
 - Move the keyframe retry interval into `NetworkSettings` with its existing 2 second default, reject nonpositive values, and check expiry after handling a snapshot so a timely keyframe clears the latch before retry.
