@@ -17,8 +17,9 @@ using Cuvara.Netcode.Transport;
 namespace Cuvara.Netcode.Tests.Editor
 {
     /// <summary>
-    /// A graceful leave delivers its disconnect frame before the transport is closed: written by
-    /// the write loop, then flushed to an acknowledgement, then closed.
+    /// A graceful leave delivers its disconnect frame before the transport is closed: written
+    /// straight to the transport on the calling thread (after anything already in flight), then
+    /// flushed to an acknowledgement, then closed.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -49,7 +50,7 @@ namespace Cuvara.Netcode.Tests.Editor
             public UniTask ConnectAsync(string host, int port, CancellationToken ct) => UniTask.CompletedTask;
             public UniTask<byte[]> ReadFrameAsync(CancellationToken ct) => _parked.Task;
 
-            public UniTask WriteFrameAsync(byte[] body, CancellationToken ct)
+            public virtual UniTask WriteFrameAsync(byte[] body, CancellationToken ct)
             {
                 Events.Add("write:" + Codec.DecodeBody(body).Type);
                 return UniTask.CompletedTask;
@@ -213,6 +214,69 @@ namespace Cuvara.Netcode.Tests.Editor
             conn.Leave("again");
 
             Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Disconnect, "close" }));
+        }
+
+        /// <summary>
+        /// Holds the first write open until released, and counts writes in flight. TCP behaves so:
+        /// a write completes on a later player-loop frame, from one shared buffer.
+        /// </summary>
+        private sealed class SlowFirstWriteTransport : RecordingTransport
+        {
+            private readonly UniTaskCompletionSource _firstWrite = new UniTaskCompletionSource();
+            private bool _firstStarted;
+            public int InFlight;
+            public int MaxInFlight;
+
+            public bool FirstWriteStarted => _firstStarted;
+            public void CompleteFirstWrite() => _firstWrite.TrySetResult();
+
+            public override async UniTask WriteFrameAsync(byte[] body, CancellationToken ct)
+            {
+                Events.Add("write:" + Codec.DecodeBody(body).Type);
+                MaxInFlight = Math.Max(MaxInFlight, ++InFlight);
+                try
+                {
+                    if (!_firstStarted)
+                    {
+                        _firstStarted = true;
+                        await _firstWrite.Task;
+                    }
+                }
+                finally
+                {
+                    InFlight--;
+                }
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator ALeave_NeverWritesWhileTheWriteLoopIsMidWrite_AndTheDisconnectFollowsInOrder()
+        {
+            var transport = new SlowFirstWriteTransport();
+            var conn = Started(transport);
+
+            conn.Send(MsgType.Resync, new ResyncRequest());
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (!transport.FirstWriteStarted && deadline.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                yield return null;
+            }
+
+            Assert.That(transport.FirstWriteStarted, Is.True, "the write loop picked the frame up and is parked mid-write");
+
+            conn.Leave("bye");
+
+            Assert.That(transport.MaxInFlight, Is.EqualTo(1), "the leave must not start a second concurrent write");
+            Assert.That(transport.Events, Is.EqualTo(new[] { "write:" + MsgType.Resync }),
+                "the disconnect waits for the write in flight");
+
+            transport.CompleteFirstWrite();
+            yield return UntilClosed(transport);
+
+            TestContext.WriteLine(string.Join(" -> ", transport.Events));
+            Assert.That(transport.Events,
+                Is.EqualTo(new[] { "write:" + MsgType.Resync, "write:" + MsgType.Disconnect, "close" }));
+            Assert.That(transport.MaxInFlight, Is.EqualTo(1));
         }
 
         [Test]
