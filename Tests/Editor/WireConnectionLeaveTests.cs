@@ -200,7 +200,7 @@ namespace Cuvara.Netcode.Tests.Editor
             conn.Send(MsgType.Resync, new ResyncRequest()); // after the goodbye: dropped
 
             Assert.That(transport.Events,
-                Is.EqualTo(new[] { "write:" + MsgType.Resync, "write:" + MsgType.Disconnect }));
+                Is.EqualTo(new[] { "write:" + MsgType.Resync, "write:" + MsgType.Disconnect, "close" }));
         }
 
         [Test]
