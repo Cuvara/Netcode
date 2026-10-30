@@ -25,9 +25,9 @@ namespace Cuvara.Netcode.Tests.Editor
     /// possible man-in-the-middle forever or gives up on an ordinary network fault.
     /// </para>
     /// <para>
-    /// The connect runs on a thread-pool thread (no synchronization context), so waiting for
-    /// it from the test thread cannot deadlock against a continuation that wants the Unity
-    /// main thread. Every wait is bounded, every listener is disposed, and the port is
+    /// The connect runs on a thread-pool thread whose synchronization context posts back to the
+    /// pool, so waiting for it from the test thread cannot deadlock against a continuation
+    /// that wants the Unity main thread. Every wait is bounded, every listener is disposed, and the port is
     /// OS-assigned.
     /// </para>
     /// </remarks>
@@ -122,7 +122,7 @@ namespace Cuvara.Netcode.Tests.Editor
             var port = ((IPEndPoint)_listener.LocalEndpoint).Port;
             using (var transport = new TcpTransport(Pinned(_serverCert.RawData)))
             {
-                var task = Task.Run(() => transport.ConnectAsync("127.0.0.1", port, _cts.Token).AsTask());
+                var task = StartConnect(transport, port, _cts.Token);
                 Assert.That(task.Wait(Bound), Is.True, "connect did not finish within the bound");
                 Assert.That(task.IsFaulted, Is.False, task.Exception?.ToString());
                 Assert.That(transport.IsConnected, Is.True);
@@ -228,7 +228,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 timeout.CancelAfter(Bound);
 
                 // TargetHost drives SNI and name checks; the dial goes to the loopback address.
-                var task = Task.Run(() => transport.ConnectAsync("127.0.0.1", port, timeout.Token).AsTask());
+                var task = StartConnect(transport, port, timeout.Token);
 
                 // Bounded twice: the token ends the handshake, the wait ends the test.
                 Assert.That(task.Wait(Bound + TimeSpan.FromSeconds(5)), Is.True,
@@ -237,6 +237,25 @@ namespace Cuvara.Netcode.Tests.Editor
                     task.IsCanceled ? "connect timed out (cancelled)" : "connect unexpectedly succeeded");
                 return task.Exception.InnerException;
             }
+        }
+
+        /// <summary>
+        /// Runs the connect on a thread-pool thread with a context that posts continuations
+        /// back to the pool. <c>Task.AsUniTask()</c> needs a current SynchronizationContext
+        /// and, in the EditMode install-probe projects, the player loop is not driven, so
+        /// waiting on the Unity context would hang instead of failing.
+        /// </summary>
+        private static Task StartConnect(TcpTransport transport, int port, CancellationToken token)
+            => Task.Run(() =>
+            {
+                SynchronizationContext.SetSynchronizationContext(new PoolContext());
+                return transport.ConnectAsync("127.0.0.1", port, token).AsTask();
+            });
+
+        private sealed class PoolContext : SynchronizationContext
+        {
+            public override void Post(SendOrPostCallback d, object state)
+                => ThreadPool.QueueUserWorkItem(_ => d(state));
         }
 
         private static string Describe(Exception ex)
