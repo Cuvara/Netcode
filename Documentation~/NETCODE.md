@@ -701,6 +701,16 @@ provider with a cached, still-valid JWT answers without traffic; a cold re-auth
 is the provider's business. `NakamaAuthProvider` mints a fresh gateway token per
 call.
 
+**Initial gateway authentication also retries transient failures.** Before the
+first world entry (including a map transfer), a failed gateway dial or
+authentication classified as transient by `ReconnectPolicy.IsPermanentFailure`
+gets a fresh gateway connection and the same bounded exponential backoff, jitter,
+attempt cap and budget above. `ReconnectProgress` and
+`ReconnectAttemptStarted` report these retries, and a warning log records each
+failed attempt. Permanent auth refusals and protocol-version mismatches fail
+immediately; cancellation stops the delay or connection attempt promptly. The
+client remains in `Authenticating` while it waits.
+
 **Stopping early.** A round that fails with one of the servers' *permanent*
 answers ends the loop at once, so the real error surfaces instead of 60 s of
 identical refusals (`ReconnectPolicy.IsPermanentFailure`):

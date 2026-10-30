@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A transient refusal on the initial gateway connection no longer ends login immediately.** The client retries the gateway authentication on a fresh connection with the existing reconnect backoff, attempt cap and budget; permanent auth and protocol-version refusals still fail immediately, and cancellation stops the retry.
+
 ### Changed
 
 - Test only: pin the prediction's behaviour under a server tick-rate step (`ServerTickRateStepTests`, harness `RateStep*` knobs). A +18% step for 6 s forces one clock jump and one hard snap of about 1.25 units. Steering has separate 0.5 tick-per-call proportional and integral caps; at 15 snapshots/s the integral cap is 7.5 ticks/s, not the total available correction. Chrony's maxslewrate applies to wall-clock adjustment and does not bound or validate the monotonic scheduler; a VM/host clock-correction cause remains a hypothesis. No runtime change.

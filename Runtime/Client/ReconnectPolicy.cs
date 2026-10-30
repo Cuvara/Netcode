@@ -136,6 +136,12 @@ namespace Cuvara.Netcode.Client
             return failure is InvalidOperationException;
         }
 
+        /// <summary>Whether an initial gateway connect failure may succeed on a fresh connection.</summary>
+        public static bool ShouldRetryInitialConnect(Exception failure)
+        {
+            return failure != null && !IsPermanentFailure(failure);
+        }
+
         /// <summary>The server error strings after which a reconnect is pointless.</summary>
         public static bool IsPermanentServerError(string serverError)
         {
