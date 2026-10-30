@@ -3,7 +3,6 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
-using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,15 +46,15 @@ namespace Cuvara.Netcode.Tests.Editor
         [SetUp]
         public void SetUp()
         {
-            _serverCert = CreateSelfSigned(Host);
-            _otherCert = CreateSelfSigned(Host);
+            _serverCert = Load(TlsTestCertificates.ServerPfxBase64);
+            _otherCert = Load(TlsTestCertificates.OtherPfxBase64);
             _cts = new CancellationTokenSource();
         }
 
         [TearDown]
         public void TearDown()
         {
-            _cts.Cancel();
+            _cts?.Cancel();
             try
             {
                 _listener?.Stop();
@@ -75,9 +74,9 @@ namespace Cuvara.Netcode.Tests.Editor
                 // on the client.
             }
 
-            _cts.Dispose();
-            _serverCert.Dispose();
-            _otherCert.Dispose();
+            _cts?.Dispose();
+            _serverCert?.Dispose();
+            _otherCert?.Dispose();
         }
 
         // ---- (a) wrong pin ---------------------------------------------------------------
@@ -246,28 +245,7 @@ namespace Cuvara.Netcode.Tests.Editor
                 : ex.GetType().Name + ": " + ex.Message +
                   (ex.InnerException != null ? " <- " + ex.InnerException.GetType().Name : string.Empty);
 
-        /// <summary>
-        /// A fresh self-signed certificate with a private key, round-tripped through PFX so the
-        /// key is usable by the server-side SslStream on every platform's TLS stack.
-        /// </summary>
-        private static X509Certificate2 CreateSelfSigned(string dnsName)
-        {
-            using (var rsa = RSA.Create(2048))
-            {
-                var request = new CertificateRequest(
-                    "CN=" + dnsName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                var san = new SubjectAlternativeNameBuilder();
-                san.AddDnsName(dnsName);
-                request.CertificateExtensions.Add(san.Build());
-                request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
-                    new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, false));
-
-                using (var ephemeral = request.CreateSelfSigned(
-                           DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1)))
-                {
-                    return new X509Certificate2(ephemeral.Export(X509ContentType.Pfx));
-                }
-            }
-        }
+        private static X509Certificate2 Load(string pfxBase64)
+            => new X509Certificate2(Convert.FromBase64String(pfxBase64), string.Empty);
     }
 }
