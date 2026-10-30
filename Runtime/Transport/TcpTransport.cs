@@ -315,7 +315,7 @@ namespace Cuvara.Netcode.Transport
                 var message = $"TLS handshake with {targetHost} failed: {why} ({ex.GetType().Name}: {ex.Message})";
                 if (pinMismatch)
                 {
-                    throw new TlsPinMismatchException(message, ex);
+                    throw new TransportException(message, ex); // TEMP-MUTATION
                 }
 
                 throw new TransportException(message, ex);
