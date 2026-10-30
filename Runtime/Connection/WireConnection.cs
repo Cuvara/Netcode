@@ -328,9 +328,11 @@ namespace Cuvara.Netcode.Connection
 
         /// <summary>
         /// Sends a polite <c>disconnect</c> on the calling thread, waits until the transport has
-        /// delivered it, then closes. The frame is handed to the transport before the first
-        /// suspension, so it is on the wire when this returns its task even if the player loop
-        /// never runs again. The wait is bounded by the transport's own flush budget (KCP:
+        /// delivered it, then closes. When no transport write is in flight (always so for KCP,
+        /// whose writes complete synchronously) the frame is handed to the transport before the
+        /// first suspension, so it is on the wire when this returns its task even if the player
+        /// loop never runs again. Otherwise it first waits on the write gate for the in-flight
+        /// write (bounded by <c>LeaveWriteTimeoutMs</c>). The wait is bounded by the transport's own flush budget (KCP:
         /// <see cref="KcpClientSession.CloseFlushBudget"/>, at most 500 ms).
         /// </summary>
         /// <remarks>

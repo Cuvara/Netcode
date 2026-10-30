@@ -637,7 +637,10 @@ dead-link timeout, and held the entity until then (rpg-factory testlab S08G).
    pending. The leave takes the gate at once when no write is in flight (always so for KCP, whose
    writes complete synchronously) and otherwise waits for that write, then writes. If the
    transport cannot complete a write at once (TCP may not), the leave waits for its own write too.
-   Both waits together are bounded by `LeaveWriteTimeoutMs` (500 ms) each.
+   Each wait is bounded by `LeaveWriteTimeoutMs` (500 ms): one for the gate, then one per
+   frame written (each queued frame and the `disconnect`). When the gate is busy (TCP only),
+   the frame is not on the wire before the first suspension, so a goodbye on the gateway
+   connection can be lost if the process exits during that wait; the socket close follows.
 3. On a transport that implements `IFlushableTransport` (KCP), it waits until the peer has
    acknowledged the frame, for at most `KcpClientSession.CloseFlushBudget`. That budget is
    `min(max(2 x RTO, 100 ms), 500 ms)`: one lost datagram, its retransmission and the
