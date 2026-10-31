@@ -2,6 +2,8 @@
 
 ## [0.51.0] - 2026-10-31
 
+- **Compatibility:** no wire change (`WireProtocolVersion` stays 3); works with the same servers as 0.50.0. All public API changes are additive (`NetworkClient.GetDiagnostics()`, `NetworkClientDiagnostics`, `ITransportDecorator`, `NetworkClient.DecorateTransports`, public `KcpTransport` diagnostics); the `FailureClassifier` refactor is internal and keeps every retry and permanence decision unchanged.
+
 ### Added
 
 - **`NetworkClient.GetDiagnostics()` returns a `NetworkClientDiagnostics` struct**: state, generation, server protocol version, RTT, KCP RTO / silence / pending segments, datagrams received and rejected, frames and bytes in and out, send-queue drops, resync requests, stale and unresolved snapshots, pending commands and reconnect attempts. It allocates 0 B. Frame and byte counters, send-queue drops, resync requests and unresolved snapshots are new, cheap counters on `WireConnection` and `GameSessionClient`.
@@ -2934,7 +2936,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drop case that disqualified the obvious fix — kept precisely so the next candidate is measured
   against loss **before** it is believed rather than after.
 
-  **FIXED in `## [0.51.0] - 2026-10-31`, and corrected here in place rather than left standing, per the
+  **FIXED in `## [Unreleased]`, and corrected here in place rather than left standing, per the
   convention this file adopted one entry above.** The two pinned readings did their job: the next
   attempt had to come past them and one of them killed a candidate. What did *not* survive contact
   is the recommendation recorded in the paragraph above — *"a robust statistic over a ring of
@@ -2952,7 +2954,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the arrival jitter that gap is absent and the old minimum reads **strict** — 122.222 ms at one
   snapshot in two, 72.222 at one in four, against 66.667. That is a property of the arrivals, not
   of the statistic, and it applies to the minimum described here exactly as it applies to what
-  replaced it. See the `Limitations` entry under `## [0.51.0] - 2026-10-31`.
+  replaced it. See the `Limitations` entry under `## [Unreleased]`.
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
