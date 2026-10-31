@@ -35,6 +35,9 @@ namespace Cuvara.Netcode.Client
         private WireConnection _connection;
         private bool _awaitingKeyframe;
         private long _keyframeRequestedAtMs;
+        private long _resyncRequests;
+        private long _unresolvedSnapshots;
+        private long _snapshotsReceived;
 
         public GameSessionClient(NetworkSettings settings, ITransportFactory transports, IWireCodec codec, INetLog log)
         {
@@ -147,6 +150,33 @@ namespace Cuvara.Netcode.Client
         /// <summary>Frames decoded off the wire, of every type. Diagnostics only.</summary>
         public long FramesReceived => _connection?.FramesReceived ?? 0L;
 
+        /// <summary>Frame body bytes read since the join (see <see cref="WireConnection.BytesReceived"/>). 0 before a join.</summary>
+        public long BytesReceived => _connection?.BytesReceived ?? 0L;
+
+        /// <summary>Frames written to the transport since the join. 0 before a join.</summary>
+        public long FramesSent => _connection?.FramesSent ?? 0L;
+
+        /// <summary>Frame body bytes written since the join. 0 before a join.</summary>
+        public long BytesSent => _connection?.BytesSent ?? 0L;
+
+        /// <summary>Outbound frames discarded because the send queue was full. 0 before a join.</summary>
+        public long SendQueueDrops => _connection?.SendQueueDrops ?? 0L;
+
+        /// <summary>Resync (keyframe) requests actually sent, including timeout retries. Calls dropped while one is outstanding are not counted.</summary>
+        public long ResyncRequests => Interlocked.Read(ref _resyncRequests);
+
+        /// <summary>Snapshots discarded because they referenced an entity handle this client holds no binding for.</summary>
+        public long UnresolvedSnapshots => Interlocked.Read(ref _unresolvedSnapshots);
+
+        /// <summary>Snapshots that resolved and were raised through <see cref="SnapshotReceived"/>.</summary>
+        public long SnapshotsReceived => Interlocked.Read(ref _snapshotsReceived);
+
+        /// <summary>
+        /// The gameplay KCP transport of this session, or null before a join. Found through any
+        /// <see cref="ITransportDecorator"/> wrapping it, so a test wrapper does not hide it.
+        /// </summary>
+        public KcpTransport Kcp => TransportDecorators.Unwrap<KcpTransport>(_transport);
+
         public bool IsConnected => _connection != null && _connection.IsRunning;
 
         /// <summary>
@@ -154,13 +184,13 @@ namespace Cuvara.Netcode.Client
         /// or zero on any other transport. Sampled per frame, the difference is the datagrams read
         /// that frame. Diagnostics, for the test lab.
         /// </summary>
-        public long TransportDatagramsRead => (_transport as KcpTransport)?.DatagramsRead ?? 0L;
+        public long TransportDatagramsRead => Kcp?.DatagramsRead ?? 0L;
 
         /// <summary>Wakes of the gameplay transport's receive loop (<see cref="KcpTransport.ReceiveWakeups"/>).</summary>
-        public long TransportReceiveWakeups => (_transport as KcpTransport)?.ReceiveWakeups ?? 0L;
+        public long TransportReceiveWakeups => Kcp?.ReceiveWakeups ?? 0L;
 
         /// <summary>The most datagrams one receive wake has read (<see cref="KcpTransport.MaxDatagramsPerWake"/>).</summary>
-        public int TransportMaxDatagramsPerWake => (_transport as KcpTransport)?.MaxDatagramsPerWake ?? 0;
+        public int TransportMaxDatagramsPerWake => Kcp?.MaxDatagramsPerWake ?? 0;
 
         /// <summary>How the gameplay connection ended, once it has; null while it is up.</summary>
         public DisconnectInfo? CloseInfo => _connection?.CloseInfo;
@@ -177,7 +207,7 @@ namespace Cuvara.Netcode.Client
         internal string DescribeJoinTimeout(ITransport transport, NetworkEndpoint endpoint)
         {
             var seconds = _settings.ConnectTimeout.TotalSeconds;
-            if (transport is KcpTransport kcp && kcp.DatagramsReceived == 0)
+            if (TransportDecorators.Unwrap<KcpTransport>(transport) is KcpTransport kcp && kcp.DatagramsReceived == 0)
             {
                 return $"KCP/UDP connect timeout to {endpoint.Host}:{endpoint.Port} after {seconds:F0} s: " +
                        "no UDP datagram came back from the game server. Check the firewall and the UDP " +
@@ -617,6 +647,7 @@ namespace Cuvara.Netcode.Client
 
             _awaitingKeyframe = true;
             _keyframeRequestedAtMs = _settings.MonotonicClock();
+            Interlocked.Increment(ref _resyncRequests);
             _connection.Send(MsgType.Resync, new ResyncRequest());
         }
 
@@ -724,6 +755,7 @@ namespace Cuvara.Netcode.Client
                 // We hold no binding for a handle the server used, so we have lost
                 // state it assumed we had. Nothing from this snapshot is applied —
                 // guessing would attribute an update to the wrong entity.
+                Interlocked.Increment(ref _unresolvedSnapshots);
                 _log.Warn($"snapshot at tick {snapshot.Tick} referenced an unknown handle; requesting a keyframe");
                 RequestResync();
                 RetryKeyframeIfTimedOut();
@@ -747,6 +779,7 @@ namespace Cuvara.Netcode.Client
                 AckTick = resolved.AckTick;
             }
 
+            Interlocked.Increment(ref _snapshotsReceived);
             var handler = SnapshotReceived;
             InvokeSafely(handler, resolved, nameof(SnapshotReceived));
             RetryKeyframeIfTimedOut();

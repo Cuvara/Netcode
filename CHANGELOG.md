@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`NetworkClient.GetDiagnostics()` returns a `NetworkClientDiagnostics` struct**: state, generation, server protocol version, RTT, KCP RTO / silence / pending segments, datagrams received and rejected, frames and bytes in and out, send-queue drops, resync requests, stale and unresolved snapshots, pending commands and reconnect attempts. It allocates 0 B. Frame and byte counters, send-queue drops, resync requests and unresolved snapshots are new, cheap counters on `WireConnection` and `GameSessionClient`.
+- **`NetworkMetrics.Sample(in NetworkClientDiagnostics)`** feeds the existing `INetworkMetrics` from the same counters (decision: keep the types and feed them, so there is one surface). `INetworkMetrics` is unchanged.
+- **A supported test-tool hook**: `NetworkClient.DecorateTransports(...)` and `TransportFactory`, the `ITransportDecorator` interface with `TransportDecorators.Unwrap`, `GameSessionClient.Kcp`, and public `KcpTransport.RtoMs`, `AwakeSilentMs`, `SilenceFailures`, `PendingSendSegments`, `DatagramsRejected`. A transport wrapper that implements `ITransportDecorator` no longer hides the KCP diagnostics or the "no UDP datagram came back" join-timeout message. See `Documentation~/NETCODE.md` "Diagnostics". Additive; no wire change.
+
 ### Changed
+
+- **`NetworkMetrics.Sample` resets counter baselines when `NetworkClientDiagnostics.Generation` changes**, so the first sampled totals from a new session are counted in full even when they exceed the prior session's totals. Diagnostics remarks now consistently require main-thread reads.
 
 - Internal: one `FailureClassifier` (with an internal `FailureKind`) now holds every retry and permanence decision. `ReconnectPolicy` and the first-connect join loop (`NetworkClient.IsRetryable`) delegate to it and their duplicated string lists are gone. Behaviour is identical for every input, including NG-21: `map is not available` is still permanent for a reconnect but retried by the first-connect join loop (documented by a test; the fix is a separate change). No public API change.
 - `Documentation~/NETCODE.md` "Reconnect policy": `ReconnectAttempts` default is 12, not 8, and a `Kicked` with `no_sealed_session` reconnects (it is not an eviction).
