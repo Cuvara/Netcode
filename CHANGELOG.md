@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Internal: one `FailureClassifier` (with an internal `FailureKind`) now holds every retry and permanence decision. `ReconnectPolicy` and the first-connect join loop (`NetworkClient.IsRetryable`) delegate to it and their duplicated string lists are gone. Behaviour is identical for every input, including NG-21: `map is not available` is still permanent for a reconnect but retried by the first-connect join loop (documented by a test; the fix is a separate change). No public API change.
+- `Documentation~/NETCODE.md` "Reconnect policy": `ReconnectAttempts` default is 12, not 8, and a `Kicked` with `no_sealed_session` reconnects (it is not an eviction).
+
 ### Tests
 
+- Pin every retry and permanence decision as a table (`FailureDecisionBaselineTests`, `JoinRetryBaselineTests`, `FailureClassifierTests`), in the headless lane and the EditMode suite.
 - Replay the remaining client-executed golden vectors, `motor3d.json`, `projectile.json` and `snapshot_merger.json`, bit-for-bit against `CharacterMotor.Step`, `ProjectileLogic` and `SnapshotMerger` (`ClientExecutedGoldenVectorTests`), in both the EditMode suite and the headless .NET lane. `aoi.json` and `hitbox_rewind.json` stay excluded because only the server executes them. No runtime change.
 
 ## [0.50.0] - 2026-10-30

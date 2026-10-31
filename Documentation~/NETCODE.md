@@ -677,12 +677,15 @@ transient failure into a permanent one. `NetworkClient` retries that way, up to
 The game server holds a disconnected player's entity for **30 s** (API.md,
 "Heartbeat"), so a client that comes back inside that window lands in its own
 body. `ReconnectPolicy` decides, from how the gameplay socket ended, whether to
-use that window. The table is the contract; `ReconnectPolicyTests` pins it.
+use that window. The table is the contract; `ReconnectPolicyTests` and `ReconnectDecisionTableTests` pin it. The
+table itself lives in the internal `FailureClassifier`, which `ReconnectPolicy` and the first-connect
+join loop both ask.
 
 | Session close (`DisconnectCause` / reason) | Action | First try | Budget |
 |---|---|---|---|
 | `LocalClose` — `Disconnect()`, `Dispose()`, a transfer, a superseded operation | **Never** | — | — |
-| `Kicked` — `kick`+`disconnect`, any reason (`duplicate_login` today) | **Never**: the account is playing elsewhere; coming back would evict *that* login | — | — |
+| `Kicked` with `no_sealed_session` — a `require` server refusing a client that did not seal | **Reconnect at once**: a configuration answer, not an eviction; `NetworkClient` escalates `RequireSealedSession` before it reconnects | immediately | 60 s |
+| `Kicked` — `kick`+`disconnect`, any other reason (`duplicate_login` today) | **Never**: the account is playing elsewhere; coming back would evict *that* login | — | — |
 | `ServerDisconnect` with `server_shutdown` | **Reconnect after a pause**: a drain hits every client at once, an immediate retry is a storm at a gateway still allocating the replacement | after 1 s + jitter | 60 s |
 | `ServerDisconnect` with any other reason (`duplicate_login` from a pre-`kick` build, unknown) | **Never**: the server chose to end it | — | — |
 | `PeerClosed`, `HeartbeatTimeout`, `TransportError` — NAT expiry, Wi-Fi hand-off, app suspend, dead socket | **Reconnect at once**, then back off | immediately | 60 s |
@@ -690,14 +693,14 @@ use that window. The table is the contract; `ReconnectPolicyTests` pins it.
 | **Gateway** close, `Kicked` | Session untouched (ADR-3); `_evicted` set, so the game server's kick that follows (ADR-20) is terminal | — | — |
 | **Gateway** close, any other cause | Session untouched; **not retried in place** — see below | — | — |
 
-Toggles: `ReconnectOnServerShutdown` (row 3) and `ReconnectOnConnectionLoss`
-(row 5), both on by default. Both require an `IAuthProvider`; without one there
+Toggles: `ReconnectOnServerShutdown` (the `server_shutdown` row) and `ReconnectOnConnectionLoss`
+(the `PeerClosed` row), both on by default. Both require an `IAuthProvider`; without one there
 is no credential to come back with and the policy is never consulted.
 
 **Schedule.** Round pause = `min(ReconnectDelay × 2^(round−1), ReconnectMaxDelay)`
 + `[0, RetryJitter)`; defaults 1 s, 8 s, 500 ms → 1, 2, 4, 8, 8 … A round whose
 pause would end past `ReconnectBudget` (60 s from the close) is not started, and
-`ReconnectAttempts` (8) caps the count regardless. A round in flight when the
+`ReconnectAttempts` (12) caps the count regardless. A round in flight when the
 budget expires is allowed to finish — `ConnectTimeout` and `EnterWorldTimeout`
 bound it. Why 60 s and not "inside the 30 s hold": the hold is measured from when the
 *server* notices the drop. On a client-side loss the server's own 30 s heartbeat timeout
