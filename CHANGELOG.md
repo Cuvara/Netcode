@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.51.0] - 2026-10-31
 
 ### Added
 
@@ -2934,7 +2934,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drop case that disqualified the obvious fix — kept precisely so the next candidate is measured
   against loss **before** it is believed rather than after.
 
-  **FIXED in `## [Unreleased]`, and corrected here in place rather than left standing, per the
+  **FIXED in `## [0.51.0] - 2026-10-31`, and corrected here in place rather than left standing, per the
   convention this file adopted one entry above.** The two pinned readings did their job: the next
   attempt had to come past them and one of them killed a candidate. What did *not* survive contact
   is the recommendation recorded in the paragraph above — *"a robust statistic over a ring of
@@ -2952,7 +2952,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the arrival jitter that gap is absent and the old minimum reads **strict** — 122.222 ms at one
   snapshot in two, 72.222 at one in four, against 66.667. That is a property of the arrivals, not
   of the statistic, and it applies to the minimum described here exactly as it applies to what
-  replaced it. See the `Limitations` entry under `## [Unreleased]`.
+  replaced it. See the `Limitations` entry under `## [0.51.0] - 2026-10-31`.
 
 - **The acknowledgement floor requires at least three frames per snapshot, and below that no send
   cadence can supply it.** Acknowledgements are read on a render frame, so the wait term resolves
