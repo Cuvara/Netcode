@@ -203,12 +203,14 @@
   -->
   <ItemGroup>
     <Compile Include="../../Runtime/Client/ReconnectPolicy.cs" />
+    <Compile Include="../../Runtime/Client/FailureClassifier.cs" />
     <Compile Include="../../Runtime/Client/NetworkException.cs" />
     <Compile Include="../../Runtime/Client/SealedRefusalReason.cs" />
     <Compile Include="../../Runtime/Connection/DisconnectCause.cs" />
     <Compile Include="../../Runtime/Connection/DisconnectInfo.cs" />
     <Compile Include="../../Tests/Editor/ReconnectDecisionTableTests.cs" />
     <Compile Include="../../Tests/Editor/FailureDecisionBaselineTests.cs" />
+    <Compile Include="../../Tests/Editor/FailureClassifierTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

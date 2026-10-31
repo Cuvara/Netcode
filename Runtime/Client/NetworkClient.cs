@@ -709,23 +709,7 @@ namespace Cuvara.Netcode.Client
         /// </summary>
         internal static bool IsRetryable(NetworkException ex)
         {
-            switch (ex.ServerError)
-            {
-                // Preconditions the gateway answers via auth_resp (its exact
-                // strings): this connection will keep giving the same answer.
-                case "session expired":
-                case "rate limited":
-                // A version refusal from either hop. Not retryable by construction:
-                // the client would have to be a different build for the answer to
-                // change, so every retry is a guaranteed-identical refusal.
-                case KickReasons.ProtocolVersionMismatch:
-                // The assigned server advertised a gameplay transport other than KCP. The
-                // same gateway answers the same way every time; retrying only hides it.
-                case TransportKinds.UnsupportedGameplayTransport:
-                    return false;
-                default:
-                    return true;
-            }
+            return FailureClassifier.IsRetryableByJoinLoop(FailureClassifier.Classify(ex));
         }
 
         private void DropFailedSession(GameSessionClient session)

@@ -1,7 +1,5 @@
 using System;
 using Cuvara.Netcode.Connection;
-using Cuvara.Netcode.Protocol;
-using Cuvara.Netcode.Transport;
 
 namespace Cuvara.Netcode.Client
 {
@@ -59,57 +57,11 @@ namespace Cuvara.Netcode.Client
         /// </summary>
         public static ReconnectDecision ForSessionClose(DisconnectInfo info)
         {
-            switch (info.Cause)
-            {
-                case DisconnectCause.LocalClose:
-                    // Disconnect(), Dispose(), a transfer, or a superseded operation:
-                    // the close was this side's decision.
-                    return ReconnectDecision.Never;
-
-                case DisconnectCause.Kicked:
-                    // A server that requires a sealed session refuses a client that did
-                    // not seal, and says so. That refusal is a CONFIGURATION answer, not
-                    // an eviction: the account is not playing elsewhere, and the same
-                    // client sealing will be accepted. Retrying it is safe in the one
-                    // direction that matters -- the client can only end up MORE
-                    // protected, never less, because nothing here can turn sealing off.
-                    //
-                    // NetworkClient escalates RequireSealedSession before it reconnects;
-                    // see SealedRefusalReason. Without this, a client whose sealing flag
-                    // is off simply cannot play on a `require` server, and the operator
-                    // has to know to pass a flag.
-                    if (info.Reason == SealedRefusalReason.NoSealedSession)
-                    {
-                        return ReconnectDecision.Reconnect;
-                    }
-
-                    // Any other reason. duplicate_login today: the account is playing
-                    // elsewhere and coming back would evict THAT login.
-                    return ReconnectDecision.Never;
-
-                case DisconnectCause.ProtocolError:
-                    // We could not decode what the server sent. Reconnecting to the
-                    // same build would hit the same frame.
-                    return ReconnectDecision.Never;
-
-                case DisconnectCause.ServerDisconnect:
-                    // An unpaired disconnect{reason}. Only server_shutdown promises a
-                    // replacement is worth waiting for. duplicate_login here is an
-                    // eviction from a build that predates kick; anything unknown is
-                    // a server decision we do not second-guess.
-                    return info.Reason == KickReasons.ServerShutdown
-                        ? ReconnectDecision.ReconnectAfterDelay
-                        : ReconnectDecision.Never;
-
-                case DisconnectCause.PeerClosed:
-                case DisconnectCause.HeartbeatTimeout:
-                case DisconnectCause.TransportError:
-                    // Nobody chose this. The entity hold exists for exactly this case.
-                    return ReconnectDecision.Reconnect;
-
-                default:
-                    return ReconnectDecision.Never;
-            }
+            // The table lives in FailureClassifier. Two of its rows deserve a note here:
+            // a `no_sealed_session` kick is a configuration answer, not an eviction, so it
+            // reconnects (NetworkClient escalates RequireSealedSession first, see
+            // SealedRefusalReason); only `server_shutdown` earns the delayed first try.
+            return FailureClassifier.ReconnectDecisionFor(FailureClassifier.Classify(info));
         }
 
         /// <summary>
@@ -118,27 +70,12 @@ namespace Cuvara.Netcode.Client
         /// surface the real error instead of "could not join".
         /// </summary>
         /// <remarks>
-        /// The strings are the servers' own (gateway <c>server.go</c>, game server
-        /// <c>GameServer.cs</c>). Anything unrecognised is treated as transient:
-        /// wrongly retrying a terminal error costs the rest of the budget, wrongly
-        /// aborting a transient one costs the player their body.
+        /// Delegates to <see cref="FailureClassifier"/>, which holds the servers' own strings.
+        /// Anything unrecognised is treated as transient.
         /// </remarks>
         public static bool IsPermanentFailure(Exception failure)
         {
-            if (failure is TlsPinMismatchException)
-            {
-                return true;
-            }
-
-            if (failure is NetworkException ex)
-            {
-                return IsPermanentServerError(ex.ServerError);
-            }
-
-            // The auth provider could not produce a credential at all (Nakama
-            // refused, no session). Retrying the network hop cannot fix a missing
-            // credential; the caller has to re-login.
-            return failure is InvalidOperationException;
+            return FailureClassifier.IsPermanentForReconnect(FailureClassifier.Classify(failure));
         }
 
         /// <summary>Whether an initial gateway connect failure may succeed on a fresh connection.</summary>
@@ -150,30 +87,7 @@ namespace Cuvara.Netcode.Client
         /// <summary>The server error strings after which a reconnect is pointless.</summary>
         public static bool IsPermanentServerError(string serverError)
         {
-            switch (serverError)
-            {
-                // Gateway auth_resp: the JWT itself was refused. A fresh one from
-                // the same provider will be refused the same way.
-                case "invalid token":
-                case "invalid auth request":
-                // Gateway enter_world_resp: no fleet in this deployment hosts the
-                // map. Not "full" and not "starting" — it does not exist here.
-                case "map is not available":
-                // Either hop, refusing a client whose wire protocol version it cannot
-                // serve. This is the one failure in the set that no amount of time
-                // fixes: the client needs a different BUILD, not another attempt.
-                // Retrying spends the budget and then reports "could not join",
-                // burying the only message that said what was actually wrong.
-                case KickReasons.ProtocolVersionMismatch:
-                // enter_world_resp named a gameplay transport other than "kcp" (or none).
-                // Realtime gameplay is KCP/UDP only and there is no fallback, so every
-                // further round would be refused identically.
-                case TransportKinds.UnsupportedGameplayTransport:
-                    return true;
-
-                default:
-                    return false;
-            }
+            return FailureClassifier.IsPermanentForReconnect(FailureClassifier.ClassifyServerError(serverError));
         }
 
         /// <summary>
