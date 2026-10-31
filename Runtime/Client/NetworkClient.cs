@@ -707,7 +707,7 @@ namespace Cuvara.Netcode.Client
         /// costs a few seconds where wrongly aborting a transient one costs the
         /// connect.
         /// </summary>
-        private static bool IsRetryable(NetworkException ex)
+        internal static bool IsRetryable(NetworkException ex)
         {
             switch (ex.ServerError)
             {

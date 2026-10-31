@@ -208,6 +208,7 @@
     <Compile Include="../../Runtime/Connection/DisconnectCause.cs" />
     <Compile Include="../../Runtime/Connection/DisconnectInfo.cs" />
     <Compile Include="../../Tests/Editor/ReconnectDecisionTableTests.cs" />
+    <Compile Include="../../Tests/Editor/FailureDecisionBaselineTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
