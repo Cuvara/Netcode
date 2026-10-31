@@ -112,6 +112,15 @@
     <ProjectReference Include="$(SglDir)/Shared.GameLogic.csproj" />
   </ItemGroup>
 
+  <!-- ClientExecutedGoldenVectorTests replays motor3d, projectile and snapshot_merger from the
+       GoldenVectors folder of the same Shared.GameLogic checkout the project compiles against. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>SglGoldenVectors</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(SglDir)/GoldenVectors'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="../../Runtime/Prediction/LocalMovePredictor.cs" />
     <Compile Include="../../Runtime/Prediction/PredictionSettings.cs" />
@@ -162,6 +171,7 @@
     <Compile Include="../../Tests/Editor/PredictionHarness.cs" />
     <Compile Include="../../Tests/Editor/ServerTickRateStepTests.cs" />
     <Compile Include="../../Tests/Editor/PredictionSurfaceContractTests.cs" />
+    <Compile Include="../../Tests/Editor/ClientExecutedGoldenVectorTests.cs" />
   </ItemGroup>
 
   <!--

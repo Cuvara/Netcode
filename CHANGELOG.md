@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Tests
+
+- Replay the remaining client-executed golden vectors, `motor3d.json`, `projectile.json` and `snapshot_merger.json`, bit-for-bit against `CharacterMotor.Step`, `ProjectileLogic` and `SnapshotMerger` (`ClientExecutedGoldenVectorTests`), in both the EditMode suite and the headless .NET lane. `aoi.json` and `hitbox_rewind.json` stay excluded because only the server executes them. No runtime change.
+
 ## [0.50.0] - 2026-10-30
 
 - **Compatibility:** no wire change (`WireProtocolVersion` stays 3); works with the same servers as 0.49.0. `TransportException` is no longer sealed (source and binary compatible; `catch (TransportException)` also catches the new `TlsPinMismatchException`). `NetworkClient.Dispose()` now sends the polite leave that `Disconnect()` sends. The first gateway connect now retries transient failures for up to the reconnect budget (about 60 s by default) before failing; clients should show `ReconnectProgress` while Authenticating (IndieRPGMMOAdventure develop 98cc482 does).
