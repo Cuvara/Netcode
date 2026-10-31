@@ -2014,6 +2014,31 @@ bind open generic types and returns a null array instead of failing.
 
 Run them from the Test Runner (EditMode, assembly `NDC.Tests.EditMode`).
 
+### Which vector files the client replays
+
+`GoldenVectorTests` replays the planar four (`vec2`, `movement`, `combat`,
+`validation`). `ClientExecutedGoldenVectorTests` replays the three more files the
+client executes, through the entry points the runtime calls:
+
+| File | Replayed through | Runtime caller |
+|---|---|---|
+| `motor3d.json` | `CharacterMotor.Step` | `LocalMovePredictor` under protocol 3 |
+| `projectile.json` | `ProjectileLogic.Spawn`, `Step`, `SweepSphere`, `SegmentCapsuleHit` | `ProjectilePredictor` |
+| `snapshot_merger.json` | `SnapshotMerger.Apply`, `Reset` | `WorldState` |
+
+Not replayed: `aoi.json` (interest management) and `hitbox_rewind.json`
+(lag-compensated hit tests). Both run on the server only; the client never
+executes those code paths. Comparison rules match the server's replays: floats
+bit-for-bit, no tolerance, and an expectation the fixture does not state is not
+asserted.
+
+This file is Unity-free, so the headless project compiles it as well: the same
+cases run in EditMode and in `dotnet test`. It reads the fixtures with the
+package's own `JsonParser` instead of `JsonUtility`, because the merger fixture
+treats an absent field and an empty one differently (`"ownerId": ""` means
+"expected absent"). The headless project takes the fixture folder from its
+`SglDir` (`$(SglDir)/GoldenVectors`, passed as assembly metadata).
+
 ### The client and the server agree bit-for-bit (since `sgl-v0.1.2`)
 
 **95 of 95 EditMode tests pass.** (The Test Runner reports `TotalTests: 96`; 95
