@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.51.0] - 2026-10-31
+
+- **Compatibility:** no wire change (`WireProtocolVersion` stays 3); works with the same servers as 0.50.0. All public API changes are additive (`NetworkClient.GetDiagnostics()`, `NetworkClientDiagnostics`, `ITransportDecorator`, `NetworkClient.DecorateTransports`, public `KcpTransport` diagnostics); the `FailureClassifier` refactor is internal and keeps every retry and permanence decision unchanged.
 
 ### Added
 
