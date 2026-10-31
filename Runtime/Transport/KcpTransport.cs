@@ -97,6 +97,24 @@ namespace Cuvara.Netcode.Transport
         /// <summary>Why the session failed (idle timeout, dead link, overflow), or null.</summary>
         public string FailureReason => _session?.FailureReason;
 
+        /// <summary>Datagrams read and discarded (failed decryption or checksum). 0 without a session.</summary>
+        public long DatagramsRejected => _session?.DatagramsRejected ?? 0;
+
+        /// <summary>Current KCP retransmission timeout in milliseconds. 0 without a session.</summary>
+        public uint RtoMs => _session?.RtoMs ?? 0;
+
+        /// <summary>
+        /// Milliseconds of server silence counted so far while this client was running.
+        /// 0 without a session or while the link is healthy.
+        /// </summary>
+        public long AwakeSilentMs => _session?.AwakeSilentMs ?? 0;
+
+        /// <summary>Times the silence watchdog tripped on this session. 0 without a session.</summary>
+        public int SilenceFailures => _session?.SilenceFailures ?? 0;
+
+        /// <summary>KCP segments queued for send and not yet acknowledged. 0 without a session.</summary>
+        public int PendingSendSegments => _session?.PendingSendSegments ?? 0;
+
         /// <summary>
         /// Datagrams read off the socket, accepted or not. Sampled once per frame, the difference
         /// is the datagrams read that frame: a diagnostic for the test lab, because a receive path

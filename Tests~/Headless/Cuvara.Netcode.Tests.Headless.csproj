@@ -219,4 +219,14 @@
     <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
   </ItemGroup>
 
+  <!-- Diagnostics surface: the NetworkClientDiagnostics value and NetworkMetrics fed from it. -->
+  <ItemGroup>
+    <Compile Include="../../Runtime/Client/NetworkClientState.cs" />
+    <Compile Include="../../Runtime/Client/NetworkClientDiagnostics.cs" />
+    <Compile Include="../../Runtime/Diagnostics/INetworkMetrics.cs" />
+    <Compile Include="../../Runtime/Diagnostics/NetworkMetrics.cs" />
+    <Compile Include="../../Tests/Editor/NetworkClientDiagnosticsTests.cs" />
+    <Compile Include="../../Tests/Editor/NetworkMetricsTests.cs" />
+  </ItemGroup>
+
 </Project>

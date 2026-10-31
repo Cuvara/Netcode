@@ -54,7 +54,8 @@ namespace Cuvara.Netcode.Client
     public sealed class NetworkClient : IDisposable
     {
         private readonly NetworkSettings _settings;
-        private readonly ITransportFactory _transports;
+        private ITransportFactory _transports;
+        private int _reconnectAttempts;
         private readonly IWireCodec _codec;
         private readonly INetLog _log;
         private readonly IAuthProvider _auth;
@@ -303,6 +304,58 @@ namespace Cuvara.Netcode.Client
         /// so a "state went back to InWorld" can be told apart from "a new session started".
         /// </summary>
         public int Generation => _generation;
+
+        /// <summary>
+        /// Snapshot of every link counter the client keeps. Allocates nothing; call it from the
+        /// main thread as often as needed. Session-scoped fields are 0 without a session; see
+        /// <see cref="NetworkClientDiagnostics"/> for what each field counts.
+        /// </summary>
+        public NetworkClientDiagnostics GetDiagnostics()
+        {
+            var session = _session;
+            if (session == null)
+            {
+                return new NetworkClientDiagnostics(
+                    State, _generation, 0u, 0L, 0u, 0L, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                    World.StaleSnapshotsDropped, 0L, 0L, 0L, 0L, 0, _reconnectAttempts);
+            }
+
+            var kcp = session.Kcp;
+            return new NetworkClientDiagnostics(
+                State, _generation, session.ServerProtocolVersion, session.RoundTripMs,
+                kcp?.RtoMs ?? 0u, kcp?.AwakeSilentMs ?? 0L, kcp?.PendingSendSegments ?? 0,
+                kcp?.DatagramsReceived ?? 0L, kcp?.DatagramsRejected ?? 0L,
+                session.FramesReceived, session.FramesSent, session.BytesReceived, session.BytesSent,
+                session.SendQueueDrops, session.ResyncRequests, World.StaleSnapshotsDropped,
+                session.UnresolvedSnapshots, session.SnapshotsReceived, session.ServerTick, session.AckTick,
+                session.PendingCommandCount, _reconnectAttempts);
+        }
+
+        /// <summary>
+        /// The transport factory new connections are built from. Read-only view for tools that
+        /// want to wrap it; see <see cref="DecorateTransports"/>.
+        /// </summary>
+        public ITransportFactory TransportFactory => _transports;
+
+        /// <summary>
+        /// Replaces the transport factory with <c>decorator(current)</c>. Sessions created from
+        /// now on (the next join and every reconnect after it) use the result; an open session
+        /// is not touched. This is the supported hook for a test tap, a fault injector or a
+        /// byte counter: wrap the transports it creates and implement
+        /// <see cref="ITransportDecorator"/> (and <see cref="IFlushableTransport"/> if the inner
+        /// transport has it) so netcode's own diagnostics still see the transport underneath.
+        /// </summary>
+        /// <exception cref="ArgumentNullException">The decorator is null or returns null.</exception>
+        public void DecorateTransports(Func<ITransportFactory, ITransportFactory> decorator)
+        {
+            if (decorator == null)
+            {
+                throw new ArgumentNullException(nameof(decorator));
+            }
+
+            _transports = decorator(_transports)
+                ?? throw new ArgumentNullException(nameof(decorator), "the decorator returned null");
+        }
 
         // ─────────────────────────── public operations ───────────────────────────
 
@@ -662,6 +715,7 @@ namespace Cuvara.Netcode.Client
                     }
 
                     Guard(generation, ct);
+                    _reconnectAttempts++;
                     InvokeSafely(ReconnectAttemptStarted, attempt + 1, nameof(ReconnectAttemptStarted));
                 }
             }
@@ -896,6 +950,7 @@ namespace Cuvara.Netcode.Client
 
                     Guard(generation, ct);
                     attempts = attempt;
+                    _reconnectAttempts++;
                     InvokeSafely(ReconnectAttemptStarted, attempt, nameof(ReconnectAttemptStarted));
                     _log.Info($"reconnect attempt {attempt}/{maxAttempts} to '{mapId}'");
 

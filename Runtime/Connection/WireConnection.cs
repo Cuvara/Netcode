@@ -61,6 +61,12 @@ namespace Cuvara.Netcode.Connection
         private int _queueDepth;
         private int _started;
 
+        // Diagnostics counters. Written from the read and write loops, read from the main thread.
+        private long _bytesReceived;
+        private long _bytesSent;
+        private long _framesSent;
+        private long _sendQueueDrops;
+
         // Set once a graceful leave has begun: nothing may be queued after its disconnect frame.
         private int _leaving;
 
@@ -272,6 +278,7 @@ namespace Cuvara.Netcode.Connection
                 // signal count is left alone: a surplus permit only costs the write
                 // loop one empty pass.
                 Interlocked.Decrement(ref _queueDepth);
+                Interlocked.Increment(ref _sendQueueDrops);
                 _log.Warn($"{_name}: send queue full, dropped the oldest frame");
             }
 
@@ -426,6 +433,7 @@ namespace Cuvara.Netcode.Connection
             if (write.Status.IsCompleted())
             {
                 write.GetAwaiter().GetResult();
+                CountSent(body);
                 return true;
             }
 
@@ -433,7 +441,19 @@ namespace Cuvara.Netcode.Connection
             // Editor, where only the synchronization context is pumped.
             var task = write.AsTask();
             await Task.WhenAny(task, Task.Delay(LeaveWriteTimeoutMs, _cts.Token)).AsUniTask();
-            return task.Status == TaskStatus.RanToCompletion;
+            if (task.Status == TaskStatus.RanToCompletion)
+            {
+                CountSent(body);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void CountSent(byte[] body)
+        {
+            Interlocked.Increment(ref _framesSent);
+            Interlocked.Add(ref _bytesSent, body.Length);
         }
 
         public void Dispose()
@@ -471,6 +491,7 @@ namespace Cuvara.Netcode.Connection
                         return;
                     }
 
+                    Interlocked.Add(ref _bytesReceived, body.Length);
                     HandleFrame(DecodeInbound(body));
                 }
             }
@@ -509,6 +530,7 @@ namespace Cuvara.Netcode.Connection
 
                             Interlocked.Decrement(ref _queueDepth);
                             await _transport.WriteFrameAsync(body, token);
+                            CountSent(body);
                         }
                         finally
                         {
@@ -657,6 +679,28 @@ namespace Cuvara.Netcode.Connection
         /// send rate is not reading the socket fast enough.
         /// </remarks>
         public long FramesReceived { get; private set; }
+
+        /// <summary>
+        /// Bytes of frame bodies read from the transport since <see cref="Start"/>, as the
+        /// transport hands them up: after the transport's own decryption, before the sealed
+        /// session is opened. Excludes the 4-byte length prefix and any KCP/UDP headers.
+        /// </summary>
+        public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+
+        /// <summary>
+        /// Frames handed to the transport and completed since <see cref="Start"/>. A frame still
+        /// queued or dropped from a full queue is not counted.
+        /// </summary>
+        public long FramesSent => Interlocked.Read(ref _framesSent);
+
+        /// <summary>Bytes of frame bodies written, counted like <see cref="BytesReceived"/>.</summary>
+        public long BytesSent => Interlocked.Read(ref _bytesSent);
+
+        /// <summary>
+        /// Frames discarded because the send queue was full (the oldest frame is dropped).
+        /// Nonzero means the transport drains slower than the game queues input.
+        /// </summary>
+        public long SendQueueDrops => Interlocked.Read(ref _sendQueueDrops);
 
         private void HandleFrame(WireFrame frame)
         {

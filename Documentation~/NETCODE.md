@@ -620,6 +620,73 @@ silent half-open connection.
 - **Before any datagram has arrived:** the check is off. The join timeout and the 60 s idle
   timeout cover that phase.
 
+## Diagnostics: one stats struct, and a supported hook for test tooling
+
+`NetworkClient.GetDiagnostics()` returns a `NetworkClientDiagnostics` value: every counter the client
+keeps about its link, read in one call on the main thread, allocating nothing (a test pins 0 B).
+
+| Field | Meaning | 0 means |
+|---|---|---|
+| `State`, `Generation` | connection state; operation generation | `Disconnected` / no operation yet |
+| `ServerProtocolVersion` | wire version the game server announced at join | no session |
+| `RttMs` | last heartbeat round trip | no pong yet |
+| `KcpRtoMs`, `KcpSilenceMs`, `KcpPendingSendSegments` | KCP retransmission timeout, server silence counted so far, unacknowledged send segments | no KCP session, or healthy link |
+| `DatagramsReceived`, `DatagramsRejected` | UDP datagrams accepted; discarded (decrypt or checksum failure) | none yet |
+| `FramesReceived`, `FramesSent` | frames decoded (all types, heartbeats included); frames handed to the transport | none yet |
+| `BytesReceived`, `BytesSent` | frame **body** bytes, as the transport hands them up or takes them: after transport decryption, before the sealed session is opened; no length prefix, no KCP/UDP headers | none yet |
+| `SendQueueDrops` | outbound frames dropped because the send queue was full | none dropped |
+| `ResyncRequests` | resync (keyframe) requests actually sent, retries included | none sent |
+| `StaleSnapshotsDropped` | snapshots at or below the world's tick (`WorldState`) | none dropped |
+| `UnresolvedSnapshots` | snapshots refused for an unknown entity handle | none refused |
+| `SnapshotsReceived`, `ServerTick`, `AckTick` | snapshots raised; highest server tick and acknowledged input tick | no session |
+| `PendingCommands` | command-channel requests awaiting an answer | none pending |
+| `ReconnectAttempts` | attempts started over the client's life (each raise of `ReconnectAttemptStarted`) | never retried |
+
+Everything except `ReconnectAttempts` belongs to the **current** session and restarts from 0 after a
+reconnect (`Generation` changes); stale snapshots restart with the world, which is reset on every
+connect. `NetworkMetrics.Sample(in diagnostics)` turns the running totals into the windowed
+`INetworkMetrics` snapshot (bytes per second, snapshot rate, smoothed RTT and jitter), so there is
+one source of truth: call `GetDiagnostics()` and `Sample` every frame next to `Tick`.
+Reconciliation stays on `RecordReconciliation`.
+
+### Hooking a test tool in without reflection
+
+A test lab (frame tap, fault injector, byte counter) needs to put itself between the client and its
+transports. The supported way:
+
+```csharp
+client.DecorateTransports(inner => new TapFactory(inner));   // before the next join
+
+sealed class TappedTransport : ITransport, IFlushableTransport, ITransportDecorator
+{
+    public ITransport Inner { get; }            // lets netcode find the KcpTransport underneath
+    // ... forward every member to Inner; FlushAsync forwards to Inner as IFlushableTransport
+}
+```
+
+- `DecorateTransports` wraps the factory used for sessions created from then on (the next join and
+  every reconnect); an open session is left alone. `client.TransportFactory` reads the current one.
+- Implement `ITransportDecorator` on the wrapper. `GameSessionClient.Kcp`, the KCP fields of
+  `GetDiagnostics()` and the join-timeout message then keep working through the wrapper (before,
+  `_transport as KcpTransport` failed on a wrapper and read 0).
+- Implement `IFlushableTransport` and forward it, or a graceful leave loses its disconnect frame.
+- `KcpTransport` exposes `RtoMs`, `AwakeSilentMs`, `SilenceFailures`, `PendingSendSegments`,
+  `DatagramsRejected`, `DatagramsReceived` and `FailureReason` publicly; the internal
+  `KcpClientSession` no longer needs reading by reflection.
+
+The client TestLab (`FrameReadTap`, `KcpDiagnostics`) used four private accesses; each now has a
+supported replacement:
+
+| Private access today | Replacement |
+|---|---|
+| `NetworkClient`'s private `ITransportFactory` field, read and overwritten | `client.TransportFactory` / `client.DecorateTransports(...)` |
+| `KcpTransport`'s private `KcpClientSession` field (by type name) | `KcpTransport.RtoMs`, `AwakeSilentMs`, `SilenceFailures`, `PendingSendSegments`, `DatagramsRejected` |
+| `KcpClientSession.RtoMs`, `AwakeSilentMs`, `SilenceFailures`, `PendingSendSegments` read through `PropertyInfo` | the same four on `KcpTransport` (above) |
+| `_transport as KcpTransport` defeated by the wrapper (counters read 0) | `ITransportDecorator` on the wrapper; `GameSessionClient.Kcp` unwraps it |
+
+Bytes and the time of each frame read are still seen by wrapping `ReadFrameAsync`, which is a
+supported use of the decorator; the cumulative totals are also in `BytesReceived` / `FramesReceived`.
+
 ## Leaving: the disconnect frame is delivered (0.48.0)
 
 `WireConnection.Leave` used to queue the `disconnect` frame and close in the same call.
