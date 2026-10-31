@@ -19,7 +19,7 @@ namespace Cuvara.Netcode.Client
     /// the transport underneath is not a <c>KcpTransport</c> and no
     /// <c>ITransportDecorator</c> reveals one.
     /// </para>
-    /// <para>Read it on the main thread; the counters themselves are safe to read from any thread.</para>
+    /// <para>Read it on the main thread.</para>
     /// </remarks>
     public readonly struct NetworkClientDiagnostics
     {

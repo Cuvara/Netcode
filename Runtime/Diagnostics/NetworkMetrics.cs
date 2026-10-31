@@ -31,6 +31,8 @@ namespace Cuvara.Netcode.Diagnostics
         private long _prevBytesSent;
         private long _prevBytesReceived;
         private long _prevSnapshots;
+        private int _prevGeneration;
+        private bool _hasSampledGeneration;
 
         public event Action<NetworkMetricsSnapshot> Updated;
 
@@ -83,15 +85,24 @@ namespace Cuvara.Netcode.Diagnostics
         /// <summary>
         /// Feeds the metrics from <see cref="NetworkClient.GetDiagnostics"/>: round-trip time, bytes
         /// and snapshots since the previous call. Call it every frame or at any steady cadence,
-        /// together with <see cref="Tick"/>. A counter that went backwards (a new session started
-        /// counting from 0) is taken as all new. Reconciliation is not in the diagnostics and still
-        /// comes from <see cref="RecordReconciliation"/>.
+        /// together with <see cref="Tick"/>. A new generation or a counter that went backwards is
+        /// taken as a new session, so its current totals are all new. Reconciliation is not in the
+        /// diagnostics and still comes from <see cref="RecordReconciliation"/>.
         /// </summary>
         public void Sample(in NetworkClientDiagnostics diagnostics)
         {
             if (diagnostics.RttMs > 0L)
             {
                 RecordRtt(diagnostics.RttMs);
+            }
+
+            if (!_hasSampledGeneration || diagnostics.Generation != _prevGeneration)
+            {
+                _prevBytesSent = 0;
+                _prevBytesReceived = 0;
+                _prevSnapshots = 0;
+                _prevGeneration = diagnostics.Generation;
+                _hasSampledGeneration = true;
             }
 
             long sent = Delta(diagnostics.BytesSent, ref _prevBytesSent);
@@ -170,6 +181,8 @@ namespace Cuvara.Netcode.Diagnostics
             _prevBytesSent = 0;
             _prevBytesReceived = 0;
             _prevSnapshots = 0;
+            _prevGeneration = 0;
+            _hasSampledGeneration = false;
             _rttSeeded = false;
             _rttEma = 0f;
             _rttVar = 0f;

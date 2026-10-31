@@ -116,6 +116,20 @@ namespace Cuvara.Netcode.Tests.Editor
         }
 
         [Test]
+        public void Sample_NewGenerationCountsFullTotalsEvenWhenTheyExceedPreviousSession()
+        {
+            var metrics = new NetworkMetrics(1f);
+
+            metrics.Sample(With(bytesSent: 100, bytesReceived: 200, snapshots: 10, generation: 1));
+            metrics.Sample(With(bytesSent: 300, bytesReceived: 500, snapshots: 30, generation: 2));
+            metrics.Tick(1f);
+
+            Assert.That(metrics.Current.BytesSentPerSecond, Is.EqualTo(400f).Within(0.01f));
+            Assert.That(metrics.Current.BytesReceivedPerSecond, Is.EqualTo(700f).Within(0.01f));
+            Assert.That(metrics.Current.SnapshotRate, Is.EqualTo(40f).Within(0.01f));
+        }
+
+        [Test]
         public void Sample_WithNoRoundTripYet_DoesNotSeedRtt()
         {
             var metrics = new NetworkMetrics(1f);

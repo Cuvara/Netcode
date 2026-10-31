@@ -10,6 +10,8 @@
 
 ### Changed
 
+- **`NetworkMetrics.Sample` resets counter baselines when `NetworkClientDiagnostics.Generation` changes**, so the first sampled totals from a new session are counted in full even when they exceed the prior session's totals. Diagnostics remarks now consistently require main-thread reads.
+
 - Internal: one `FailureClassifier` (with an internal `FailureKind`) now holds every retry and permanence decision. `ReconnectPolicy` and the first-connect join loop (`NetworkClient.IsRetryable`) delegate to it and their duplicated string lists are gone. Behaviour is identical for every input, including NG-21: `map is not available` is still permanent for a reconnect but retried by the first-connect join loop (documented by a test; the fix is a separate change). No public API change.
 - `Documentation~/NETCODE.md` "Reconnect policy": `ReconnectAttempts` default is 12, not 8, and a `Kicked` with `no_sealed_session` reconnects (it is not an eviction).
 

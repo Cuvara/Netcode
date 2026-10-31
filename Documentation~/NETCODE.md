@@ -646,7 +646,9 @@ Everything except `ReconnectAttempts` belongs to the **current** session and res
 reconnect (`Generation` changes); stale snapshots restart with the world, which is reset on every
 connect. `NetworkMetrics.Sample(in diagnostics)` turns the running totals into the windowed
 `INetworkMetrics` snapshot (bytes per second, snapshot rate, smoothed RTT and jitter), so there is
-one source of truth: call `GetDiagnostics()` and `Sample` every frame next to `Tick`.
+one source of truth: call `GetDiagnostics()` and `Sample` every frame next to `Tick`. When
+`Generation` changes, `Sample` counts the current session totals in full, including when they exceed
+the previous session's last totals.
 Reconciliation stays on `RecordReconciliation`.
 
 ### Hooking a test tool in without reflection
